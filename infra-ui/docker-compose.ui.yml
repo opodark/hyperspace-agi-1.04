@@ -1,10 +1,22 @@
+# Questo file è mantenuto per compatibilità standalone.
+# La Open WebUI è ora integrata nel docker-compose.yml principale.
+# Usare questo file SOLO se si vuole avviare la WebUI separatamente
+# con Ollama già in esecuzione sull'host (non in Docker).
+
 version: "3.8"
 
 services:
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
+    container_name: hyperspace_open_webui_standalone
     ports:
       - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
     environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      WEBUI_SECRET_KEY: hyperspace-secret-change-me
     restart: always
+
+volumes:
+  open_webui_data:

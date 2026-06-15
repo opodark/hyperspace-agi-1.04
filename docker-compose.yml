@@ -4,6 +4,8 @@ version: '3.8'
 # HyperSpace AGI v1.01 — docker-compose
 # Ollama: auto-detect NVIDIA GPU, AMD ROCm, Intel Arc/iGPU,
 #         Vulkan, NPU (via env flag) — CPU fallback always on
+# Dashboard:   http://localhost:8085/dashboard
+# Open WebUI:  http://localhost:3000
 # ============================================================
 
 services:
@@ -29,7 +31,6 @@ services:
   #   AMD     → docker compose --profile amd up
   #   Intel   → docker compose --profile intel up
   #   Vulkan  → docker compose --profile vulkan up
-  # Puoi cumulare: --profile nvidia --profile vulkan
   # --------------------
 
   # CPU fallback — sempre attivo (nessun profilo richiesto)
@@ -41,7 +42,6 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     environment:
-      # Forza CPU threads (0 = auto)
       OLLAMA_NUM_THREADS: "0"
     restart: unless-stopped
     networks:
@@ -57,7 +57,7 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     environment:
-      OLLAMA_NUM_GPU: "999"          # usa tutte le GPU NVIDIA disponibili
+      OLLAMA_NUM_GPU: "999"
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
     deploy:
@@ -87,13 +87,13 @@ services:
       - video
       - render
     environment:
-      HSA_OVERRIDE_GFX_VERSION: "11.0.0"   # modifica per la tua GPU AMD (es. 10.3.0 per RX 6000)
+      HSA_OVERRIDE_GFX_VERSION: "11.0.0"
       OLLAMA_NUM_GPU: "999"
     restart: unless-stopped
     networks:
       - hyperspace
 
-  # Intel Arc / iGPU — via OpenCL / oneAPI (richiede intel-opencl-icd sull'host)
+  # Intel Arc / iGPU — via OpenCL / oneAPI
   ollama-intel:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_intel
@@ -109,14 +109,13 @@ services:
       - video
     environment:
       OLLAMA_NUM_GPU: "999"
-      # Intel Arc SYCL/oneAPI acceleration
       ZES_ENABLE_SYSMAN: "1"
       SYCL_CACHE_PERSISTENT: "1"
     restart: unless-stopped
     networks:
       - hyperspace
 
-  # Vulkan (fallback software Vulkan o GPU con driver Vulkan)
+  # Vulkan
   ollama-vulkan:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_vulkan
@@ -138,6 +137,27 @@ services:
       - hyperspace
 
   # --------------------
+  # OPEN WEBUI
+  # Interfaccia grafica per chattare con Ollama
+  # http://localhost:3000
+  # --------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: hyperspace_open_webui
+    depends_on:
+      - ollama
+    ports:
+      - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_SECRET_KEY: hyperspace-secret-change-me
+    networks:
+      - hyperspace
+    restart: unless-stopped
+
+  # --------------------
   # AUTHORITY
   # --------------------
   authority:
@@ -154,7 +174,7 @@ services:
     restart: unless-stopped
 
   # --------------------
-  # CONTROL PLANE  (espone dashboard su :8085/dashboard)
+  # CONTROL PLANE  (dashboard: http://localhost:8085/dashboard)
   # --------------------
   control-plane:
     build:
@@ -207,3 +227,4 @@ networks:
 
 volumes:
   ollama_data:
+  open_webui_data:

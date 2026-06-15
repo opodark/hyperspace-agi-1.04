@@ -2,7 +2,9 @@ version: '3.8'
 
 # ============================================================
 # HyperSpace AGI v1.01 — docker-compose FULL
-# 3 worker nodes + tutte le opzioni GPU
+# 3 worker nodes + tutte le opzioni GPU + Open WebUI
+# Dashboard:   http://localhost:8085/dashboard
+# Open WebUI:  http://localhost:3000
 # ============================================================
 
 services:
@@ -116,6 +118,24 @@ services:
     networks:
       - hyperspace
 
+  # ---------- OPEN WEBUI ----------
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: hyperspace_open_webui
+    depends_on:
+      - ollama
+    ports:
+      - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_SECRET_KEY: hyperspace-secret-change-me
+    networks:
+      - hyperspace
+    restart: unless-stopped
+
   # ---------- AUTHORITY ----------
 
   authority:
@@ -227,3 +247,4 @@ networks:
 
 volumes:
   ollama_data:
+  open_webui_data:
