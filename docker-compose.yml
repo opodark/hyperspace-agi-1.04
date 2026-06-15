@@ -1,0 +1,27 @@
+version: '3.9'
+
+services:
+
+  authority:
+    build: ./authority
+    container_name: authority
+    ports:
+      - "8080:8080"
+    networks:
+      - hyperspace
+
+  control-plane:
+    build: ./control-plane
+    container_name: control-plane
+    ports:
+      - "8085:8085"
+    depends_on:
+      - authority
+    networks:
+      - hyperspace
+    environment:
+      - AUTHORITY_URL=http://authority:8080
+
+networks:
+  hyperspace:
+    driver: bridge
