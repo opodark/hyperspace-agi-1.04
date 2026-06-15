@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+
   # --------------------
   # EVENT BUS
   # --------------------
@@ -9,6 +10,30 @@ services:
     container_name: hyperspace_nats
     ports:
       - "4222:4222"
+    networks:
+      - hyperspace
+
+  # --------------------
+  # OLLAMA — LLM locale
+  # --------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hyperspace_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - hyperspace
+    # Per GPU Nvidia: decommentare le righe seguenti
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
   # --------------------
   # AUTHORITY
@@ -24,6 +49,7 @@ services:
       PYTHONUNBUFFERED: "1"
     networks:
       - hyperspace
+    restart: unless-stopped
 
   # --------------------
   # CONTROL PLANE
@@ -42,6 +68,7 @@ services:
       PYTHONUNBUFFERED: "1"
     networks:
       - hyperspace
+    restart: unless-stopped
 
   # --------------------
   # WORKER NODE
@@ -53,14 +80,24 @@ services:
     container_name: hyperspace_worker_1
     depends_on:
       - nats
+      - authority
+      - ollama
     ports:
       - "8084:8084"
     environment:
       WORKER_ID: worker-1
+      WORKER_PORT: "8084"
+      AUTHORITY_URL: http://authority:8080
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: phi3
       PYTHONUNBUFFERED: "1"
     networks:
       - hyperspace
+    restart: unless-stopped
 
 networks:
   hyperspace:
     driver: bridge
+
+volumes:
+  ollama_data:
