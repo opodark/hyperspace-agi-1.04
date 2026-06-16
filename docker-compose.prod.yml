@@ -2,22 +2,21 @@ version: '3.8'
 
 # ============================================================
 # HyperSpace AGI v0.2 — Compose PRODUZIONE
-# Deploy: una istanza per macchina fisica/VM.
 #
-# Utilizzo:
-#   cp .env.example .env        # configura BOOT_PEERS e OLLAMA_URL
-#   docker compose -f docker-compose.prod.yml up -d
+# Ollama NON è incluso: deve girare sull'host (nativo).
+# Usa setup.sh / setup.ps1 per la configurazione guidata.
 #
-# BOOT_PEERS: indirizzi IP:porta degli altri nodi nella rete.
-#   Es: BOOT_PEERS=192.168.1.11:8084,192.168.1.12:8084
+# Backend supportati:
+#   Ollama nativo:   OLLAMA_URL=http://host.docker.internal:11434
+#   LM Studio:       OLLAMA_URL=http://host.docker.internal:1234
+#   Ollama Docker:   OLLAMA_URL=http://ollama:11434  (profile: with-ollama)
+#
+# Deploy: docker compose -f docker-compose.prod.yml up -d --build
 # ============================================================
 
 services:
 
   # ── Nodo HyperSpace ────────────────────────────────
-  # Un solo container per macchina.
-  # NODE_HOSTNAME: nome o IP pubblico di questa macchina.
-  # BOOT_PEERS: peers iniziali (IP:porta), separati da virgola.
   node:
     build:
       context: .
@@ -26,14 +25,15 @@ services:
     ports:
       - "8084:8084"
     volumes:
-      - ./data/node:/app/data     # identità ECDSA persistente
+      - ./data/node:/app/data
     environment:
       NODE_HOSTNAME: ${NODE_HOSTNAME:-localhost}
       NODE_PORT: "8084"
       DATA_DIR: /app/data
-      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
-      BOOT_PEERS: ${BOOT_PEERS:-}   # es: "192.168.1.11:8084,192.168.1.12:8084"
+      BOOT_PEERS: ${BOOT_PEERS:-}
+      AUTHORITY_ENABLED: "false"
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -41,24 +41,7 @@ services:
       - hyperspace
     restart: unless-stopped
 
-  # ── Ollama (CPU default) ────────────────────────────
-  ollama:
-    image: ollama/ollama:latest
-    container_name: hyperspace_ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      OLLAMA_NUM_THREADS: "0"
-    restart: unless-stopped
-    networks:
-      - hyperspace
-
-  # ── Control Plane + Dashboard ────────────────────────
-  # Opzionale: avvia solo sul nodo che vuoi usare come punto
-  # di monitoraggio. Non è necessario su ogni macchina.
-  # Commentalo su nodi puri (worker).
+  # ── Control Plane + Dashboard ──────────────────────
   control-plane:
     build:
       context: .
@@ -68,15 +51,28 @@ services:
     ports:
       - "8085:8085"
     environment:
-      PYTHONUNBUFFERED: "1"
-      # Elenco nodi da monitorare (questo nodo + eventuali peers noti)
-      NODE_ENDPOINTS: ${NODE_ENDPOINTS:-localhost:8084}
-      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      NODE_ENDPOINTS: ${NODE_ENDPOINTS:-node:8084}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
-      # Authority legacy — disabilitata in produzione
       AUTHORITY_ENABLED: "false"
+      PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace
+    restart: unless-stopped
+
+  # ── Ollama-in-Docker (OPZIONALE, legacy) ──────────────
+  # Abilitato solo con: --profile with-ollama
+  # Usato automaticamente dal setup.sh se scegli opzione 3.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hyperspace_ollama
+    profiles: ["with-ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
     networks:
       - hyperspace
     restart: unless-stopped
