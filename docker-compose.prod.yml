@@ -3,12 +3,35 @@ version: '3.8'
 # ============================================================
 # HyperSpace AGI v0.2 — Compose PRODUZIONE
 #
-# Ollama NON è incluso: deve girare sull'host (nativo).
-# Usa setup.sh / setup.ps1 per la configurazione guidata.
+# Ollama NON è incluso: deve girare sull'host (nativo o LM Studio).
+# Usa setup.sh per la configurazione guidata.
+#
+# Dashboard:   http://localhost:8085/dashboard
+# Open WebUI:  http://localhost:3000
+# Node API:    http://localhost:8084/status
 # ============================================================
 
 services:
 
+  # ── Open WebUI ───────────────────────────────────────────────
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: hyperspace_open_webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    environment:
+      # Punta a Ollama nativo sull'host
+      OLLAMA_BASE_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-change-me}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace
+    restart: unless-stopped
+
+  # ── Nodo agente locale ───────────────────────────────────────────
   node:
     build:
       context: .
@@ -24,6 +47,9 @@ services:
       DATA_DIR: /app/data
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      # Peer remoti (es. nodi Tailscale): usa IP host, NON Tailscale IP
+      # perché i container non vedono la VPN. Il traffico esce dall'host.
+      # Esempio: BOOT_PEERS=100.x.x.x:8084
       BOOT_PEERS: ${BOOT_PEERS:-}
       NODE_TIER: ${NODE_TIER:-leaf}
       VRAM_GB: ${VRAM_GB:-0.0}
@@ -31,10 +57,15 @@ services:
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Usa la rete dell'host per accedere a Tailscale e ai peer remoti
+    # NOTA: su macOS network_mode host non è supportato,
+    #       ma extra_hosts sopra è sufficiente perché Docker Desktop
+    #       gestisce il routing verso l'host nativamente.
     networks:
       - hyperspace
     restart: unless-stopped
 
+  # ── Control Plane + Dashboard ────────────────────────────────────
   control-plane:
     build:
       context: .
@@ -44,7 +75,13 @@ services:
     ports:
       - "8085:8085"
     environment:
-      # Punta al servizio 'node' dentro la rete Docker
+      # Nodo locale: usa nome servizio Docker
+      # Nodi remoti: usa IP Tailscale (es: 100.x.x.x:8084)
+      # I container raggiungono gli IP Tailscale tramite l'host
+      # grazie a extra_hosts host.docker.internal:host-gateway
+      # MA per Tailscale su Linux devi usare host-gateway IP diretto.
+      #
+      # Formato: NODE_ENDPOINTS=node:8084,100.x.x.x:8084
       NODE_ENDPOINTS: ${NODE_ENDPOINTS:-node:8084}
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
@@ -56,8 +93,7 @@ services:
       - hyperspace
     restart: unless-stopped
 
-  # Ollama-in-Docker opzionale (legacy)
-  # Abilitato solo con: --profile with-ollama
+  # ── Ollama-in-Docker (legacy, opzionale) ──────────────────────────
   ollama:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama
@@ -75,4 +111,5 @@ networks:
     driver: bridge
 
 volumes:
+  open_webui_data:
   ollama_data:
