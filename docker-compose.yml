@@ -36,7 +36,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
       interval: 15s
       timeout: 5s
-      retries: 3
+      retries: 5
+      start_period: 20s
 
   # ── Ollama (CPU default) ─────────────────────────────
   ollama:
@@ -146,7 +147,7 @@ services:
       - open_webui_data:/app/backend/data
     environment:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
-      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-change-me}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-key-32chars-ok!}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
