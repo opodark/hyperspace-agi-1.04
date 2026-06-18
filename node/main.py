@@ -1,6 +1,6 @@
 # node/main.py
 # HyperSpace AGI v1.02 — Unified Node
-# v1.02: middleware firma inter-nodo, /ollama/pull SSE, version bump
+# v1.02: middleware firma inter-nodo, /ollama/pull SSE, ollama-proxy, /memory
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
@@ -39,9 +39,10 @@ BOOT_PEERS          = [p.strip().rstrip("/") for p in os.getenv("BOOT_PEERS", ""
 CONTROL_PLANE_URL   = os.getenv("CONTROL_PLANE_URL", "").strip().rstrip("/")
 REGISTRY_URL        = os.getenv("REGISTRY_URL", "http://registry:8086").strip().rstrip("/")
 SIGN_REQUESTS       = os.getenv("SIGN_REQUESTS", "true").lower() == "true"
-# NODE_TIER dall'env: se impostato, usa quello come tier fisso (hub/root);
-# altrimenti calcola dinamicamente.
 _FORCED_TIER        = os.getenv("NODE_TIER", "").strip().lower()
+
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
 _boot_time = time.time()
 
@@ -58,7 +59,6 @@ def detect_vram_gb() -> float:
         return 0.0
 
 def calculate_tier(vram_gb: float, uptime_s: float, reputation: float = 0.5) -> str:
-    # Se NODE_TIER è forzato da env, rispettalo sempre
     if _FORCED_TIER in ("hub", "root", "leaf"):
         return _FORCED_TIER
     root_score = min(uptime_s / 604800, 1.0) * 25 + 0.5 * 35 + reputation * 40
@@ -70,6 +70,7 @@ VRAM_GB = detect_vram_gb()
 NODE_CAPABILITIES = ["execute"]
 if VRAM_GB > 0 or os.getenv("OLLAMA_URL"):
     NODE_CAPABILITIES.append("ollama")
+NODE_CAPABILITIES.append("ollama-proxy")
 
 _local_endpoint          = f"{NODE_HOSTNAME}:{NODE_PORT}"
 NODE_ADVERTISED_ENDPOINT = PUBLIC_ENDPOINT if PUBLIC_ENDPOINT else _local_endpoint
@@ -97,6 +98,18 @@ def prune_stale_peers(max_age_s: int = 60):
     for nid, p in list(_peers.items()):
         if now - p["last_seen"] > max_age_s:
             _peers[nid]["status"] = "stale"
+
+# ── MEMORIA COLLETTIVA (lettura) ───────────────────────────
+import json as _json
+from pathlib import Path
+
+_MEMORY_FILE = Path(DATA_DIR) / "memory.jsonl"
+
+def _read_memory(limit: int = 50) -> list:
+    if not _MEMORY_FILE.exists():
+        return []
+    lines = _MEMORY_FILE.read_text(encoding="utf-8").strip().splitlines()
+    return [_json.loads(l) for l in lines[-limit:] if l.strip()]
 
 # ── HELPERS ───────────────────────────────────────────────
 def build_signed_payload(data: dict) -> dict:
@@ -131,7 +144,7 @@ async def ollama_health() -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# ── REGISTRAZIONE AL REGISTRY ─────────────────────────────
+# ── REGISTRAZIONE ─────────────────────────────────────────
 async def register_to_registry():
     payload = {
         "node_id":        NODE_ID,
@@ -154,11 +167,10 @@ async def register_to_registry():
             if r.status_code in (200, 201):
                 print(f"[NODE:{NODE_ID[:10]}] registered to registry OK")
             else:
-                print(f"[NODE:{NODE_ID[:10]}] registry /register HTTP {r.status_code}: {r.text[:120]}")
+                print(f"[NODE:{NODE_ID[:10]}] registry /register HTTP {r.status_code}")
     except Exception as e:
         print(f"[NODE:{NODE_ID[:10]}] registry /register failed: {e}")
 
-# ── REGISTRAZIONE AL CONTROL-PLANE ────────────────────────
 async def register_to_control_plane():
     if not CONTROL_PLANE_URL:
         return
@@ -180,12 +192,10 @@ async def register_to_control_plane():
             r = await client.post(f"{CONTROL_PLANE_URL}/mesh/announce", json=payload, headers=hdrs)
             if r.status_code == 200:
                 print(f"[NODE:{NODE_ID[:10]}] registered to control-plane OK")
-            else:
-                print(f"[NODE:{NODE_ID[:10]}] control-plane announce HTTP {r.status_code}")
     except Exception as e:
         print(f"[NODE:{NODE_ID[:10]}] control-plane announce failed: {e}")
 
-# ── PEER DISCOVERY & HEARTBEAT ───────────────────────────
+# ── PEER DISCOVERY ────────────────────────────────────────
 async def announce_to_peer(endpoint: str):
     base_url = peer_to_url(endpoint)
     try:
@@ -197,8 +207,8 @@ async def announce_to_peer(endpoint: str):
             "version":      NODE_PROFILE["version"],
             "timestamp":    time.time(),
         })
-        import json as _json
-        body = _json.dumps(payload, sort_keys=True).encode()
+        import json as _j
+        body = _j.dumps(payload, sort_keys=True).encode()
         hdrs = _signed_headers(body)
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(f"{base_url}/announce", json=payload, headers=hdrs)
@@ -213,7 +223,6 @@ async def announce_to_peer(endpoint: str):
                     "tier":         data.get("tier", "leaf"),
                     "capabilities": data.get("capabilities", []),
                 })
-                print(f"[NODE:{NODE_ID[:10]}] announce ok -> {endpoint}")
     except Exception as e:
         print(f"[NODE:{NODE_ID[:10]}] announce failed -> {endpoint}: {e}")
 
@@ -230,7 +239,6 @@ def heartbeat_loop():
 
     while True:
         time.sleep(HEARTBEAT_EVERY)
-        # Aggiorna tier rispettando NODE_TIER forzato da env
         NODE_PROFILE["tier"] = calculate_tier(VRAM_GB, time.time() - _boot_time)
         prune_stale_peers()
 
@@ -251,11 +259,9 @@ async def startup_event():
     print(f"[NODE:{NODE_ID[:10]}] started v1.02.0")
     print(f"[NODE:{NODE_ID[:10]}] tier={NODE_PROFILE['tier']} (forced={_FORCED_TIER or 'no'})")
     print(f"[NODE:{NODE_ID[:10]}] advertised={NODE_ADVERTISED_ENDPOINT}")
-    print(f"[NODE:{NODE_ID[:10]}] sign_requests={SIGN_REQUESTS}")
-    if BOOT_PEERS:
-        print(f"[NODE:{NODE_ID[:10]}] boot_peers={BOOT_PEERS}")
+    print(f"[NODE:{NODE_ID[:10]}] ollama-proxy -> porta 11435 (punta WebUI qui)")
 
-# ── MIDDLEWARE: verifica firma sulle chiamate inter-nodo ─────────
+# ── MIDDLEWARE firma ───────────────────────────────────────
 SIGNED_PATHS = {"/announce", "/execute", "/peer/add", "/verify"}
 
 @app.middleware("http")
@@ -266,8 +272,7 @@ async def inter_node_auth(request: Request, call_next):
         if not verify_request_headers(hdrs, body):
             return Response(
                 content='{"error":"invalid or missing node signature"}',
-                status_code=401,
-                media_type="application/json",
+                status_code=401, media_type="application/json",
             )
         async def receive():
             return {"type": "http.request", "body": body}
@@ -278,18 +283,6 @@ async def inter_node_auth(request: Request, call_next):
 @app.get("/health")
 def health():
     return {"status": "ok", "node_id": NODE_ID, "tier": NODE_PROFILE["tier"], "version": NODE_PROFILE["version"]}
-
-@app.get("/identity")
-def get_identity():
-    return {
-        "node_id":      NODE_ID,
-        "public_key":   NODE_PUBKEY,
-        "tier":         NODE_PROFILE["tier"],
-        "version":      NODE_PROFILE["version"],
-        "capabilities": NODE_PROFILE["capabilities"],
-        "endpoint":     NODE_ADVERTISED_ENDPOINT,
-        "vram_gb":      VRAM_GB,
-    }
 
 @app.get("/status")
 def status():
@@ -305,6 +298,7 @@ def status():
         "uptime_s":     int(time.time() - _boot_time),
         "peers_active": len([p for p in _peers.values() if p["status"] == "active"]),
         "peers_total":  len(_peers),
+        "memory_entries": len(_read_memory(9999)),
         "running":      True,
     }
 
@@ -325,6 +319,33 @@ def get_peers():
             }
             for p in _peers.values()
         ]
+    }
+
+@app.get("/memory")
+def get_memory(limit: int = 50):
+    """Ultime interazioni reali dalla WebUI (memoria collettiva)."""
+    return {"node_id": NODE_ID, "entries": _read_memory(limit)}
+
+@app.post("/memory/push")
+async def receive_memory(payload: dict):
+    """Riceve una memory entry da un peer."""
+    entry = payload.get("entry", {})
+    if entry and entry.get("node_id") != NODE_ID:
+        entry["_received_from"] = payload.get("node_id", "unknown")
+        with _MEMORY_FILE.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+    return {"ok": True}
+
+@app.get("/identity")
+def get_identity():
+    return {
+        "node_id":      NODE_ID,
+        "public_key":   NODE_PUBKEY,
+        "tier":         NODE_PROFILE["tier"],
+        "version":      NODE_PROFILE["version"],
+        "capabilities": NODE_PROFILE["capabilities"],
+        "endpoint":     NODE_ADVERTISED_ENDPOINT,
+        "vram_gb":      VRAM_GB,
     }
 
 @app.post("/announce")
@@ -362,7 +383,6 @@ async def execute_task(task: dict):
     task_id = task.get("task_id", "unknown")
     prompt  = task.get("prompt") or task.get("payload", {}).get("prompt") or f"Esegui task: {task_id}"
     model   = task.get("model") or task.get("payload", {}).get("model") or DEFAULT_MODEL
-    print(f"[NODE:{NODE_ID[:10]}] execute task={task_id} model={model}")
     response_text = await ollama_generate(prompt, model)
     return {"node_id": NODE_ID, "task_id": task_id, "status": "done", "model": model, "response": response_text}
 
@@ -383,8 +403,7 @@ async def ollama_pull(body: dict):
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
                 async with client.stream(
-                    "POST",
-                    f"{OLLAMA_URL}/api/pull",
+                    "POST", f"{OLLAMA_URL}/api/pull",
                     json={"name": model, "stream": True},
                 ) as resp:
                     async for line in resp.aiter_lines():
@@ -395,8 +414,7 @@ async def ollama_pull(body: dict):
             yield f"data: {{\"error\": \"{e}\"}}\n\n"
 
     return StreamingResponse(
-        stream_pull(),
-        media_type="text/event-stream",
+        stream_pull(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
