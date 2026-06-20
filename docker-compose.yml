@@ -3,19 +3,22 @@
 #
 # USAGE — scegli UN solo profilo GPU alla volta:
 #
-#   CPU only (default):
+#   Nessun profilo (usa LM Studio o Ollama nativo sull'host):
+#     docker compose up -d
+#
+#   Ollama CPU nel container:
 #     docker compose --profile cpu up -d
 #
-#   NVIDIA GPU:
+#   Ollama NVIDIA GPU:
 #     docker compose --profile nvidia up -d
 #
-#   AMD ROCm:
+#   Ollama AMD ROCm:
 #     docker compose --profile amd up -d
 #
-#   Intel GPU:
+#   Ollama Intel GPU:
 #     docker compose --profile intel up -d
 #
-#   Vulkan:
+#   Ollama Vulkan:
 #     docker compose --profile vulkan up -d
 #
 # Dashboard:  http://localhost:8085/dashboard
@@ -48,7 +51,6 @@ services:
       start_period: 20s
 
   # ── Ollama CPU (profile: cpu) ────────────────────────
-  # Avvio: docker compose --profile cpu up -d
   ollama:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama
@@ -64,8 +66,6 @@ services:
       - hyperspace
 
   # ── Ollama NVIDIA GPU (profile: nvidia) ─────────────
-  # Avvio: docker compose --profile nvidia up -d
-  # Richiede: NVIDIA Container Toolkit installato
   ollama-nvidia:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_nvidia
@@ -90,7 +90,6 @@ services:
       - hyperspace
 
   # ── Ollama AMD ROCm (profile: amd) ──────────────────
-  # Avvio: docker compose --profile amd up -d
   ollama-amd:
     image: ollama/ollama:rocm
     container_name: hyperspace_ollama_amd
@@ -111,7 +110,6 @@ services:
       - hyperspace
 
   # ── Ollama Intel GPU (profile: intel) ───────────────
-  # Avvio: docker compose --profile intel up -d
   ollama-intel:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_intel
@@ -132,7 +130,6 @@ services:
       - hyperspace
 
   # ── Ollama Vulkan GPU (profile: vulkan) ──────────────
-  # Avvio: docker compose --profile vulkan up -d
   ollama-vulkan:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_vulkan
@@ -152,6 +149,8 @@ services:
       - hyperspace
 
   # ── Open WebUI ───────────────────────────────────────
+  # Nessun depends_on su ollama: funziona con qualsiasi backend
+  # (LM Studio, Ollama nativo, Ollama in container)
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: hyperspace_open_webui
@@ -160,7 +159,7 @@ services:
     volumes:
       - open_webui_data:/app/backend/data
     environment:
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_BASE_URL: ${OLLAMA_URL:-http://host.docker.internal:1234}
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-key-32chars-ok!}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -185,9 +184,9 @@ services:
       PYTHONUNBUFFERED: "1"
       NODE_ENDPOINTS: "${NODE_ENDPOINTS:-node-1:8084}"
       REGISTRY_URL: "http://registry:8086"
-      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:1234}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
-      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-lmstudio}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -218,9 +217,9 @@ services:
       HEARTBEAT_EVERY: "${HEARTBEAT_EVERY:-30}"
       HEARTBEAT_INTERVAL: "${HEARTBEAT_INTERVAL:-30}"
       NODE_TTL: "${NODE_TTL:-90}"
-      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:1234}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
-      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-lmstudio}
       VRAM_GB: ${VRAM_GB:-0.0}
       SIGN_REQUESTS: ${SIGN_REQUESTS:-true}
       PYTHONUNBUFFERED: "1"
@@ -253,9 +252,9 @@ services:
 #      HEARTBEAT_EVERY: "${HEARTBEAT_EVERY:-30}"
 #      HEARTBEAT_INTERVAL: "${HEARTBEAT_INTERVAL:-30}"
 #      NODE_TTL: "${NODE_TTL:-90}"
-#      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+#      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:1234}
 #      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
-#      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+#      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-lmstudio}
 #      VRAM_GB: ${VRAM_GB:-0.0}
 #      SIGN_REQUESTS: ${SIGN_REQUESTS:-true}
 #      PYTHONUNBUFFERED: "1"
