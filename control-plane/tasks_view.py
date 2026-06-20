@@ -15,7 +15,13 @@ TASKS_PANEL_HTML = r"""
       </div>
       <div class="fg">
         <label class="label">Modello</label>
-        <input id="tModel" class="inp inp-mono" placeholder="phi3" value="phi3"/>
+        <div style="position:relative">
+          <select id="tModel" class="inp inp-mono" style="width:100%;appearance:none;padding-right:2rem;cursor:pointer">
+            <option value="" disabled>Caricamento modelli...</option>
+          </select>
+          <span style="position:absolute;right:.6rem;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--text-muted)">&#9660;</span>
+        </div>
+        <div id="modelLoadStatus" style="font-size:.65rem;color:var(--text-muted);margin-top:3px"></div>
       </div>
       <div class="fg" style="grid-column:span 2">
         <label class="label">Prompt</label>
@@ -25,6 +31,7 @@ TASKS_PANEL_HTML = r"""
     <div class="row" style="margin-top:10px">
       <button class="btn btn-primary" onclick="createAndAssign()">&#9654; Esegui</button>
       <button class="btn btn-ghost" onclick="createTask()">Solo crea</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadModels()" title="Ricarica lista modelli" style="margin-left:4px">&#x21BA;</button>
       <span class="task-status-label" id="taskStatus"></span>
     </div>
   </div>
@@ -67,6 +74,37 @@ TASKS_PANEL_HTML = r"""
 </style>
 
 <script>
+// ── Caricamento dinamico modelli da /models (Ollama + LM Studio) ──────────
+async function loadModels(){
+  const sel = document.getElementById('tModel');
+  const status = document.getElementById('modelLoadStatus');
+  const prevVal = sel.value;
+  status.textContent = '\u23F3 Caricamento...';
+  try {
+    const r = await fetch('/models');
+    const d = await r.json();
+    const models = d.models || [];
+    const backend = d.backend || 'unknown';
+    if(models.length === 0){
+      sel.innerHTML = '<option value="">Nessun modello trovato</option>';
+      status.textContent = `\u26A0\uFE0F Backend: ${backend} — nessun modello. Carica un modello e riprova.`;
+      return;
+    }
+    sel.innerHTML = models.map(m =>
+      `<option value="${m}"${m===prevVal?' selected':''}>${m}</option>`
+    ).join('');
+    // Ripristina selezione precedente o scegli il primo
+    if(!prevVal || !models.includes(prevVal)) sel.value = models[0];
+    status.textContent = `\u2705 ${models.length} modell${models.length===1?'o':'i'} — backend: ${backend}`;
+  } catch(e) {
+    sel.innerHTML = '<option value="">Errore caricamento</option>';
+    status.textContent = '\u274C ' + e.message;
+  }
+}
+
+// Carica i modelli all'avvio del pannello
+loadModels();
+
 async function createTask(){
   const id=document.getElementById('tId').value.trim();
   const prompt=document.getElementById('tPrompt').value.trim();
@@ -153,7 +191,6 @@ async function refreshTaskHistory(){
     return;
   }
   hist.innerHTML=list.map(renderTaskCard).join('');
-  // Apri automaticamente l'ultimo task
   const firstBody=hist.querySelector('.task-body');
   if(firstBody)firstBody.classList.add('open');
 }

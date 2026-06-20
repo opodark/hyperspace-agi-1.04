@@ -14,9 +14,10 @@ import shared.db as db
 app = Flask(__name__)
 
 # CONFIG
-NODE_ENDPOINTS = [e.strip() for e in os.getenv("NODE_ENDPOINTS", "node:8084").split(",") if e.strip()]
-OLLAMA_URL     = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
-DEFAULT_MODEL  = os.getenv("OLLAMA_MODEL", "phi3")
+NODE_ENDPOINTS     = [e.strip() for e in os.getenv("NODE_ENDPOINTS", "node:8084").split(",") if e.strip()]
+OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
+DEFAULT_MODEL      = os.getenv("OLLAMA_MODEL", "phi3")
+INFERENCE_BACKEND  = os.getenv("INFERENCE_BACKEND", "ollama")   # ollama | lmstudio
 REGISTRY_URL       = os.getenv("REGISTRY_URL", "http://registry:8086")
 _AUTHORITY_URL     = os.getenv("AUTHORITY_URL", "http://authority:8080")
 _AUTHORITY_ENABLED = os.getenv("AUTHORITY_ENABLED", "false").lower() == "true"
@@ -62,6 +63,44 @@ def _best_endpoint(node_info):
 
 def _node_list():
     return list(_nodes_by_id.values())
+
+# ── MODELLI: helper unificato Ollama / LM Studio ─────────────────────────────
+def _fetch_models():
+    """
+    Ritorna lista di nomi modello indipendentemente dal backend.
+    - Ollama:    GET /api/tags   -> {"models": [{"name": ...}]}
+    - LM Studio: GET /v1/models  -> {"data":   [{"id":   ...}]}
+    Rileva automaticamente il formato dalla risposta JSON.
+    """
+    url     = advanced_config["ollama"]["url"].rstrip("/")
+    backend = INFERENCE_BACKEND
+    models  = []
+    errors  = []
+
+    # Prova Ollama-style (/api/tags)
+    try:
+        r = requests.get(f"{url}/api/tags", timeout=4)
+        if r.status_code == 200:
+            data = r.json()
+            if "models" in data:
+                models = [m["name"] for m in data["models"] if m.get("name")]
+                return {"ok": True, "backend": "ollama", "url": url, "models": models}
+    except Exception as e:
+        errors.append(f"ollama-style: {e}")
+
+    # Prova LM Studio / OpenAI-style (/v1/models)
+    try:
+        r = requests.get(f"{url}/v1/models", timeout=4)
+        if r.status_code == 200:
+            data = r.json()
+            if "data" in data:
+                models = [m["id"] for m in data["data"] if m.get("id")]
+                return {"ok": True, "backend": "lmstudio", "url": url, "models": models}
+    except Exception as e:
+        errors.append(f"lmstudio-style: {e}")
+
+    return {"ok": False, "url": url, "backend": backend, "models": [], "errors": errors}
+
 
 # LOG
 LOG_TYPES = {"connection_test", "inter_node_message", "dream", "node_chat", "system", "mesh_event"}
@@ -149,7 +188,6 @@ def mesh_announce():
     existing = _nodes_by_id.get(nid)
     should_update = True
     if existing:
-        # Preferisci URL https su http, ma non retrocedere mai
         if existing.get("endpoint", "").startswith("https://") and not ep.startswith("https://"):
             should_update = False
     if should_update:
@@ -310,15 +348,16 @@ def rotate_secret():
     return jsonify({"ok": True, "secret": new_secret,
                     "rotatedAt": advanced_config['security']['secretRotatedAt']})
 
+# MODELLI — endpoint unificato Ollama + LM Studio
+@app.route('/models')
+def list_models():
+    result = _fetch_models()
+    return jsonify(result)
+
 @app.route('/ollama/status')
 def ollama_status():
-    url = advanced_config['ollama']['url']
-    try:
-        r = requests.get(f"{url}/api/tags", timeout=3)
-        models = [m['name'] for m in r.json().get('models', [])]
-        return jsonify({"ok": True, "url": url, "models": models})
-    except Exception as e:
-        return jsonify({"ok": False, "url": url, "error": str(e)})
+    result = _fetch_models()
+    return jsonify({"ok": result["ok"], "url": result["url"], "models": result["models"]})
 
 # TASKS
 @app.route('/task/create', methods=['POST'])
@@ -396,12 +435,6 @@ CHAT_PHRASES = [
 ]
 
 def _poll_mesh_nodes():
-    """
-    Interroga tutti gli endpoint noti senza discriminazione.
-    FIX: rimossa la logica che skippava i nodi interni (es. node:8084)
-    se era già presente un nodo pubblico — causava la sparizione del
-    secondo hub dalla mesh quando il primo aveva già un endpoint https.
-    """
     for ep in list(_known_endpoints):
         try:
             r = requests.get(f"{_ep_to_url(ep)}/status", timeout=3)
@@ -413,11 +446,9 @@ def _poll_mesh_nodes():
                 info["last_seen"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
                 if nid:
                     existing = _nodes_by_id.get(nid)
-                    # Aggiorna sempre, ma non retrocedere da https a http
                     if not existing or not existing.get("endpoint", "").startswith("https://") or ep.startswith("https://"):
                         _nodes_by_id[nid] = info
                         db.upsert_node(info)
-                # Scopri nuovi peer tramite PEX
                 try:
                     rp = requests.get(f"{_ep_to_url(ep)}/peers", timeout=2)
                     for peer in rp.json().get("peers", []):
