@@ -20,7 +20,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 Il setup guida la configurazione del backend LLM (Ollama o LM Studio) e avvia i container.
 
-**Dashboard:** http://localhost:8085/dashboard  
+**Registry (pubblico):** https://sanctuary-mower-plated.ngrok-free.dev  
+**Dashboard CP:** http://localhost:8085/dashboard  
 **Node API:** http://localhost:8084/status
 
 ---
@@ -35,21 +36,25 @@ Il setup guida la configurazione del backend LLM (Ollama o LM Studio) e avvia i 
   └───────────────────────────────────────────────────────┘
            ↑ host.docker.internal
   DOCKER
-  ┌───────────────┐   ┌──────────────────────────┐
-  │ control-plane │───│       node               │
-  │    :8085      │   │ :8084  ECDSA identity    │
-  └───────────────┘   │ /status /peers /execute  │
-                      └──────────────────────────┘
-        multi-machine: ogni host ha il proprio node
-        i nodi si scoprono via BOOT_PEERS + PEX
+  ┌──────────────┐   ┌───────────────────────────┐   ┌────────────────┐
+  │   registry   │   │      control-plane        │   │     node       │
+  │    :8086     │   │         :8085             │   │ :8084          │
+  │  /           │   │ /dashboard /memory        │   │ /status /peers │
+  │  /dashboard  │   │ /mesh/nodes /task/*       │   │ /execute       │
+  │  /nodes      │   └───────────────────────────┘   └────────────────┘
+  └──────────────┘
+        ↑
+  punto di ingresso pubblico fisso
+  i nodi si registrano qui al boot e scoprono i peer
 ```
 
 ### Principi chiave
 
-- **Mesh-first** — i nodi si scoprono e comunicano direttamente via `/peers` (PEX), senza registry centralizzato
+- **Registry pubblico** — ogni nodo si registra su `/register` al boot; il registry espone `/nodes/active` (TTL-filtered) per l'auto-discovery
+- **Auto-discovery** — se `BOOT_PEERS` è vuoto, il nodo chiama `GET /nodes/active` e si annuncia automaticamente a tutti i nodi attivi
 - **Identità crittografica** — ogni nodo genera un keypair ECDSA secp256k1 al primo avvio; `node_id = sha256(pubkey)[:40]`
-- **Ollama / LM Studio sull'host** — accesso diretto alla GPU, zero overhead Docker, modelli condivisi tra sessioni
-- **Authority legacy** — mantenuta nel codice ma disabilitata di default, nascosta dalla UI
+- **Memoria compressa** — il control-plane persiste la memoria locale in gzip con pruning TTL automatico
+- **Ollama / LM Studio sull'host** — accesso diretto alla GPU, zero overhead Docker
 
 ---
 
@@ -57,11 +62,126 @@ Il setup guida la configurazione del backend LLM (Ollama o LM Studio) e avvia i 
 
 | Container | Porta | Descrizione |
 |---|---|---|
+| `registry` | 8086 | Registry pubblico — landing, dashboard nodi, auto-discovery |
 | `node` | 8084 | Worker node — identità ECDSA, PEX, /execute |
-| `control-plane` | 8085 | Dashboard mesh + orchestrazione task |
+| `control-plane` | 8085 | Dashboard mesh + orchestrazione task + memoria gzip |
 | `ollama` *(opt-in)* | 11434 | Solo con `--profile with-ollama` (legacy) |
 
-> L'authority (`authority:8080`) è mantenuta nel codice per compatibilità ma non viene avviata di default.
+---
+
+## Unirsi alla mesh (per nuovi nodi / collaboratori)
+
+Un nodo esterno può unirsi alla mesh conoscendo solo l'URL del registry pubblico.
+
+### 1. Prerequisiti
+
+- Docker + Docker Compose installati
+- ngrok installato (per esporre il node all'esterno)
+
+### 2. Clona il repo
+
+```bash
+git clone https://github.com/opodark/hyperspace-agi-1.02.git
+cd hyperspace-agi-1.02
+git checkout 1.02
+```
+
+### 3. Esponi il node con ngrok
+
+```bash
+ngrok http 8084
+# annota l'URL pubblico assegnato, es: https://abc123.ngrok-free.app
+```
+
+### 4. Crea il file `.env`
+
+```env
+# Registry pubblico — non cambia mai
+REGISTRY_URL=https://sanctuary-mower-plated.ngrok-free.dev
+REGISTRY_PUBLIC_URL=https://sanctuary-mower-plated.ngrok-free.dev
+
+# Il tuo endpoint pubblico (URL ngrok del passo 3)
+PUBLIC_ENDPOINT=https://abc123.ngrok-free.app
+
+# BOOT_PEERS opzionale — lascia vuoto per usare l'auto-discovery
+BOOT_PEERS=
+
+OLLAMA_MODEL=phi3
+PEER_MAX_AGE_S=120
+MEMORY_TTL_DAYS=7
+```
+
+### 5. Avvia solo il node
+
+```bash
+docker compose up -d node-1
+```
+
+### 6. Verifica l'ingresso nella mesh
+
+```bash
+# Il tuo node deve apparire nella lista entro 15 secondi
+curl https://sanctuary-mower-plated.ngrok-free.dev/nodes/active
+```
+
+Oppure visita la dashboard pubblica: https://sanctuary-mower-plated.ngrok-free.dev/dashboard
+
+### Cosa succede automaticamente al boot
+
+```
+node avvia
+  → POST /register         → registry (si iscrive con PUBLIC_ENDPOINT)
+  → GET  /nodes/active     → registry (scarica lista nodi attivi)
+  → POST /announce         → ogni nodo attivo (si presenta)
+  → heartbeat ogni 15s     → mantiene la registrazione viva (NODE_TTL 300s)
+```
+
+---
+
+## Setup host principale (Ubuntu con ngrok Free)
+
+Con il piano Free di ngrok è disponibile **1 solo dominio statico**. La configurazione consigliata è:
+
+```
+dominio statico → 8086 (registry) — punto di ingresso pubblico fisso
+CP e node       → localhost       — comunicazione interna Docker network
+```
+
+### `ngrok.yml`
+
+```yaml
+version: "3"
+agent:
+  authtoken: IL_TUO_TOKEN
+
+tunnels:
+  registry:
+    addr: 8086
+    proto: http
+    domain: sanctuary-mower-plated.ngrok-free.dev
+```
+
+```bash
+ngrok start registry
+```
+
+### `.env` host principale
+
+```env
+REGISTRY_URL=https://sanctuary-mower-plated.ngrok-free.dev
+REGISTRY_PUBLIC_URL=https://sanctuary-mower-plated.ngrok-free.dev
+
+CONTROL_PLANE_URL=http://control-plane:8085
+PUBLIC_ENDPOINT=http://node-1:8084
+
+OLLAMA_MODEL=phi3
+NODE_TTL=300
+PEER_MAX_AGE_S=120
+MEMORY_TTL_DAYS=7
+HEARTBEAT_EVERY=15
+```
+
+> Con il piano ngrok Pro (3 domini statici) puoi assegnare un dominio fisso anche a CP e node, eliminando la necessità di aggiornare `.env` ad ogni restart.
 
 ---
 
@@ -89,21 +209,23 @@ Modelli consigliati per hardware consumer:
 
 ```
 hyperspace-agi-1.02/
-├── node/                    # Worker node (FastAPI)
-├── worker/                  # Worker legacy (FastAPI)
-├──── main.py                # API: /status /peers /peer/add /execute
-├── control-plane/           # Dashboard + orchestrazione (Flask)
-├──── main.py                # Dashboard mesh-first, Log Viewer, Advanced Setup
+├── registry/
+│   └── registry.py          # Landing pubblica, /dashboard, /nodes/active, /register
+├── node/
+│   └── main.py              # API node: /status /peers /execute + auto-discovery
+├── control-plane/
+│   └── main.py              # Dashboard mesh, memoria gzip TTL, /memory /task/*
 ├── shared/
-├──── identity.py            # ECDSA secp256k1: genera node_id, sign, verify
-├──── auth.py                # 🔧 v1.02: JWT ES256 inter-nodo (in sviluppo)
-├──── db.py                  # 🔧 v1.02: SQLite log/nodes/tasks (in sviluppo)
+│   ├── identity.py          # ECDSA secp256k1: genera node_id, sign, verify
+│   ├── auth.py              # 🔧 JWT ES256 inter-nodo (in sviluppo)
+│   └── db.py                # 🔧 SQLite log/nodes/tasks (in sviluppo)
 ├── authority/               # Registry legacy (mantenuto, non avviato di default)
 ├── setup.sh                 # Setup guidato macOS/Linux
 ├── setup.ps1                # Setup guidato Windows
-├── docker-compose.prod.yml  # Compose produzione (senza ollama)
 ├── docker-compose.yml       # Compose sviluppo
-└── .env.example             # Template variabili
+├── docker-compose.prod.yml  # Compose produzione
+├── .env.example             # Template variabili (5 variabili obbligatorie)
+└── README.md
 ```
 
 ---
@@ -111,47 +233,44 @@ hyperspace-agi-1.02/
 ## Variabili d'ambiente principali
 
 ```bash
+# Registry
+REGISTRY_URL=                  # URL pubblico del registry
+REGISTRY_PUBLIC_URL=           # Stesso di REGISTRY_URL (usato dal registry stesso)
+NODE_TTL=300                   # Secondi prima che un nodo venga considerato offline
+
 # Node
-NODE_HOSTNAME=localhost        # hostname o IP pubblico del nodo
-NODE_TIER=leaf                 # leaf | hub | root
-VRAM_GB=0.0                    # VRAM GPU disponibile
-BOOT_PEERS=                    # peer iniziali: "ip1:8084,ip2:8084"
+PUBLIC_ENDPOINT=               # URL pubblico raggiungibile dagli altri nodi
+BOOT_PEERS=                    # Peer iniziali opzionali: "ip1:8084,ip2:8084"
+PEER_MAX_AGE_S=120             # Età massima peer prima del prune
+HEARTBEAT_EVERY=15             # Secondi tra un heartbeat e il successivo
 
 # Inferenza
 INFERENCE_BACKEND=ollama       # ollama | lmstudio | ollama-docker
 OLLAMA_URL=http://host.docker.internal:11434
 OLLAMA_MODEL=phi3
-LMS_URL=                       # URL LM Studio (se INFERENCE_BACKEND=lmstudio)
 
-# Control plane
-NODE_ENDPOINTS=node:8084       # nodi da monitorare (separati da virgola)
+# Memoria
+MEMORY_TTL_DAYS=7              # Giorni prima che una entry venga eliminata
+MEMORY_MAX_ENTRIES=200         # Numero massimo entry in memoria gzip
 
 # Security (v1.02)
 JWT_TTL=300                    # 🔧 durata JWT in secondi (in sviluppo)
-HUB_THRESHOLD=3                # 🔧 peer attivi per promozione a hub (in sviluppo)
-TIER_EVAL_INTERVAL=30          # 🔧 secondi tra valutazioni tier (in sviluppo)
-
-# Legacy
-AUTHORITY_ENABLED=false
 ```
 
 ---
 
-## Come funziona la mesh al boot
-
-Quando un nodo si avvia, esegue i seguenti passi:
-
-1. **Genera l'identità** — `shared/identity.py` crea (o carica) il keypair ECDSA secp256k1; il `node_id` è derivato come `sha256(pubkey)[:40]`.
-2. **Legge `BOOT_PEERS`** — lista di peer iniziali in formato `ip:porta` da cui partire.
-3. **Connessione iniziale** — il nodo contatta ogni boot peer tramite `/peers` e riceve la lista dei nodi noti a quel peer.
-4. **PEX (Peer Exchange)** — la lista si propaga: ogni nodo condivide i propri peer con i nuovi arrivati, espandendo la vista della rete senza un registry centrale.
-5. **Heartbeat** — il control-plane interroga periodicamente tutti i `NODE_ENDPOINTS` per aggiornare lo stato della mesh nella dashboard.
-
-Questo schema consente a nuovi nodi di aggiungersi alla rete conoscendo solo un peer iniziale.
-
----
-
 ## API Reference
+
+### Registry (porta 8086)
+
+| Method | Path | Descrizione |
+|---|---|---|
+| GET | `/` | Landing page pubblica con istruzioni join |
+| GET | `/dashboard` | Dashboard nodi attivi (auto-refresh 15s) |
+| GET | `/nodes/active` | JSON nodi vivi (TTL-filtered) — usato dall'auto-discovery |
+| GET | `/nodes` | Tutti i nodi registrati |
+| POST | `/register` | Registra o aggiorna un nodo |
+| GET | `/health` | Ping |
 
 ### Node (porta 8084)
 
@@ -162,11 +281,9 @@ Questo schema consente a nuovi nodi di aggiungersi alla rete conoscendo solo un 
 | GET | `/identity` | Profilo pubblico immutabile |
 | GET | `/peers` | Lista peer noti con stato PEX |
 | POST | `/peer/add` | Registra un nuovo peer |
+| POST | `/announce` | Ricevi annuncio da un nuovo nodo |
 | POST | `/execute` | Esegui task LLM |
 | POST | `/verify` | Verifica firma ECDSA messaggio peer |
-| POST | `/auth/token` | 🔧 Emetti JWT (v1.02) |
-| POST | `/peer/tier-update` | 🔧 Ricevi notifica cambio tier (v1.02) |
-| POST | `/ollama/pull` | 🔧 Pull modello con stream SSE (v1.02) |
 | GET | `/ollama/health` | Stato Ollama/LM Studio |
 | GET | `/ollama/models` | Modelli disponibili |
 
@@ -176,42 +293,20 @@ Questo schema consente a nuovi nodi di aggiungersi alla rete conoscendo solo un 
 |---|---|---|
 | GET | `/dashboard` | Dashboard HTML |
 | GET | `/mesh/nodes` | Stato aggregato nodi mesh |
-| GET | `/mesh/topology` | 🔧 Grafo nodi + archi PEX (v1.02) |
-| GET | `/mesh/node/<ep>/status` | Status singolo nodo |
-| GET | `/mesh/node/<ep>/peers` | Peers di un nodo |
-| POST | `/mesh/node/<ep>/pull` | 🔧 Proxy pull modello (v1.02) |
+| GET | `/status` | Status control-plane |
+| GET | `/memory` | Memoria locale gzip (parametro `?limit=N`) |
+| POST | `/memory/push` | Ricevi entry memoria da nodo remoto |
+| GET | `/memory/stats` | Statistiche memoria (entries, size, TTL) |
 | GET | `/tasks` | Lista tasks |
 | POST | `/task/create` | Crea task |
-| POST | `/task/assign` | Assegna ed esegui task sul nodo più disponibile |
-| GET | `/logs` | Stream logs (filtri: type, status, node, q, page) |
-| GET | `/logs/export` | 🔧 Export log JSON/CSV (v1.02) |
-| POST | `/logs/add` | Aggiungi log entry |
-| POST | `/logs/clear` | Svuota log |
+| POST | `/task/assign` | Assegna ed esegui task |
+| GET | `/logs` | Stream logs |
+| GET | `/health` | Ping |
 | GET | `/hb/status` | Stato heartbeat loop |
-| GET | `/config/advanced` | Leggi config |
-| POST | `/config/advanced` | Salva config |
-| POST | `/config/secret/rotate` | Ruota shared secret |
-| GET | `/ollama/status` | Stato Ollama/LM Studio dal control-plane |
+| POST | `/mcp` | JSON-RPC 2.0 — bridge OMEGA Obsidian |
+| GET | `/mesh/topology` | 🔧 Grafo nodi + archi PEX (in sviluppo) |
 
-> 🔧 = endpoint nuovo in v1.02, in sviluppo
-
----
-
-## Deploy multi-macchina
-
-Ogni macchina avvia il proprio `node`. I nodi si scoprono tramite `BOOT_PEERS`:
-
-```bash
-# Macchina A (192.168.1.10)
-BOOT_PEERS=192.168.1.11:8084
-docker compose -f docker-compose.prod.yml up -d --build
-
-# Macchina B (192.168.1.11)
-BOOT_PEERS=192.168.1.10:8084
-docker compose -f docker-compose.prod.yml up -d --build
-```
-
-Dopo il boot i nodi si scambiano la lista peer via `/peers` (PEX leggero). Il control-plane può girare su una sola macchina e monitorare tutti i nodi tramite `NODE_ENDPOINTS`.
+> 🔧 = endpoint in sviluppo
 
 ---
 
@@ -219,30 +314,33 @@ Dopo il boot i nodi si scambiano la lista peer via `/peers` (PEX leggero). Il co
 
 | Feature | Stato |
 |---|---|
+| Registry pubblico con landing + dashboard | ✅ Implementato |
+| Auto-discovery dal registry al boot | ✅ Implementato |
 | Identità ECDSA secp256k1 | ✅ Implementato |
 | PEX gossip multi-macchina | ✅ Implementato |
+| Memoria gzip con TTL + pruning | ✅ Implementato |
 | Dashboard mesh + Log Viewer | ✅ Implementato |
 | Setup guidato (sh / ps1) | ✅ Implementato |
-| Advanced Setup + Secret rotation | ✅ Implementato |
+| OMEGA Obsidian bridge (MCP JSON-RPC 2.0) | ✅ Implementato |
+| NODE_TTL 300s + PEER_MAX_AGE_S 120s | ✅ Implementato |
 | Authority server | ⚠️ Legacy — disabilitato di default |
-| Firma inter-nodo in produzione | 🔧 In sviluppo (v1.02) |
-| JWT tra nodi | 🔧 In sviluppo (v1.02) |
-| Tier dinamico leaf → hub | 🔧 In sviluppo (v1.02) |
-| SQLite per persistenza log | 🔧 In sviluppo (v1.02) |
-| Pull modello automatico | 🔧 In sviluppo (v1.02) |
-| UI topologia grafo | 🔧 In sviluppo (v1.02) |
+| Firma inter-nodo in produzione | 🔧 In sviluppo |
+| JWT tra nodi | 🔧 In sviluppo |
+| Tier dinamico leaf → hub | 🔧 In sviluppo |
+| UI topologia grafo | 🔧 In sviluppo |
 
 ---
 
 ## Changelog
 
-### v1.02 (in sviluppo)
-- Firma inter-nodo ECDSA in produzione su tutte le chiamate HTTP
-- JWT ES256 tra nodi (`shared/auth.py`, endpoint `/auth/token`)
-- Tier dinamico leaf → hub basato su `peers_active`
-- SQLite per persistenza log, nodi e task (`control-plane/db.py`)
-- Pull modello automatico da dashboard con progress SSE
-- UI topologia mesh con grafo interattivo (Cytoscape.js)
+### v1.02 (Giugno 2026 — in sviluppo attivo)
+- **Registry pubblico** con landing page, dashboard nodi live (auto-refresh 15s), `/nodes/active` TTL-filtered
+- **Auto-discovery** al boot: se `BOOT_PEERS` è vuoto il nodo chiama `GET /nodes/active` e si annuncia a tutti
+- **Memoria gzip** nel control-plane: storage compresso, pruning TTL (`MEMORY_TTL_DAYS`), max entries (`MEMORY_MAX_ENTRIES`)
+- **OMEGA Obsidian bridge**: `GET /health` + `POST /mcp` JSON-RPC 2.0 compatibile OMEGA plugin
+- **Bug fix mesh**: heartbeat robusto, endpoint normalizzazione `http://`, DB reload al restart, `PEER_MAX_AGE_S`, status recovery da `unreachable`
+- `NODE_TTL` default alzato a 300s, `HEARTBEAT_EVERY=15`, `PEER_MAX_AGE_S=120`
+- `.env.example` semplificato a 5 variabili obbligatorie
 
 ### v1.01 (Giugno 2026)
 - Log Viewer esteso: tab Connection Tests, Node Communication, Dreams, Node Chats
