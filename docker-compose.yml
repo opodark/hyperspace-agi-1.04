@@ -21,12 +21,12 @@
 #   Ollama Vulkan:
 #     docker compose --profile vulkan up -d
 #
-# Dashboard:  http://<IP-HOST>:8099          <- accessibile da tutta la LAN
-# Dashboard:  http://localhost:8099           (locale)
-# Control Plane: http://localhost:8085
-# Registry:   http://localhost:8086/nodes
-# Node 1:     http://localhost:8081
-# Memory Graph: http://localhost:8090        <- Obsidian vault exporter
+# Dashboard:      http://localhost:8099   <- accessibile da tutta la LAN
+# Control Plane:  http://localhost:8085
+# Registry:       http://localhost:8086/nodes
+# Node 1:         http://localhost:8081
+# Memory Exporter:http://localhost:8090/status
+# Obsidian GUI:   http://localhost:8091   <- Obsidian completo nel browser
 # ============================================================
 
 services:
@@ -82,9 +82,7 @@ services:
       retries: 3
       start_period: 15s
 
-  # -- Memory Graph -- Obsidian vault exporter ------------------------------------------
-  # Legge memory.json.gz dal CP ogni EXPORT_INTERVAL secondi
-  # e scrive file .md in ./data/obsidian-vault (apribile da Obsidian locale)
+  # -- Memory Graph -- esporta memoria CP -> file .md nel vault -------------------------
   # API: GET http://localhost:8090/status  GET /export  POST /export/force
   memory-graph:
     build:
@@ -96,12 +94,33 @@ services:
     ports:
       - "8090:8090"
     volumes:
-      - ./data/obsidian-vault:/vault
+      - obsidian_vault:/vault
     environment:
       CP_URL:          "http://control-plane:8085"
       VAULT_PATH:      "/vault"
       EXPORT_INTERVAL: "${MEMORY_EXPORT_INTERVAL:-30}"
       PYTHONUNBUFFERED: "1"
+    networks:
+      - hyperspace
+    restart: unless-stopped
+
+  # -- Obsidian Remote -- GUI Obsidian completa nel browser -----------------------------
+  # Apri http://localhost:8091 per vedere il vault con grafo relazionale
+  # Il vault e' lo stesso generato da memory-graph (volume condiviso)
+  obsidian:
+    image: ghcr.io/sytone/obsidian-remote:latest
+    container_name: hyperspace_obsidian
+    depends_on:
+      - memory-graph
+    ports:
+      - "8091:8080"
+    volumes:
+      - obsidian_vault:/vaults
+      - obsidian_config:/config
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "${TZ:-Europe/Rome}"
     networks:
       - hyperspace
     restart: unless-stopped
@@ -332,3 +351,5 @@ networks:
 volumes:
   ollama_data:
   open_webui_data:
+  obsidian_vault:
+  obsidian_config:
