@@ -28,6 +28,7 @@
 # Memory Exporter: http://localhost:8090/status
 # Obsidian GUI:    http://localhost:8091   <- Obsidian nel browser (KasmVNC)
 #                  vault su Mac: ./data/obsidian-vault
+# Ollama Titler:   interno Docker (porta 11435 su Mac se serve debug)
 # ============================================================
 
 services:
@@ -83,16 +84,43 @@ services:
       retries: 3
       start_period: 15s
 
+  # -- Ollama Titler -- modello mini dedicato ai titoli memoria -------------------------
+  # Gira sempre (no profile), porta 11435 su Mac per debug, 11434 interno
+  # Auto-pull qwen2:0.5b al primo avvio, coesiste con Ollama nativo su :11434
+  ollama-titler:
+    build:
+      context: ./ollama-titler
+      dockerfile: Dockerfile
+    container_name: hyperspace_ollama_titler
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_titler_data:/root/.ollama
+    environment:
+      OLLAMA_NUM_THREADS: "2"
+    networks:
+      - hyperspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
   # -- Memory Graph -- esporta memoria CP -> .md nel vault ------------------------------
+  # Titolatore: punta a ollama-titler interno (rete Docker, nessun host.docker.internal)
   # API: GET http://localhost:8090/status  GET /export  POST /export/force
-  # Titolatore LLM: usa qwen2:0.5b su Ollama host per generare titoli coerenti
   memory-graph:
     build:
       context: ./memory-graph
       dockerfile: Dockerfile
     container_name: hyperspace_memory_graph
     depends_on:
-      - control-plane
+      ollama-titler:
+        condition: service_healthy
+      control-plane:
+        condition: service_started
     ports:
       - "8090:8090"
     volumes:
@@ -102,12 +130,10 @@ services:
       VAULT_PATH:       "/vault"
       EXPORT_INTERVAL:  "${MEMORY_EXPORT_INTERVAL:-30}"
       TITLER_ENABLED:   "${TITLER_ENABLED:-true}"
-      TITLER_URL:       "${TITLER_URL:-http://host.docker.internal:11434}"
+      TITLER_URL:       "${TITLER_URL:-http://ollama-titler:11434}"
       TITLER_MODEL:     "${TITLER_MODEL:-qwen2:0.5b}"
       TITLER_BACKEND:   "${TITLER_BACKEND:-ollama}"
       PYTHONUNBUFFERED: "1"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     networks:
       - hyperspace
     restart: unless-stopped
@@ -326,5 +352,6 @@ networks:
 
 volumes:
   ollama_data:
+  ollama_titler_data:
   open_webui_data:
   obsidian_config:
