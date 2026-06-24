@@ -1,6 +1,7 @@
 # HyperSpace-AGI v1.02
 
-> Framework per agenti IA autonomi basati su SLM (Small Language Models), eseguiti localmente tramite Docker. Il motore di inferenza (Ollama o LM Studio) gira **sull'host**, non in Docker — più veloce, più leggero, accesso diretto alla GPU.
+> Framework per agenti IA autonomi basati su SLM (Small Language Models), eseguiti localmente tramite Docker e Ollama.
+> Il motore di inferenza gira **sull'host** (Ollama nativo o LM Studio) — accesso diretto alla GPU, zero overhead container.
 
 ---
 
@@ -9,20 +10,29 @@
 ```bash
 git clone https://github.com/opodark/hyperspace-agi-1.02.git
 cd hyperspace-agi-1.02
+git checkout 1.02
 
 # macOS / Linux
 chmod +x setup.sh && ./setup.sh
 
-# Windows (PowerShell)
-Set-ExecutionPolicy -Scope Process Bypass
-.\setup.ps1
+# oppure diretto
+docker compose up -d
 ```
 
-Il setup guida la configurazione del backend LLM (Ollama o LM Studio) e avvia i container.
+Dopo l'avvio tutti i servizi sono raggiungibili su `localhost`:
 
-**Registry (pubblico):** https://sanctuary-mower-plated.ngrok-free.dev  
-**Dashboard CP:** http://localhost:8085/dashboard  
-**Node API:** http://localhost:8084/status
+| Servizio | URL |
+|---|---|
+| **Open WebUI** | http://localhost:3000 |
+| **Dashboard / Control Plane** | http://localhost:8085/dashboard |
+| **Infra-UI Bridge** | http://localhost:8099 |
+| **Registry** | http://localhost:8086 |
+| **SearXNG** | http://localhost:8092 |
+| **Memory Graph** | http://localhost:8090/status |
+| **Obsidian GUI** | http://localhost:8091 |
+| **Node 1** | http://localhost:8081/status |
+
+**Registry pubblico:** https://sanctuary-mower-plated.ngrok-free.dev
 
 ---
 
@@ -31,54 +41,77 @@ Il setup guida la configurazione del backend LLM (Ollama o LM Studio) e avvia i 
 ```
   HOST MACHINE
   ┌───────────────────────────────────────────────────────┐
-  │  Ollama (nativo) o LM Studio                          │
-  │  :11434 / :1234                                       │
+  │  Ollama (nativo) o LM Studio       :11434 / :1234  │
   └───────────────────────────────────────────────────────┘
            ↑ host.docker.internal
-  DOCKER
-  ┌──────────────┐   ┌───────────────────────────┐   ┌────────────────┐
-  │   registry   │   │      control-plane        │   │     node       │
-  │    :8086     │   │         :8085             │   │ :8084          │
-  │  /           │   │ /dashboard /memory        │   │ /status /peers │
-  │  /dashboard  │   │ /mesh/nodes /task/*       │   │ /execute       │
-  │  /nodes      │   └───────────────────────────┘   └────────────────┘
-  └──────────────┘
-        ↑
-  punto di ingresso pubblico fisso
-  i nodi si registrano qui al boot e scoprono i peer
+  DOCKER NETWORK: hyperspace
+  ┌────────────┐  ┌─────────────────────┐  ┌───────────────┐  ┌──────────┐
+  │  registry  │  │   control-plane    │  │   node-1        │  │ searxng  │
+  │   :8086    │  │      :8085         │  │   :8084        │  │  :8080   │
+  └────────────┘  └─────────────────────┘  └───────────────┘  └──────────┘
+                       │ tool calling ↑                      ↑ web search
+  ┌─────────────┐  ┌─────────────────────┐
+  │infra-ui    │  │  memory-graph      │
+  │bridge:8099 │  │  :8090  │obsidian │
+  └─────────────┘  └─────────────────────┘
 ```
 
 ### Principi chiave
 
-- **Registry pubblico** — ogni nodo si registra su `/register` al boot; il registry espone `/nodes/active` (TTL-filtered) per l'auto-discovery
-- **Auto-discovery** — se `BOOT_PEERS` è vuoto, il nodo chiama `GET /nodes/active` e si annuncia automaticamente a tutti i nodi attivi
-- **Identità crittografica** — ogni nodo genera un keypair ECDSA secp256k1 al primo avvio; `node_id = sha256(pubkey)[:40]`
-- **Memoria compressa** — il control-plane persiste la memoria locale in gzip con pruning TTL automatico
-- **Ollama / LM Studio sull'host** — accesso diretto alla GPU, zero overhead Docker
+- **Compose unico** — un solo `docker-compose.yml` con profili GPU opzionali (`--profile cpu|nvidia|amd|intel|vulkan`)
+- **OpenAI-compatible API** — il control-plane espone `/v1/chat/completions` compatibile con Open WebUI e qualsiasi client OpenAI
+- **Tool calling loop** — il CP esegue un loop multi-iterazione (max 5) per `web_search`, `omega_query`, `omega_store`, `get_mesh_status`
+- **Smart routing** — i task vengono instradati al nodo migliore tramite score (tier 40% + vram 30% + peers 20% + uptime 10%)
+- **Nodo locale root/hub** — la macchina host si registra al boot come `root` se è l'unico nodo, `hub` se ci sono altri nodi remoti
+- **Memory sync inter-nodo** — l'heartbeat sincronizza la memoria gzip tra tutti i nodi attivi ogni 2 cicli (30s)
+- **SearXNG self-hosted** — nessuna API key, nessun rate limit, risultati reali aggregati da Google/Bing/DDG
+- **Registry pubblico** — auto-discovery: ogni nodo si registra su `/register` al boot e scopre i peer da `/nodes/active`
 
 ---
 
 ## Stack Docker
 
-| Container | Porta | Descrizione |
+| Container | Porta host | Descrizione |
 |---|---|---|
 | `registry` | 8086 | Registry pubblico — landing, dashboard nodi, auto-discovery |
-| `node` | 8084 | Worker node — identità ECDSA, PEX, /execute |
-| `control-plane` | 8085 | Dashboard mesh + orchestrazione task + memoria gzip |
-| `ollama` *(opt-in)* | 11434 | Solo con `--profile with-ollama` (legacy) |
+| `control-plane` | 8085 | Orchestrazione mesh + OpenAI API + tool loop + memoria gzip |
+| `node-1` | 8081 | Worker node — ECDSA, PEX, /execute |
+| `searxng` | 8092 | Web search self-hosted (JSON API su :8080 interno) |
+| `bridge` | 8099 | Infra-UI — dashboard SSE, log viewer real-time |
+| `open-webui` | 3000 | Chat UI compatibile OpenAI |
+| `memory-graph` | 8090 | Esportatore memoria → vault Obsidian |
+| `obsidian` | 8091 | Obsidian nel browser via KasmVNC |
+| `ollama-titler` | 11435 | Modello leggero per titolazione automatica note |
+| `ollama` *(opt-in)* | 11434 | Solo con `--profile cpu\|nvidia\|amd\|intel\|vulkan` |
+
+---
+
+## Tool Calling
+
+Il control-plane inietta automaticamente 4 tool built-in a ogni richiesta (se il modello li supporta):
+
+| Tool | Descrizione |
+|---|---|
+| `web_search` | Cerca sul web via SearXNG — fallback DDG lite se SearXNG non disponibile |
+| `omega_query` | Cerca nella memoria a lungo termine di HyperSpace AGI |
+| `omega_store` | Salva informazioni importanti nella memoria a lungo termine |
+| `get_mesh_status` | Stato della rete: nodi attivi, modelli disponibili, heartbeat |
+
+### Modelli con tool calling abilitato (default)
+
+`qwen3`, `qwen2.5`, `llama3.1`, `llama3.2`, `llama3.3`, `mistral-nemo`, `mistral-small`, `mixtral`, `command-r`, `phi4`, `hermes`, `functionary`
+
+Per abilitare il tool calling su qualsiasi modello:
+```bash
+# nel .env
+TOOL_CAPABLE_MODELS=*
+```
 
 ---
 
 ## Unirsi alla mesh (per nuovi nodi / collaboratori)
 
-Un nodo esterno può unirsi alla mesh conoscendo solo l'URL del registry pubblico.
-
-### 1. Prerequisiti
-
-- Docker + Docker Compose installati
-- ngrok installato (per esporre il node all'esterno)
-
-### 2. Clona il repo
+### 1. Clona e configura
 
 ```bash
 git clone https://github.com/opodark/hyperspace-agi-1.02.git
@@ -86,102 +119,43 @@ cd hyperspace-agi-1.02
 git checkout 1.02
 ```
 
-### 3. Esponi il node con ngrok
-
-```bash
-ngrok http 8084
-# annota l'URL pubblico assegnato, es: https://abc123.ngrok-free.app
-```
-
-### 4. Crea il file `.env`
+### 2. Crea il file `.env`
 
 ```env
-# Registry pubblico — non cambia mai
+# Registry pubblico
 REGISTRY_URL=https://sanctuary-mower-plated.ngrok-free.dev
 REGISTRY_PUBLIC_URL=https://sanctuary-mower-plated.ngrok-free.dev
 
-# Il tuo endpoint pubblico (URL ngrok del passo 3)
+# Esponi il node con ngrok (ngrok http 8084) e inserisci l'URL qui
 PUBLIC_ENDPOINT=https://abc123.ngrok-free.app
 
-# BOOT_PEERS opzionale — lascia vuoto per usare l'auto-discovery
-BOOT_PEERS=
-
+OLLAMA_URL=http://host.docker.internal:11434
 OLLAMA_MODEL=phi3
-PEER_MAX_AGE_S=120
-MEMORY_TTL_DAYS=7
 ```
 
-### 5. Avvia solo il node
+### 3. Avvia
 
 ```bash
-docker compose up -d node-1
+docker compose up -d
 ```
 
-### 6. Verifica l'ingresso nella mesh
+### 4. Verifica
 
 ```bash
-# Il tuo node deve apparire nella lista entro 15 secondi
 curl https://sanctuary-mower-plated.ngrok-free.dev/nodes/active
-```
-
-Oppure visita la dashboard pubblica: https://sanctuary-mower-plated.ngrok-free.dev/dashboard
-
-### Cosa succede automaticamente al boot
-
-```
-node avvia
-  → POST /register         → registry (si iscrive con PUBLIC_ENDPOINT)
-  → GET  /nodes/active     → registry (scarica lista nodi attivi)
-  → POST /announce         → ogni nodo attivo (si presenta)
-  → heartbeat ogni 15s     → mantiene la registrazione viva (NODE_TTL 300s)
 ```
 
 ---
 
-## Setup host principale (Ubuntu con ngrok Free)
-
-Con il piano Free di ngrok è disponibile **1 solo dominio statico**. La configurazione consigliata è:
-
-```
-dominio statico → 8086 (registry) — punto di ingresso pubblico fisso
-CP e node       → localhost       — comunicazione interna Docker network
-```
-
-### `ngrok.yml`
-
-```yaml
-version: "3"
-agent:
-  authtoken: IL_TUO_TOKEN
-
-tunnels:
-  registry:
-    addr: 8086
-    proto: http
-    domain: sanctuary-mower-plated.ngrok-free.dev
-```
+## Aggiornare i container dopo un `git pull`
 
 ```bash
-ngrok start registry
+git pull
+docker compose up -d --build
 ```
 
-### `.env` host principale
-
-```env
-REGISTRY_URL=https://sanctuary-mower-plated.ngrok-free.dev
-REGISTRY_PUBLIC_URL=https://sanctuary-mower-plated.ngrok-free.dev
-
-CONTROL_PLANE_URL=http://control-plane:8085
-PUBLIC_ENDPOINT=http://node-1:8084
-
-OLLAMA_MODEL=phi3
-NODE_TTL=300
-PEER_MAX_AGE_S=120
-MEMORY_TTL_DAYS=7
-HEARTBEAT_EVERY=15
-```
-
-> Con il piano ngrok Pro (3 domini statici) puoi assegnare un dominio fisso anche a CP e node, eliminando la necessità di aggiornare `.env` ad ogni restart.
+> `--build` ricostruisce solo le immagini modificate. I volumi dati (modelli Ollama, memoria, vault) non vengono toccati.
+> **Non usare** `docker compose down -v` — il flag `-v` cancella i volumi.
 
 ---
 
@@ -189,19 +163,20 @@ HEARTBEAT_EVERY=15
 
 | Backend | Setup | OLLAMA_URL |
 |---|---|---|
-| **Ollama nativo** | `./setup.sh` opzione 1 | `http://host.docker.internal:11434` |
-| **LM Studio** | `./setup.sh` opzione 2 | `http://host.docker.internal:1234` |
-| **Ollama Docker** | `./setup.sh` opzione 3 | `http://ollama:11434` |
+| **Ollama nativo** (consigliato) | `./setup.sh` | `http://host.docker.internal:11434` |
+| **LM Studio** | avvia LM Studio + Local Server | `http://host.docker.internal:1234` |
+| **Ollama in Docker** | `--profile cpu\|nvidia\|amd\|intel\|vulkan` | `http://ollama:11434` |
 
-Modelli consigliati per hardware consumer:
+Modelli consigliati:
 
-| Modello | Param | VRAM / RAM | Note |
+| Modello | RAM / VRAM | Tool calling | Note |
 |---|---|---|---|
-| `phi3` | 3.8B | ~2.3 GB | Velocissimo, ottimo su CPU |
-| `llama3:8b` | 8B | ~5 GB | Bilanciato |
-| `mistral:7b` | 7B | ~4.5 GB | Ottima qualità |
-| `qwen2:7b` | 7B | ~4.5 GB | Multilingue |
-| `llama3:70b` | 70B | ~40 GB | Alta qualità, GPU richiesta |
+| `qwen3:8b` | ~5 GB | ✅ | Ottimo bilanciamento qualità/velocità |
+| `qwen2.5:7b` | ~5 GB | ✅ | Multilingue, veloce |
+| `llama3.1:8b` | ~5 GB | ✅ | Meta, buone istruzioni |
+| `phi4` | ~8 GB | ✅ | Microsoft, molto capace |
+| `mistral:7b` | ~4.5 GB | ⚠️ parziale | Buona qualità |
+| `phi3` | ~2.3 GB | ❌ | Velocissimo, no tool calling |
 
 ---
 
@@ -212,19 +187,26 @@ hyperspace-agi-1.02/
 ├── registry/
 │   └── registry.py          # Landing pubblica, /dashboard, /nodes/active, /register
 ├── node/
-│   └── main.py              # API node: /status /peers /execute + auto-discovery
+│   └── main.py              # API node: /status /peers /execute + auto-discovery ECDSA
 ├── control-plane/
-│   └── main.py              # Dashboard mesh, memoria gzip TTL, /memory /task/*
+│   └── main.py              # OpenAI API, tool loop, smart routing, memoria gzip, OMEGA MCP
+├── memory-graph/
+│   └── ...                  # Esporta memoria CP → vault Obsidian, titolazione via Ollama
+├── infra-ui/
+│   └── ...                  # Bridge SSE: dashboard real-time, log viewer, topologia mesh
+├── ollama-titler/
+│   └── ...                  # Proxy Ollama leggero per titolazione automatica note memoria
 ├── shared/
 │   ├── identity.py          # ECDSA secp256k1: genera node_id, sign, verify
-│   ├── auth.py              # 🔧 JWT ES256 inter-nodo (in sviluppo)
-│   └── db.py                # 🔧 SQLite log/nodes/tasks (in sviluppo)
-├── authority/               # Registry legacy (mantenuto, non avviato di default)
-├── setup.sh                 # Setup guidato macOS/Linux
-├── setup.ps1                # Setup guidato Windows
-├── docker-compose.yml       # Compose sviluppo
-├── docker-compose.prod.yml  # Compose produzione
-├── .env.example             # Template variabili (5 variabili obbligatorie)
+│   └── db.py                # SQLite: log, nodes, tasks
+├── data/
+│   ├── searxng/
+│   │   └── settings.yml     # Config SearXNG: JSON API abilitata, engine IT
+│   └── obsidian-vault/      # Vault Obsidian montato da memory-graph e Obsidian GUI
+├── setup.sh
+├── setup.ps1
+├── docker-compose.yml       # Compose unico con profili GPU opzionali
+├── .env.example
 └── README.md
 ```
 
@@ -234,40 +216,75 @@ hyperspace-agi-1.02/
 
 ```bash
 # Registry
-REGISTRY_URL=                  # URL pubblico del registry
-REGISTRY_PUBLIC_URL=           # Stesso di REGISTRY_URL (usato dal registry stesso)
-NODE_TTL=300                   # Secondi prima che un nodo venga considerato offline
+REGISTRY_URL=                        # URL pubblico del registry
+REGISTRY_PUBLIC_URL=                 # Stesso di REGISTRY_URL
+NODE_TTL=300                         # Secondi prima che un nodo sia offline
 
 # Node
-PUBLIC_ENDPOINT=               # URL pubblico raggiungibile dagli altri nodi
-BOOT_PEERS=                    # Peer iniziali opzionali: "ip1:8084,ip2:8084"
-PEER_MAX_AGE_S=120             # Età massima peer prima del prune
-HEARTBEAT_EVERY=15             # Secondi tra un heartbeat e il successivo
+PUBLIC_ENDPOINT=                     # URL pubblico ngrok del node
+BOOT_PEERS=                          # Peer iniziali opzionali
+HEARTBEAT_EVERY=15
+PEER_MAX_AGE_S=120
 
 # Inferenza
-INFERENCE_BACKEND=ollama       # ollama | lmstudio | ollama-docker
 OLLAMA_URL=http://host.docker.internal:11434
 OLLAMA_MODEL=phi3
+INFERENCE_BACKEND=ollama             # ollama | lmstudio
+TOOL_CAPABLE_MODELS=                 # Lista pattern modelli, o * per tutti
 
 # Memoria
-MEMORY_TTL_DAYS=7              # Giorni prima che una entry venga eliminata
-MEMORY_MAX_ENTRIES=200         # Numero massimo entry in memoria gzip
+MEMORY_TTL_DAYS=7
+MEMORY_MAX_ENTRIES=200
 
-# Security (v1.02)
-JWT_TTL=300                    # 🔧 durata JWT in secondi (in sviluppo)
+# SearXNG
+SEARXNG_URL=http://searxng:8080      # URL interno Docker (non modificare)
+SEARXNG_PORT=8092                    # Porta host esposta
+SEARXNG_SECRET=hyperspace-searxng-secret
+
+# Memory Graph / Titler
+TITLER_ENABLED=true
+TITLER_MODEL=qwen2:0.5b
+MEMORY_EXPORT_INTERVAL=30
 ```
 
 ---
 
 ## API Reference
 
+### Control Plane (porta 8085)
+
+| Method | Path | Descrizione |
+|---|---|---|
+| POST | `/v1/chat/completions` | OpenAI-compatible — stream e non-stream, tool calling loop |
+| GET | `/v1/models` | Lista modelli disponibili (formato OpenAI) |
+| GET | `/dashboard` | Dashboard HTML |
+| GET | `/mesh/nodes` | Nodi mesh aggregati |
+| GET | `/mesh/topology` | Grafo nodi + archi PEX |
+| GET | `/memory` | Memoria gzip (`?limit=N`) |
+| POST | `/memory/push` | Ricevi entry da nodo remoto |
+| GET | `/memory/stats` | Statistiche memoria |
+| GET | `/logs` | Log paginati (`?type=&status=&node=&q=`) |
+| POST | `/logs/add` | Aggiungi log entry |
+| GET | `/logs/export` | Export CSV o JSON |
+| POST | `/logs/clear` | Svuota log |
+| GET | `/tasks` | Lista tasks |
+| POST | `/task/create` | Crea task |
+| POST | `/task/assign` | Assegna ed esegui task |
+| GET | `/health` | Ping + stato memoria + nodi |
+| GET | `/hb/status` | Stato heartbeat loop |
+| POST | `/mcp` | JSON-RPC 2.0 — bridge OMEGA Obsidian |
+| GET | `/config/advanced` | Leggi config runtime |
+| POST | `/config/advanced` | Aggiorna config runtime |
+| POST | `/config/secret/rotate` | Ruota shared secret |
+| GET | `/mesh/node/<ep>/pull` | Pull modello Ollama su nodo remoto (SSE) |
+
 ### Registry (porta 8086)
 
 | Method | Path | Descrizione |
 |---|---|---|
-| GET | `/` | Landing page pubblica con istruzioni join |
-| GET | `/dashboard` | Dashboard nodi attivi (auto-refresh 15s) |
-| GET | `/nodes/active` | JSON nodi vivi (TTL-filtered) — usato dall'auto-discovery |
+| GET | `/` | Landing page pubblica |
+| GET | `/dashboard` | Dashboard nodi live (auto-refresh 15s) |
+| GET | `/nodes/active` | Nodi vivi TTL-filtered (usato da auto-discovery) |
 | GET | `/nodes` | Tutti i nodi registrati |
 | POST | `/register` | Registra o aggiorna un nodo |
 | GET | `/health` | Ping |
@@ -276,37 +293,12 @@ JWT_TTL=300                    # 🔧 durata JWT in secondi (in sviluppo)
 
 | Method | Path | Descrizione |
 |---|---|---|
-| GET | `/health` | Ping rapido + uptime |
-| GET | `/status` | Schema completo (node_id, tier, peers, caps…) |
-| GET | `/identity` | Profilo pubblico immutabile |
-| GET | `/peers` | Lista peer noti con stato PEX |
-| POST | `/peer/add` | Registra un nuovo peer |
-| POST | `/announce` | Ricevi annuncio da un nuovo nodo |
-| POST | `/execute` | Esegui task LLM |
-| POST | `/verify` | Verifica firma ECDSA messaggio peer |
-| GET | `/ollama/health` | Stato Ollama/LM Studio |
-| GET | `/ollama/models` | Modelli disponibili |
-
-### Control Plane (porta 8085)
-
-| Method | Path | Descrizione |
-|---|---|---|
-| GET | `/dashboard` | Dashboard HTML |
-| GET | `/mesh/nodes` | Stato aggregato nodi mesh |
-| GET | `/status` | Status control-plane |
-| GET | `/memory` | Memoria locale gzip (parametro `?limit=N`) |
-| POST | `/memory/push` | Ricevi entry memoria da nodo remoto |
-| GET | `/memory/stats` | Statistiche memoria (entries, size, TTL) |
-| GET | `/tasks` | Lista tasks |
-| POST | `/task/create` | Crea task |
-| POST | `/task/assign` | Assegna ed esegui task |
-| GET | `/logs` | Stream logs |
 | GET | `/health` | Ping |
-| GET | `/hb/status` | Stato heartbeat loop |
-| POST | `/mcp` | JSON-RPC 2.0 — bridge OMEGA Obsidian |
-| GET | `/mesh/topology` | 🔧 Grafo nodi + archi PEX (in sviluppo) |
-
-> 🔧 = endpoint in sviluppo
+| GET | `/status` | Schema completo nodo |
+| GET | `/peers` | Lista peer PEX |
+| POST | `/execute` | Esegui task LLM |
+| POST | `/announce` | Ricevi annuncio da nuovo nodo |
+| GET | `/ollama/models` | Modelli disponibili |
 
 ---
 
@@ -314,50 +306,56 @@ JWT_TTL=300                    # 🔧 durata JWT in secondi (in sviluppo)
 
 | Feature | Stato |
 |---|---|
-| Registry pubblico con landing + dashboard | ✅ Implementato |
-| Auto-discovery dal registry al boot | ✅ Implementato |
-| Identità ECDSA secp256k1 | ✅ Implementato |
-| PEX gossip multi-macchina | ✅ Implementato |
+| Compose unico con profili GPU | ✅ Implementato |
+| OpenAI-compatible API (`/v1/chat/completions`) | ✅ Implementato |
+| Tool calling loop (max 5 iterazioni) | ✅ Implementato |
+| Tool `web_search` via SearXNG self-hosted | ✅ Implementato |
+| Tool `omega_query` / `omega_store` | ✅ Implementato |
+| Smart routing nodi (tier/vram/peers/uptime) | ✅ Implementato |
+| Nodo locale root/hub auto-promosso al boot | ✅ Implementato |
+| Memory sync inter-nodo nell’heartbeat | ✅ Implementato |
 | Memoria gzip con TTL + pruning | ✅ Implementato |
-| Dashboard mesh + Log Viewer | ✅ Implementato |
-| Setup guidato (sh / ps1) | ✅ Implementato |
+| Memory Graph → vault Obsidian | ✅ Implementato |
+| Obsidian GUI nel browser (KasmVNC) | ✅ Implementato |
+| Ollama Titler (titolazione automatica note) | ✅ Implementato |
 | OMEGA Obsidian bridge (MCP JSON-RPC 2.0) | ✅ Implementato |
-| NODE_TTL 300s + PEER_MAX_AGE_S 120s | ✅ Implementato |
-| Authority server | ⚠️ Legacy — disabilitato di default |
-| Firma inter-nodo in produzione | 🔧 In sviluppo |
-| JWT tra nodi | 🔧 In sviluppo |
-| Tier dinamico leaf → hub | 🔧 In sviluppo |
-| UI topologia grafo | 🔧 In sviluppo |
+| Registry pubblico + auto-discovery | ✅ Implementato |
+| Identità ECDSA secp256k1 | ✅ Implementato |
+| Dashboard mesh + Log Viewer real-time | ✅ Implementato |
+| Health check JSON-aware (zombie detection) | ✅ Implementato |
+| Firma inter-nodo JWT in produzione | 🔧 In sviluppo |
+| UI topologia grafo interattiva | 🔧 In sviluppo |
 
 ---
 
 ## Changelog
 
-### v1.02 (Giugno 2026 — in sviluppo attivo)
-- **Registry pubblico** con landing page, dashboard nodi live (auto-refresh 15s), `/nodes/active` TTL-filtered
-- **Auto-discovery** al boot: se `BOOT_PEERS` è vuoto il nodo chiama `GET /nodes/active` e si annuncia a tutti
-- **Memoria gzip** nel control-plane: storage compresso, pruning TTL (`MEMORY_TTL_DAYS`), max entries (`MEMORY_MAX_ENTRIES`)
-- **OMEGA Obsidian bridge**: `GET /health` + `POST /mcp` JSON-RPC 2.0 compatibile OMEGA plugin
-- **Bug fix mesh**: heartbeat robusto, endpoint normalizzazione `http://`, DB reload al restart, `PEER_MAX_AGE_S`, status recovery da `unreachable`
-- `NODE_TTL` default alzato a 300s, `HEARTBEAT_EVERY=15`, `PEER_MAX_AGE_S=120`
-- `.env.example` semplificato a 5 variabili obbligatorie
+### v1.02 (Giugno 2026)
+- **Compose unico** con profili GPU (`cpu`, `nvidia`, `amd`, `intel`, `vulkan`)
+- **OpenAI-compatible API** `/v1/chat/completions` con streaming SSE e tool calling loop
+- **SearXNG self-hosted** — tool `web_search` usa `/search?format=json`, nessuna API key, fallback DDG lite
+- **Smart routing** — score ponderato tier/vram/peers/uptime, preferenza nodo locale
+- **Nodo locale root/hub** — registrato al boot, auto-promosso se è l'unico nodo attivo
+- **Memory sync** inter-nodo nell’heartbeat ogni 30s
+- **Memory Graph** — esporta memoria CP su vault Obsidian con titolazione via `qwen2:0.5b`
+- **Obsidian GUI** nel browser via KasmVNC (`:8091`)
+- **Ollama Titler** — container dedicato per titolazione leggera note memoria
+- **Health check JSON-aware** — nodi zombie ngrok (HTML 403) marcati `unreachable`
+- Fix: tool loop robusto con fallback no-tools per modelli senza function calling
+- Fix: DB reload al boot, status recovery, endpoint dedup
 
 ### v1.01 (Giugno 2026)
 - Log Viewer esteso: tab Connection Tests, Node Communication, Dreams, Node Chats
-- Advanced Setup: gestione Secret, Authority Server, Mesh/MHT dalla UI
-- Task UI: create e assign task direttamente dalla dashboard
-- Config avanzata: salvataggio e rotazione shared secret dal control-plane
+- Advanced Setup: gestione Secret, Authority Server, Mesh dalla UI
+- Task UI: create e assign task dalla dashboard
+- Config avanzata: salvataggio e rotazione shared secret
 
 ### v1.0 (Giugno 2026)
 - Mesh stabile multi-macchina via BOOT_PEERS + PEX
 - Dashboard rinnovata con card live per ogni nodo
-- Schema `/status` con `peers_active`, `peers_known`, `capabilities`, `vram_gb`, `endpoint`
+- Schema `/status` con `peers_active`, `vram_gb`, `capabilities`
 
 ### v0.9 (Giugno 2026)
-- Identità ECDSA secp256k1 persistente (`shared/identity.py`)
+- Identità ECDSA secp256k1 persistente
 - Primo prototipo PEX funzionante
 - Setup guidato `setup.sh` / `setup.ps1`
-
-### v0.8 (Giugno 2026)
-- Base Docker + Ollama
-- Primo node con `/execute` e `/status`
