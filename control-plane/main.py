@@ -12,6 +12,7 @@
 # fix: _TOOL_HANDLERS definito dopo le funzioni omega (NameError fix)
 # fix: DB reload al boot, status recovery, endpoint dedup
 # fix: SSE stream headers
+# fix: web_search — SearXNG self-hosted (http://searxng:8080) invece di DuckDuckGo Instant API
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
@@ -40,6 +41,10 @@ UI_BRIDGE_URL      = os.getenv("UI_BRIDGE_URL", "http://localhost:8099")
 MEMORY_FILE_GZ     = os.path.join(BASE_DIR, "memory.json.gz")
 MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
 MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
+
+# SearXNG — motore di ricerca self-hosted (container searxng nella stessa rete Docker)
+# Override via env: SEARXNG_URL=http://searxng:8080
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080").rstrip("/")
 
 # ── NODO ROOT/HUB LOCALE ─────────────────────────────────────────────────────
 # LOCAL_NODE_ID       : ID stabile (default: deriva da hostname)
@@ -476,40 +481,69 @@ def _omega_stats(args: dict) -> str:
     )
 
 # ── WEB SEARCH ────────────────────────────────────────────────────────────────
+# Usa SearXNG self-hosted (container searxng, endpoint SEARXNG_URL).
+# SearXNG espone un JSON API su /search?q=...&format=json
+# Fallback: se SearXNG non disponibile, tenta DuckDuckGo lite (scraping HTML).
 def _tool_web_search(args: dict) -> str:
     query       = str(args.get("query", "")).strip()
     max_results = min(int(args.get("max_results", 5)), 10)
     if not query:
         return "Errore: query vuota."
+
+    # ── 1. SearXNG JSON API ───────────────────────────────────────────────────
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.02)", "Accept": "application/json"}
-        params  = {"q": query, "format": "json", "no_html": "1", "no_redirect": "1"}
-        r       = requests.get("https://api.duckduckgo.com/", params=params, headers=headers, timeout=8)
-        data    = r.json()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.02)",
+            "Accept":     "application/json",
+        }
+        params = {
+            "q":        query,
+            "format":   "json",
+            "language": "it-IT",
+            "safesearch": "0",
+            "categories": "general",
+        }
+        r    = requests.get(f"{SEARXNG_URL}/search", params=params, headers=headers, timeout=10)
+        data = r.json()
         results = []
-        if data.get("AbstractText"):
-            results.append(f"[Risposta diretta] {data['AbstractText']}\nFonte: {data.get('AbstractURL', '')}")
-        for topic in data.get("RelatedTopics", [])[:max_results]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append(f"- {topic['Text']}\n  {topic.get('FirstURL', '')}")
-            elif isinstance(topic, dict) and topic.get("Topics"):
-                for sub in topic["Topics"][:2]:
-                    if sub.get("Text"):
-                        results.append(f"- {sub['Text']}\n  {sub.get('FirstURL', '')}")
-        if not results:
-            import re
-            r2       = requests.get("https://lite.duckduckgo.com/lite/", params={"q": query}, headers=headers, timeout=8)
-            snippets = re.findall(r'class="result-snippet"[^>]*>([^<]+)<', r2.text)
-            links    = re.findall(r'href="(https?://[^"]+)"', r2.text)
-            for i, s in enumerate(snippets[:max_results]):
-                results.append(f"- {s.strip()}\n  {links[i] if i < len(links) else ''}")
-        if not results:
-            return f"Nessun risultato trovato per: '{query}'"
-        push_log('system', f'web_search: {query[:60]}', detail=f'results={len(results)}', status='success')
-        return f"Risultati web per '{query}':\n\n" + "\n\n".join(results[:max_results])
-    except Exception as e:
-        push_log('system', f'web_search error: {query[:40]}', str(e), status='failed')
-        return f"Errore nella ricerca web: {e}"
+        # abstract/infobox
+        if data.get("infoboxes"):
+            ib = data["infoboxes"][0]
+            results.append(f"[Infobox] {ib.get('content','')[:300]}\nFonte: {ib.get('urls',[{}])[0].get('url','') if ib.get('urls') else ''}")
+        # risultati organici
+        for item in data.get("results", [])[:max_results]:
+            title   = item.get("title", "")
+            url     = item.get("url", "")
+            snippet = item.get("content", "")
+            results.append(f"- {title}\n  {snippet[:200]}\n  {url}")
+        if results:
+            push_log('system', f'web_search (searxng): {query[:60]}',
+                     detail=f'results={len(results)}', status='success')
+            return f"Risultati web per '{query}':\n\n" + "\n\n".join(results[:max_results])
+        # se SearXNG risponde ma risultati vuoti
+        push_log('system', f'web_search (searxng) empty: {query[:40]}', status='warn')
+    except Exception as e_searx:
+        push_log('system', f'web_search searxng error: {query[:40]}', str(e_searx), status='warn')
+
+    # ── 2. Fallback: DuckDuckGo lite (scraping HTML) ─────────────────────────
+    try:
+        import re
+        headers2  = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.02)"}
+        r2        = requests.get("https://lite.duckduckgo.com/lite/",
+                                 params={"q": query}, headers=headers2, timeout=8)
+        snippets  = re.findall(r'class="result-snippet"[^>]*>([^<]+)<', r2.text)
+        links     = re.findall(r'href="(https?://[^"]+)"', r2.text)
+        results2  = []
+        for i, s in enumerate(snippets[:max_results]):
+            results2.append(f"- {s.strip()}\n  {links[i] if i < len(links) else ''}")
+        if results2:
+            push_log('system', f'web_search (ddg-fallback): {query[:60]}',
+                     detail=f'results={len(results2)}', status='success')
+            return f"Risultati web per '{query}' (fallback):\n\n" + "\n\n".join(results2)
+    except Exception as e_ddg:
+        push_log('system', f'web_search ddg error: {query[:40]}', str(e_ddg), status='failed')
+
+    return f"Nessun risultato trovato per: '{query}'. SearXNG attivo su {SEARXNG_URL}?"
 
 def _tool_get_mesh_status(args: dict) -> str:
     active = [n for n in _node_list() if n.get("status") == "active"]
@@ -531,7 +565,7 @@ BUILTIN_TOOLS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Cerca informazioni aggiornate sul web tramite DuckDuckGo.",
+            "description": "Cerca informazioni aggiornate sul web tramite SearXNG (motore self-hosted).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -719,7 +753,6 @@ def v1_chat_completions():
 
     # ── STREAM ────────────────────────────────────────────────────────────────
     if stream:
-        # Se il nodo locale e' selezionato ma non ha endpoint, vai diretto a Ollama
         if selected and _best_endpoint(selected):
             node_id    = selected.get("node_id", "cp")
             endpoint   = _best_endpoint(selected)
@@ -757,7 +790,6 @@ def v1_chat_completions():
         return Response(stream_with_context(_stream_gen()), headers=_sse_headers())
 
     # ── NON-STREAM ────────────────────────────────────────────────────────────
-    # Se il nodo selezionato e' locale senza endpoint, usa Ollama diretto
     if selected and _best_endpoint(selected):
         node_id  = selected.get("node_id", "cp")
         endpoint = _best_endpoint(selected)
@@ -1147,7 +1179,7 @@ def _sync_memory_across_nodes():
         nid = node.get("node_id", "")
         ep  = _best_endpoint(node)
         if not ep or node.get("is_local"):
-            continue  # nodo locale non ha /memory remota
+            continue
         try:
             r = requests.get(f"{ep}/memory", params={"limit": 30}, timeout=4)
             if r.status_code == 200:
@@ -1194,7 +1226,6 @@ def _sync_memory_across_nodes():
 
 # ── HEARTBEAT ─────────────────────────────────────────────────────────────────
 def _is_valid_json_response(r) -> bool:
-    """Restituisce True se la risposta HTTP contiene JSON valido."""
     ct = r.headers.get("Content-Type", "")
     if "text/html" in ct or "text/plain" in ct:
         return False
@@ -1206,7 +1237,6 @@ def _is_valid_json_response(r) -> bool:
 
 def _poll_mesh_nodes():
     for ep in list(_known_endpoints):
-        # Non fare poll sul nodo locale (e' il CP stesso)
         if ep and _LOCAL_NODE_ENDPOINT and _normalize_endpoint(ep) == _normalize_endpoint(_LOCAL_NODE_ENDPOINT):
             continue
         try:
@@ -1236,7 +1266,6 @@ def _poll_mesh_nodes():
                 except Exception:
                     pass
             else:
-                # Risposta HTTP ma non JSON valido (es. ngrok 403 HTML) → unreachable
                 for nid, n in list(_nodes_by_id.items()):
                     if _normalize_endpoint(n.get("endpoint","")) == ep and n.get("node_id") != _LOCAL_NODE_ID:
                         _nodes_by_id[nid]["status"] = "unreachable"
@@ -1251,7 +1280,6 @@ def _poll_mesh_nodes():
                     _nodes_by_id[nid]["status"] = "unreachable"
                     db.upsert_node({**_nodes_by_id[nid], "status": "unreachable"})
 
-    # ── Hub promotion: se nessun nodo remoto e' attivo, promuovi il locale ────
     if _LOCAL_NODE_ENABLED:
         remote_active = [
             n for n in _node_list()
@@ -1288,7 +1316,7 @@ def heartbeat_loop():
             hb_state["last_memory_sync"] = hb_state["last_tick"]
         for node in _node_list():
             if node.get("status") != "active": continue
-            if node.get("is_local"): continue  # skip heartbeat ping su nodo locale
+            if node.get("is_local"): continue
             nid = node.get("node_id", node.get("endpoint","unknown"))[:12]
             ep  = _best_endpoint(node)
             if not ep: continue
@@ -1305,7 +1333,6 @@ def heartbeat_loop():
                     _notify_bridge("task", {"from": "cp", "to": nid, "type": "heartbeat",
                                             "label": f"HB#{cycle} {lat}ms"})
                 else:
-                    # HTML response → nodo zombie
                     push_log('connection_test', f'HB#{cycle} zombie -> {nid}',
                              f'HTTP {r.status_code} non-JSON ({r.headers.get("Content-Type","?")})',
                              source='control-plane', target=nid, status='failed', trace_id=tid)
