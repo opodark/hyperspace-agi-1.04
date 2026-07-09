@@ -1,3 +1,1 @@
-# HyperSpace AGI 1.03
-
-Snapshot 1.03 with connectors and web node subfolder.
+Full copy from 1.02 for 1.03 snapshot - updated with web node improvements.
