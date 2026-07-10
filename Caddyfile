@@ -1,22 +1,8 @@
 :8085 {
-    # Web Node
-    handle /register*   { reverse_proxy localhost:9001 }
-    handle /heartbeat*  { reverse_proxy localhost:9001 }
-    handle /deregister* { reverse_proxy localhost:9001 }
-
-    # Control Plane
-    handle /hb/*        { reverse_proxy localhost:8085 }
-    handle /mesh/*      { reverse_proxy localhost:8085 }
-    handle /tasks*      { reverse_proxy localhost:8085 }
-    handle /logs*       { reverse_proxy localhost:8085 }
-    handle /api*        { reverse_proxy localhost:8085 }
-    handle /health*     { reverse_proxy localhost:8085 }
-
-    # Ollama
-    handle /ollama/*    { reverse_proxy localhost:11434 }
+    reverse_proxy localhost:8085
 
     header {
-        Access-Control-Allow-Origin  "*"
+        Access-Control-Allow-Origin "*"
         Access-Control-Allow-Methods "GET, POST, OPTIONS"
         Access-Control-Allow-Headers "content-type, ngrok-skip-browser-warning, x-hyperspace-*"
     }
