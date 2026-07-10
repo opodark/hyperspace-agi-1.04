@@ -849,7 +849,27 @@ def omega_health():
         "ttl_days": MEMORY_TTL_DAYS,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
-
+# ── API DISCOVERY (per web-node e Lovable) ───────────────────────────────────
+@app.route("/api", methods=["GET"])
+def api_root():
+    return jsonify({
+        "name": "hyperspace-control-plane",
+        "status": "ok",
+        "version": "1.03",
+        "description": "HyperSpace AGI Control Plane - Enterprise Agent Operations Center",
+        "endpoints": {
+            "health": "/health",
+            "api": "/api",
+            "mesh_nodes": "/mesh/nodes",
+            "active_nodes": "/nodes/active",
+            "tasks": "/tasks",
+            "memory": "/memory",
+            "v1_models": "/v1/models",
+            "v1_chat_completions": "/v1/chat/completions"
+        },
+        "web_node_compatible": True,
+        "cors_enabled": True
+    })
 @app.route('/mcp', methods=['POST'])
 def omega_mcp():
     payload = request.get_json(force=True, silent=True) or {}
