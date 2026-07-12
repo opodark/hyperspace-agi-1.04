@@ -1,35 +1,11 @@
-# HyperSpace 1.04 — HIP + Msty Default
+# opodark-hyperspace-agi-1.03
 
-HyperSpace 1.04 adopts Msty as the default local AI workspace and agent runtime, while HIP remains the coordination protocol above heterogeneous runtimes.
+Hyperspace AGI 1.03 is the current mainline snapshot of the project: a distributed agent platform built around a control plane, authority/seed nodes, connector fabric, local runtime nodes, and a new browser/web-node path that can run without Docker or heavy local installs.
 
-This means:
-- Msty Studio becomes the default desktop workspace for local and hybrid agent workflows.
-- Msty Claw becomes the default autonomous runtime for single-host and edge agent execution.
-- Msty Nexus becomes the default gateway layer for local/cloud model access and OpenAI-compatible integration.
-- Ollama remains supported as a backend inference layer, but not as the primary product experience.
-- HyperSpace stays protocol-first: discovery, capability advertisement, intent routing, worker negotiation, and connector fabric remain the core.
+This release keeps the existing 1.02 core intact and extends it in two directions:
 
-## Architectural Positioning
-
-HyperSpace sits above individual runtimes.
-
-```text
-                AI Model
-                    │
-          Agent Runtime Layer
-     (Msty Claw, custom agents, others)
-                    │
-        ==========================
-         HyperSpace Intent Protocol (HIP)
-        ==========================
-                    │
-        HyperSpace Control Plane
-                    │
-     Distributed Worker Network
-```
-
-Msty provides the default execution surface.
-HyperSpace provides the coordination layer.
+- **Enterprise Local**: private network profile for internal company deployments, with seed propagation constrained to the tenant.
+- **Public Hub**: public-facing network profile that uses a landing page and propagates the free browser-node version.
 
 ## What is in this repo
 
@@ -43,16 +19,6 @@ HyperSpace provides the coordination layer.
 - `web-node/` — browser-side node subtree for lightweight clients and extension packaging.
 - `shared/` — shared models, events, identity, database helpers, and registry client.
 - `docs/` — architecture and deployment notes.
-- `msty-adapter/` — Msty runtime adapter (to be implemented).
-
-## Implementation Goals for 1.04
-- Intent schema (HIP)
-- Capability advertisement
-- Runtime adapter API
-- Intent Router
-- Worker negotiation
-- Browser Worker integration
-- Msty/Nexus adapter
 
 ## Connector fabric
 
@@ -103,27 +69,20 @@ Planned responsibilities:
 4. Split docs so the architecture of `Enterprise Local` and `Public Hub` is explicit.
 5. Decide whether the browser node should ship as a web app, extension, or both.
 
-## Quick Start
+## Quick start
+
+Use the project-specific setup scripts for your platform:
 
 ```bash
 ./setup.sh
-# or
-docker compose up --build
 ```
 
-**Development**:
-```bash
-npm run setup
-npx ts-node control-plane/index.ts
+or on Windows:
+
+```powershell
+.\setup.ps1
 ```
-
-Docker Compose included for control-plane + Msty adapter.
-
-## Product Principle
-
-HyperSpace is not another chat app.
-HyperSpace is the coordination protocol that lets independent AI runtimes cooperate across heterogeneous infrastructures.
 
 ## Notes
 
-This repository is the 1.04 evolution of the HyperSpace stack. It prioritizes the HyperSpace Intent Protocol (HIP) as the core coordination layer with Msty as default runtime.
+This repository is the 1.03 evolution of the HyperSpace stack. It is intentionally modular so the control plane, local agents, and browser nodes can evolve independently without forcing one deployment shape on every user.

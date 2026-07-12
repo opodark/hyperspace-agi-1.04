@@ -1,0 +1,6 @@
+{
+  "name": "@hyperspace/shared",
+  "version": "1.04.0",
+  "description": "Shared models and utilities for HyperSpace",
+  "main": "index.js"
+}

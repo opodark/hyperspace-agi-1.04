@@ -1,0 +1,8 @@
+{
+  "name": "@hyperspace/msty-adapter",
+  "version": "1.04.0",
+  "main": "index.js",
+  "dependencies": {
+    "@hyperspace/shared": "file:../shared"
+  }
+}
