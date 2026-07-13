@@ -502,17 +502,19 @@ async def execute_task(task: dict):
     model = task.get("model") or task.get("payload", {}).get("model") or DEFAULT_MODEL
     response_text = await ollama_generate(prompt, model)
 
-    # Salva in memoria locale e propaga al CP
-    entry = {
-        "node_id":   NODE_ID,
-        "task_id":   task_id,
-        "prompt":    prompt,
-        "response":  response_text,
-        "model":     model,
-        "timestamp": time.time(),
-    }
-    _save_memory(entry)
-    await _push_memory_to_cp(entry)
+    # Salva in memoria locale e propaga al CP, solo se non sono dei task per i titoli, altrimenti si genera loop infinito
+    is_title_task = task_id.startswith("title-")
+    if not is_title_task:
+        entry = {
+            "node_id":   NODE_ID,
+            "task_id":   task_id,
+            "prompt":    prompt,
+            "response":  response_text,
+            "model":     model,
+            "timestamp": time.time(),
+        }
+        _save_memory(entry)
+        await _push_memory_to_cp(entry)
 
     return {"node_id": NODE_ID, "task_id": task_id, "status": "done", "model": model, "response": response_text}
 
