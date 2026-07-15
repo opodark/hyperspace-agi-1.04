@@ -49,6 +49,45 @@ Eventi iniziali (pochi, ad alto impatto):
 - **Fase C — Bridge HyperSpace**: servizio bridge separato che traduce i task office in job HyperSpace — qui entra l'orchestrazione vera (routing modello, memoria, audit trail, permessi). Vedi API sotto.
 - **Fase D — Team use**: multi-workspace, permessi, review umana, documenti condivisi (DocSpace supporta agenti AI con provider/istruzioni/strumenti MCP dedicati).
 
+## Fase A — Checklist di setup e verifica
+
+### A1. Ollama pronto sul host
+```powershell
+ollama list                                # verifica che i modelli ci siano
+ollama pull qwen3-14b-uncensored           # HS_MODEL_GENERAL, se manca
+ollama pull qwen2.5-coder-14b-abliterated  # HS_MODEL_CODER, se manca
+curl http://localhost:11434/api/tags       # deve rispondere con la lista modelli
+```
+
+### A2. Tuning host — non arriva da `.env.windows`
+Le variabili `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE` in `.env.windows` valgono solo per i container Docker — l'Ollama nativo su Windows le legge dalle variabili d'ambiente **di sistema**, non dal file del repo. Per farle valere anche per l'istanza nativa usata da ONLYOFFICE:
+```powershell
+setx OLLAMA_HOST "0.0.0.0:11434"
+setx OLLAMA_KEEP_ALIVE "12h"
+setx OLLAMA_NUM_PARALLEL "2"
+setx OLLAMA_MAX_LOADED_MODELS "2"
+setx OLLAMA_MAX_QUEUE "64"
+```
+Riavviare il servizio/app Ollama dopo le `setx` — non si applicano al processo già in esecuzione.
+
+### A3. ONLYOFFICE Desktop Editors
+- Installare la versione Desktop (free) — non Document Server, non serve Docker per questa fase.
+- Aprire un documento di test.
+- Impostazioni del plugin AI (Plugins → AI, o Settings → AI Assistant a seconda della versione).
+- Aggiungere provider: se è disponibile "Ollama" come opzione nativa → URL `http://localhost:11434`. Se il plugin espone solo "custom OpenAI-compatible" → URL `http://localhost:11434/v1`, campo API key con un placeholder qualsiasi (Ollama non lo verifica).
+- Selezionare modello: `qwen3-14b-uncensored`.
+
+### A4. Round-trip test
+- Selezionare un paragrafo di testo nel documento.
+- Lanciare l'azione AI (summarize o prompt custom).
+- Verificare: risposta coerente, tempo di risposta, nessun errore di connessione.
+- Ripetere una volta con `qwen2.5-coder-14b-abliterated` su un pezzo di codice/testo tecnico, per un secondo data point.
+
+### A5. Cosa annotare (decide la Fase B/C)
+- Latenza percepita per risposta corta vs lunga.
+- Se il plugin regge il context window di 8192 token o va in timeout.
+- Se serve `OLLAMA_REQUEST_TIMEOUT`/`OLLAMA_LOAD_TIMEOUT` più alti di quelli in `.env.windows` (300s / 15m).
+
 ## API del bridge (Fase C — MVP)
 
 MVP a 4 funzioni, corrispondenti ai 4 endpoint principali. Copre `document.summary_requested`, `document.rewrite_requested`, `document.action_items_requested` e una classificazione generica; `sheet.table_extract_requested`, `slides.outline_requested` e `pdf.extract_requested` restano fuori dall'MVP e vengono aggiunti in una fase successiva una volta stabilizzato l'envelope.
