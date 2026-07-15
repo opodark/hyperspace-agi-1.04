@@ -1,0 +1,86 @@
+version: '3.9'
+
+# ============================================================
+# HyperSpace AGI — Windows host "primary-brain" (asus-v3607-main)
+#
+# Ollama resta sul Windows host; HyperSpace e i servizi accessori
+# girano in Docker. host.docker.internal fa parlare i container
+# con Ollama sull'host.
+#
+# NOTE:
+#  - hyperspace-core builda control-plane/Dockerfile (main.py, v1.02),
+#    che espone la porta 8085 e legge OLLAMA_URL / OLLAMA_MODEL, non
+#    ancora HS_MODEL_GENERAL / HS_MODEL_CODER / HS_CONFIG_DIR ecc.
+#    Qui sotto mappiamo i nuovi env sui vecchi così il servizio parte
+#    funzionante; il routing generale/coder e i path HS_* restano
+#    predisposti per quando control-plane verrà aggiornato al nuovo
+#    schema 1.04.
+#  - msty-adapter è escluso di proposito in questa fase.
+#
+# Uso:
+#   cp .env.windows .env
+#   docker compose -f docker-compose.windows.yml up -d --build
+#
+# (Compose interpola le ${VAR} nello YAML solo da un file chiamato
+# letteralmente .env accanto al compose file, non da env_file: — da qui
+# la copia. Stessa convenzione di docker-compose.prod.yml con .env.mac
+# / .env.ubuntu.)
+#
+# Dashboard:    http://localhost:8088
+# Open WebUI:   http://localhost:3000
+# ============================================================
+
+services:
+  hyperspace-core:
+    build: ./control-plane
+    container_name: hyperspace-core
+    restart: ${RESTART_POLICY}
+    env_file:
+      - ./.env
+    environment:
+      TZ: ${TZ}
+      LOG_LEVEL: ${LOG_LEVEL}
+      # schema attuale letto da control-plane/main.py
+      OLLAMA_URL: ${OLLAMA_RAW_BASE_URL}
+      OLLAMA_MODEL: ${HS_MODEL_GENERAL}
+      # nuovo schema 1.04 — predisposto, non ancora consumato da main.py
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      OLLAMA_CHAT_BASE_URL: ${OLLAMA_CHAT_BASE_URL}
+      OLLAMA_RAW_BASE_URL: ${OLLAMA_RAW_BASE_URL}
+      HS_MODEL_GENERAL: ${HS_MODEL_GENERAL}
+      HS_MODEL_GENERAL_FALLBACK: ${HS_MODEL_GENERAL_FALLBACK}
+      HS_MODEL_CODER: ${HS_MODEL_CODER}
+      HS_MODEL_CODER_FALLBACK: ${HS_MODEL_CODER_FALLBACK}
+      HS_DEFAULT_MODEL_ROLE: ${HS_DEFAULT_MODEL_ROLE}
+      HS_ENABLE_MODEL_ROUTING: ${HS_ENABLE_MODEL_ROUTING}
+      HS_ENABLE_CODE_AGENT: ${HS_ENABLE_CODE_AGENT}
+      HS_ENABLE_MEMORY: ${HS_ENABLE_MEMORY}
+      HS_ENABLE_TOOL_USE: ${HS_ENABLE_TOOL_USE}
+      OLLAMA_REQUEST_TIMEOUT: ${OLLAMA_REQUEST_TIMEOUT}
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${HS_CONFIG_DIR}:/app/config
+      - ${HS_DATA_DIR}:/app/data
+      - ${HS_MEMORY_DIR}:/app/memory
+      - ${HS_LOG_DIR}:/app/logs
+    ports:
+      - "127.0.0.1:8088:8085"
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: hyperspace-webui
+    restart: ${RESTART_POLICY}
+    env_file:
+      - ./.env
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      WEBUI_AUTH: "false"
+      WEBUI_NAME: "HyperSpace Control"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${HS_DATA_DIR}/open-webui:/app/backend/data
+    ports:
+      - "127.0.0.1:3000:8080"
