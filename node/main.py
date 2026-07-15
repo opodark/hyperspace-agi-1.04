@@ -390,11 +390,16 @@ async def startup_event():
     print(f"[NODE:{NODE_ID[:10]}] ollama -> {OLLAMA_URL}")
 
 # ── MIDDLEWARE firma ───────────────────────────────────────
-# /v1/chat/completions e' ora firmata: la chiama SOLO il control-plane
-# (mai Open WebUI direttamente), che la instrada qui in base allo scoring
-# dei nodi. Prima non lo era: chiunque raggiungesse il nodo poteva farlo
-# generare a piacimento, bypassando interamente il control-plane.
-SIGNED_PATHS = {"/announce", "/execute", "/peer/add", "/verify", "/v1/chat/completions"}
+# /v1/chat/completions NON passa da qui, di proposito: verifica la firma
+# da sola, dentro il proprio handler (vedi sotto). @app.middleware("http")
+# e' BaseHTTPMiddleware di Starlette, che per rileggere il body a valle usa
+# un trucco (request._receive = receive che "ripete" sempre lo stesso
+# messaggio). Questo trucco rompe le StreamingResponse: Starlette ascolta
+# in background un http.disconnect che il receive fittizio non manda mai,
+# causando "RuntimeError: Unexpected message received: http.request".
+# Dato che /v1/chat/completions e' l'ultimo handler (nessuno a valle deve
+# rileggere il body), verificare inline evita il problema alla radice.
+SIGNED_PATHS = {"/announce", "/execute", "/peer/add", "/verify"}
 
 @app.middleware("http")
 async def inter_node_auth(request: Request, call_next):
@@ -542,16 +547,25 @@ async def execute_task(task: dict):
 # ── /v1/chat/completions ────────────────────────────────────
 # Proxy trasparente verso il backend Ollama/LM Studio LOCALE di questo nodo.
 # Il control-plane instrada qui i chat completions (streaming e non) quando
-# sceglie questo nodo come target. Autenticata dal middleware inter_node_auth
-# (vedi SIGNED_PATHS sopra): solo il control-plane puo' invocarla, mai Open
-# WebUI direttamente. Dopo l'autenticazione, il nodo NON parla piu' con
-# Ollama direttamente: rigira a ollama-proxy (stesso container, porta
-# 11435), che si occupa di log/memoria condivisa e poi tocca Ollama per
-# ultimo. Catena completa: CP (firma) -> nodo (autentica) -> ollama-proxy
-# (strumenta) -> Ollama.
+# sceglie questo nodo come target. La firma viene verificata QUI dentro,
+# non nel middleware generico (vedi nota sopra su SIGNED_PATHS): solo il
+# control-plane puo' invocarla, mai Open WebUI direttamente. Dopo la
+# verifica, il nodo NON parla piu' con Ollama direttamente: rigira a
+# ollama-proxy (stesso container, porta 11435), che si occupa di
+# log/memoria condivisa e poi tocca Ollama per ultimo. Catena completa:
+# CP (firma) -> nodo (autentica) -> ollama-proxy (strumenta) -> Ollama.
 @app.post("/v1/chat/completions")
 async def v1_chat_completions_proxy(request: Request):
     body = await request.body()
+
+    if SIGN_REQUESTS:
+        hdrs = dict(request.headers)
+        if not verify_request_headers(hdrs, body):
+            return Response(
+                content='{"error":"invalid or missing node signature"}',
+                status_code=401, media_type="application/json",
+            )
+
     try:
         payload = json.loads(body or b"{}")
     except Exception:
