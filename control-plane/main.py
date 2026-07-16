@@ -36,6 +36,7 @@ from shared.identity import (
     make_request_headers,
     verify_request_headers,
 )
+from connectors.manager import ConnectorManager
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
@@ -187,6 +188,11 @@ CP_ID           = _cp_identity["node_id"]
 CP_PUBKEY       = _cp_identity["public_key"]
 _cp_private_key = _cp_identity["_private_key"]
 print(f"[CP] Federation identity: {CP_ID[:20]}... (federation={'ON' if FEDERATION_ENABLED else 'OFF'})")
+
+# Connettori esterni (GitHub, Google Workspace, Office365 — vedi connectors/).
+# Ognuno si auto-abilita solo se le sue env var/credenziali sono presenti
+# (BaseConnector.enabled); quelli senza credenziali non finiscono nel tool loop.
+connector_manager = ConnectorManager()
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def _normalize_endpoint(ep: str) -> str:
@@ -669,7 +675,7 @@ BUILTIN_TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     }
-]
+] + connector_manager.get_all_tools()
 
 # ── TOOL DISPATCHER ───────────────────────────────────────────────────────────
 def _execute_tool_call(tool_name: str, tool_args) -> str:
@@ -685,10 +691,13 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         "get_mesh_status": _tool_get_mesh_status,
     }
     handler = handlers.get(tool_name)
-    if not handler:
-        return f"Tool '{tool_name}' non trovato."
+    if handler:
+        try:
+            return handler(tool_args)
+        except Exception as e:
+            return f"Errore esecuzione tool '{tool_name}': {e}"
     try:
-        return handler(tool_args)
+        return connector_manager.execute(tool_name, tool_args)
     except Exception as e:
         return f"Errore esecuzione tool '{tool_name}': {e}"
 

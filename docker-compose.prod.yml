@@ -31,9 +31,12 @@ services:
     volumes:
       - open_webui_data:/app/backend/data
     environment:
-      # Punta al proxy del nodo (porta 11435) invece di Ollama diretto
-      # Questo fa sì che ogni prompt WebUI alimenti la memoria collettiva
-      OLLAMA_BASE_URL: http://node:11435
+      # WebUI deve parlare al control-plane OpenAI-compatible (/v1/chat/completions),
+      # non al proxy del nodo (11435, solo passthrough Ollama senza tool-calling):
+      # solo così passa dal tool-calling loop (incluso web_search) e alimenta comunque
+      # la memoria collettiva, che il control-plane logga instradando verso il nodo.
+      OPENAI_API_BASE_URL: "http://control-plane:8085/v1"
+      OPENAI_API_KEY: "dummy"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-change-me}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -41,7 +44,7 @@ services:
       - hyperspace
     restart: unless-stopped
     depends_on:
-      - node
+      - control-plane
 
   # ── Nodo agente (hub su Mac/Ubuntu, leaf su altri) ──────
   node:
