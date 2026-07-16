@@ -1,23 +1,15 @@
-# HyperSpace 1.04 — HIP + Msty Default
+# HyperSpace AGI 1.04 — HIP (HyperSpace Intent Protocol)
 
-HyperSpace 1.04 adopts Msty as the default local AI workspace and agent runtime, while HIP remains the coordination protocol above heterogeneous runtimes.
+HyperSpace is a coordination protocol that lets independent AI runtimes cooperate across heterogeneous infrastructure — not another chat app, but the layer that sits above individual agent runtimes and routes intents to the workers best suited to handle them.
 
-This means:
-- Msty Studio becomes the default desktop workspace for local and hybrid agent workflows.
-- Msty Claw becomes the default autonomous runtime for single-host and edge agent execution.
-- Msty Nexus becomes the default gateway layer for local/cloud model access and OpenAI-compatible integration.
-- Ollama remains supported as a backend inference layer, but not as the primary product experience.
-- HyperSpace stays protocol-first: discovery, capability advertisement, intent routing, worker negotiation, and connector fabric remain the core.
+The inference engine (Ollama, LM Studio, or any OpenAI-compatible backend) runs wherever you point it — natively on a host for direct GPU access, or in Docker via the optional GPU profiles. HyperSpace itself stays protocol-first: discovery, capability advertisement, intent routing, worker negotiation, and connector fabric are the core.
 
 ## Architectural Positioning
-
-HyperSpace sits above individual runtimes.
 
 ```text
                 AI Model
                     │
           Agent Runtime Layer
-     (Msty Claw, custom agents, others)
                     │
         ==========================
          HyperSpace Intent Protocol (HIP)
@@ -28,22 +20,20 @@ HyperSpace sits above individual runtimes.
      Distributed Worker Network
 ```
 
-Msty provides the default execution surface.
-HyperSpace provides the coordination layer.
-
 ## What is in this repo
 
-- `authority/` — trust/seed services and node coordination entrypoints.
-- `control-plane/` — orchestration, connector fabric, routing, dashboard, and task management.
-- `node/` — main agent runtime.
-- `worker/` — execution worker runtime.
-- `registry/` — service discovery and node registry.
-- `memory-graph/` — memory export and graph persistence.
-- `infra-ui/` — infrastructure and status dashboard.
-- `web-node/` — browser-side node subtree for lightweight clients and extension packaging.
-- `shared/` — shared models, events, identity, database helpers, and registry client.
+- `registry/` — service discovery, node registry, public landing/dashboard.
+- `control-plane/` — orchestration, OpenAI-compatible API, tool calling loop, connector fabric, dashboard, task management.
+- `node/` — agent worker runtime (ECDSA identity, PEX, `/execute`).
+- `memory-graph/` — exports control-plane memory to the Obsidian vault, with note titling.
+- `obsidian/` — Obsidian in the browser (KasmVNC) for browsing the memory vault.
+- `ollama-titler/` — optional dedicated Ollama instance for note titling, only needed on nodes without a usable native Ollama (see `docker-compose.yml` for the `standalone-titler` profile).
+- `infra-ui/` — real-time dashboard bridge (SSE, log viewer, mesh topology).
+- `authority/`, `worker/` — trust/seed services and execution workers from the earlier multi-worker layout (`docker-compose-2full.yml`).
+- `web-node/` — browser-side node subtree for lightweight clients.
+- `shared/` — shared models, events, identity, database helpers, registry client.
 - `docs/` — architecture and deployment notes.
-- `msty-adapter/` — Msty runtime adapter (to be implemented).
+- `data/` — mounted volumes (Obsidian vault, SearXNG config, node data).
 
 ## Implementation Goals for 1.04
 - Intent schema (HIP)
@@ -52,11 +42,10 @@ HyperSpace provides the coordination layer.
 - Intent Router
 - Worker negotiation
 - Browser Worker integration
-- Msty/Nexus adapter
 
 ## Connector fabric
 
-The control plane includes the enterprise connector layer for agents, focused on:
+The control plane includes an enterprise connector layer for agents, focused on:
 
 - GitHub
 - Google Workspace
@@ -95,35 +84,64 @@ Planned responsibilities:
 - provide lightweight worker capacity to the mesh,
 - keep the control plane reachable from a web-first client.
 
-## Suggested next steps
-
-1. Add the `web-node/` subtree if it is not already present.
-2. Keep the existing 1.02 core components unchanged.
-3. Wire the browser node into the control plane registry.
-4. Split docs so the architecture of `Enterprise Local` and `Public Hub` is explicit.
-5. Decide whether the browser node should ship as a web app, extension, or both.
-
 ## Quick Start
 
 ```bash
-./setup.sh
+git clone https://github.com/opodark/opodark-hyperspace-agi-1.03.git
+cd opodark-hyperspace-agi-1.03
+cp .env.example .env   # or .env.mac / .env.ubuntu / .env.windows depending on host
+
+./setup.sh   # macOS / Linux
 # or
-docker compose up --build
+.\setup.ps1  # Windows
+
+# or directly, once .env is in place:
+docker compose up -d --build
 ```
 
-**Development**:
+GPU profiles for a dockerized Ollama instead of a native one (pick one, optional):
+
+```bash
+docker compose --profile cpu up -d
+docker compose --profile nvidia up -d
+docker compose --profile amd up -d
+docker compose --profile intel up -d
+docker compose --profile vulkan up -d
+```
+
+After boot, services are reachable on `localhost`:
+
+| Service                | URL                            |
+| ----------------------- | ------------------------------- |
+| Open WebUI              | http://localhost:3000           |
+| Control Plane Dashboard | http://localhost:8085/dashboard |
+| Infra-UI Bridge         | http://localhost:8099           |
+| Registry                | http://localhost:8086/nodes     |
+| Node 1                  | http://localhost:8081/status    |
+| Memory Graph            | http://localhost:8090/status    |
+| Obsidian GUI             | http://localhost:8091           |
+| SearXNG                 | http://localhost:8092           |
+
+On Windows, use `docker-compose.windows.yml` instead (see comments at the top of that file for the `.env.windows` → `.env` copy step it expects).
+
+**Development** (Node/TS side of the control plane — HIP intent router, not the Python `main.py` service that actually ships in the containers):
 ```bash
 npm run setup
 npx ts-node control-plane/index.ts
 ```
-
-Docker Compose included for control-plane + Msty adapter.
 
 ## Product Principle
 
 HyperSpace is not another chat app.
 HyperSpace is the coordination protocol that lets independent AI runtimes cooperate across heterogeneous infrastructures.
 
+## Suggested next steps
+
+1. Wire the browser node into the control plane registry.
+2. Split docs so the architecture of `Enterprise Local` and `Public Hub` is explicit.
+3. Decide whether the browser node should ship as a web app, extension, or both.
+4. Reconcile the Node/TS HIP skeleton (`control-plane/index.ts`) with the Python `main.py` service that the Dockerfiles actually build, so there is a single source of truth for the control plane.
+
 ## Notes
 
-This repository is the 1.04 evolution of the HyperSpace stack. It prioritizes the HyperSpace Intent Protocol (HIP) as the core coordination layer with Msty as default runtime.
+This repository is the 1.04 evolution of the HyperSpace stack, layering the HyperSpace Intent Protocol (HIP) on top of the working 1.02/1.03 mesh (registry, control-plane, node workers, memory graph, Obsidian, SearXNG), with Open WebUI as the default interface.

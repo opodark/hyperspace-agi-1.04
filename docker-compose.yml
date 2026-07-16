@@ -1,27 +1,397 @@
-version: '3.9'
+# ============================================================
+# HyperSpace AGI — Compose Unico (stack completo, stile v1.02)
+#
+# Sostituisce lo stub incompleto lasciato dal merge 1.04
+# (build: . senza Dockerfile in root + comando npm su immagine Python).
+# Ripristinato dallo stack funzionante di v1.02, stessa struttura di
+# cartelle già presente in questo repo (registry/, node/, memory-graph/,
+# obsidian/, ollama-titler/, infra-ui/, control-plane/, shared/, data/).
+#
+# USAGE — scegli UN solo profilo GPU alla volta:
+#
+#   Nessun profilo (usa LM Studio o Ollama nativo sull'host):
+#     docker compose up -d
+#
+#   Ollama CPU nel container:
+#     docker compose --profile cpu up -d
+#
+#   Ollama NVIDIA GPU:
+#     docker compose --profile nvidia up -d
+#
+#   Ollama AMD ROCm:
+#     docker compose --profile amd up -d
+#
+#   Ollama Intel GPU:
+#     docker compose --profile intel up -d
+#
+#   Ollama Vulkan:
+#     docker compose --profile vulkan up -d
+#
+#   Ollama Titler dedicato (solo nodi senza Ollama nativo utilizzabile —
+#   vedi nota sul servizio ollama-titler qui sotto):
+#     docker compose --profile standalone-titler up -d
+#
+# Dashboard:       http://localhost:8099
+# Control Plane:   http://localhost:8085
+# Registry:        http://localhost:8086/nodes
+# Node 1:          http://localhost:8081
+# Memory Exporter: http://localhost:8090/status
+# Obsidian GUI:    http://localhost:8091   <- Obsidian nel browser (KasmVNC)
+#                  vault: ./data/obsidian-vault
+# SearXNG:         http://localhost:8092  (web search engine self-hosted)
+# ============================================================
 
 services:
-  control-plane:
-    build: .
-    command: npm run start:control-plane
-    ports:
-      - "3000:3000"
-    volumes:
-      - .:/app
-    environment:
-      - NODE_ENV=development
 
-  msty-adapter:
-    build: ./msty-adapter
+  # -- Registry -------------------------------------------------------------------------
+  registry:
+    build:
+      context: ./registry
+      dockerfile: Dockerfile
+    container_name: hyperspace_registry
+    ports:
+      - "${REGISTRY_PORT:-8086}:${REGISTRY_PORT:-8086}"
+    environment:
+      REGISTRY_PORT: "${REGISTRY_PORT:-8086}"
+      NODE_TTL: "${NODE_TTL:-300}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      PYTHONUNBUFFERED: "1"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${REGISTRY_PORT:-8086}/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # -- SearXNG (web search self-hosted) -------------------------------------------------
+  # Usato internamente da control-plane per il tool web_search
+  searxng:
+    image: searxng/searxng:latest
+    container_name: hyperspace_searxng
+    ports:
+      - "${SEARXNG_PORT:-8092}:8080"
+    volumes:
+      - ./data/searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: "http://localhost:${SEARXNG_PORT:-8092}/"
+      SEARXNG_SECRET: "${SEARXNG_SECRET:-hyperspace-searxng-secret}"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -- Infra-UI Bridge ------------------------------------------------------------------
+  bridge:
+    build:
+      context: ./infra-ui
+      dockerfile: Dockerfile
+    container_name: hyperspace_bridge
+    depends_on:
+      registry:
+        condition: service_healthy
+      control-plane:
+        condition: service_started
+    ports:
+      - "0.0.0.0:${BRIDGE_PORT:-8099}:8099"
+    environment:
+      CP_URL:        "http://control-plane:8085"
+      REGISTRY_URL:  "http://registry:${REGISTRY_PORT:-8086}"
+      POLL_INTERVAL: "${POLL_INTERVAL:-4}"
+      PYTHONUNBUFFERED: "1"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8099/status"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # -- Ollama Titler (OPZIONALE — solo nodi senza Ollama nativo utilizzabile) -----------
+  # Di default il titling in memory-graph usa l'Ollama nativo dell'host
+  # (TITLER_URL=http://host.docker.internal:11434). Questo container va
+  # attivato solo su nodi deboli che non hanno un Ollama nativo raggiungibile:
+  # aggiunge ~3GB (immagine ollama + volume modelli suoi) duplicati rispetto
+  # all'Ollama già in uso dal resto dello stack. Per attivarlo:
+  #   docker compose --profile standalone-titler up -d
+  # e settare TITLER_URL=http://ollama-titler:11434 in .env
+  ollama-titler:
+    build:
+      context: ./ollama-titler
+      dockerfile: Dockerfile
+    container_name: hyperspace_ollama_titler
+    profiles: ["standalone-titler"]
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_titler_data:/root/.ollama
+    environment:
+      OLLAMA_NUM_THREADS: "2"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+
+  # -- Memory Graph ---------------------------------------------------------------------
+  memory-graph:
+    build:
+      context: ./memory-graph
+      dockerfile: Dockerfile
+    container_name: hyperspace_memory_graph
     depends_on:
       - control-plane
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data/obsidian-vault:/vault
     environment:
-      - MSTY_ENDPOINT=http://localhost:3001
+      CP_URL:           "http://control-plane:8085"
+      VAULT_PATH:       "/vault"
+      EXPORT_INTERVAL:  "${MEMORY_EXPORT_INTERVAL:-30}"
+      TITLER_ENABLED:   "${TITLER_ENABLED:-true}"
+      # default: riusa l'Ollama nativo dell'host — nessun container extra.
+      # Su nodi deboli, abilita il profilo standalone-titler e sovrascrivi
+      # questa var a http://ollama-titler:11434 in .env
+      TITLER_URL:       "${TITLER_URL:-http://host.docker.internal:11434}"
+      TITLER_MODEL:     "${TITLER_MODEL:-qwen2:0.5b}"
+      TITLER_BACKEND:   "${TITLER_BACKEND:-ollama}"
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
 
-  # Placeholder for registry, web-node, etc.
-  # registry:
-  #   ...
+  # -- Obsidian -------------------------------------------------------------------------
+  obsidian:
+    image: lscr.io/linuxserver/obsidian:latest
+    container_name: hyperspace_obsidian
+    depends_on:
+      - memory-graph
+    ports:
+      - "8091:3000"
+    volumes:
+      - ./data/obsidian-vault:/config/vaults
+      - obsidian_config:/config
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "${TZ:-Europe/Rome}"
+    security_opt:
+      - seccomp:unconfined
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+    shm_size: "1gb"
+
+  # -- Ollama CPU -----------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hyperspace_ollama
+    profiles: ["cpu"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_NUM_THREADS: "0"
+    restart: unless-stopped
+    networks:
+      - hyperspace-net
+
+  # -- Ollama NVIDIA --------------------------------------------------------------------
+  ollama-nvidia:
+    image: ollama/ollama:latest
+    container_name: hyperspace_ollama_nvidia
+    profiles: ["nvidia"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_NUM_GPU: "999"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - hyperspace-net
+
+  # -- Ollama AMD -----------------------------------------------------------------------
+  ollama-amd:
+    image: ollama/ollama:rocm
+    container_name: hyperspace_ollama_amd
+    profiles: ["amd"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add: [video, render]
+    environment:
+      HSA_OVERRIDE_GFX_VERSION: "11.0.0"
+      OLLAMA_NUM_GPU: "999"
+    restart: unless-stopped
+    networks:
+      - hyperspace-net
+
+  # -- Ollama Intel ---------------------------------------------------------------------
+  ollama-intel:
+    image: ollama/ollama:latest
+    container_name: hyperspace_ollama_intel
+    profiles: ["intel"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    devices:
+      - /dev/dri:/dev/dri
+    group_add: [render, video]
+    environment:
+      OLLAMA_NUM_GPU: "999"
+      ZES_ENABLE_SYSMAN: "1"
+      SYCL_CACHE_PERSISTENT: "1"
+    restart: unless-stopped
+    networks:
+      - hyperspace-net
+
+  # -- Ollama Vulkan --------------------------------------------------------------------
+  ollama-vulkan:
+    image: ollama/ollama:latest
+    container_name: hyperspace_ollama_vulkan
+    profiles: ["vulkan"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    devices:
+      - /dev/dri:/dev/dri
+    group_add: [render, video]
+    environment:
+      OLLAMA_NUM_GPU: "999"
+      GGML_VULKAN: "1"
+    restart: unless-stopped
+    networks:
+      - hyperspace-net
+
+  # -- Open WebUI -----------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: hyperspace_open_webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-key-32chars-ok!}
+      WEBUI_AUTH: "false"
+      WEBUI_NAME: "HyperSpace Control"
+      DEFAULT_LOCALE: "it-IT"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+
+  # -- Control Plane --------------------------------------------------------------------
+  control-plane:
+    build:
+      context: .
+      dockerfile: control-plane/Dockerfile
+    container_name: hyperspace_control_plane
+    depends_on:
+      registry:
+        condition: service_healthy
+      node-1:
+        condition: service_started
+      searxng:
+        condition: service_started
+    ports:
+      - "8085:8085"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NODE_ENDPOINTS: "${NODE_ENDPOINTS:-node-1:8084}"
+      REGISTRY_URL: "http://registry:${REGISTRY_PORT:-8086}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+      MEMORY_TTL_DAYS: "${MEMORY_TTL_DAYS:-7}"
+      MEMORY_MAX_ENTRIES: "${MEMORY_MAX_ENTRIES:-200}"
+      SEARXNG_URL: "http://searxng:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+
+  # -- Nodo 1 ---------------------------------------------------------------------------
+  node-1:
+    build:
+      context: .
+      dockerfile: node/Dockerfile
+    container_name: hyperspace_node_1
+    depends_on:
+      registry:
+        condition: service_healthy
+    ports:
+      - "8081:8084"
+    volumes:
+      - ./data/node-1:/app/data
+    environment:
+      NODE_HOSTNAME: ${NODE_HOSTNAME:-node-1}
+      NODE_PORT: "8084"
+      NODE_TIER: ${NODE_TIER:-leaf}
+      DATA_DIR: /app/data
+      PUBLIC_ENDPOINT: ${PUBLIC_ENDPOINT:-}
+      BOOT_PEERS: ${BOOT_PEERS:-}
+      REGISTRY_URL: "http://registry:${REGISTRY_PORT:-8086}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8085}
+      HEARTBEAT_EVERY: "${HEARTBEAT_EVERY:-15}"
+      PEER_MAX_AGE_S: "${PEER_MAX_AGE_S:-120}"
+      NODE_TTL: "${NODE_TTL:-300}"
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+      VRAM_GB: ${VRAM_GB:-0.0}
+      SIGN_REQUESTS: ${SIGN_REQUESTS:-true}
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
 
 networks:
   hyperspace-net:
     driver: bridge
+
+volumes:
+  ollama_data:
+  ollama_titler_data:
+  open_webui_data:
+  obsidian_config:

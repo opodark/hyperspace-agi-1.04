@@ -7,8 +7,8 @@ console.log('HyperSpace Control Plane 1.04 starting...');
 const router = new HyperSpaceIntentRouter({ register: async (c) => console.log('Registered', c) });
 
 const exampleCap: Capability = {
-  id: 'msty-claw-1',
-  name: 'Msty Claw Runtime',
+  id: 'default-runtime-1',
+  name: 'Default Agent Runtime',
   description: 'Default autonomous runtime',
   version: '1.0',
   supportedIntents: ['task', 'query'],
@@ -21,7 +21,7 @@ router.advertiseCapability(exampleCap).then(() => {
     type: 'task',
     payload: { action: 'summarize' },
     metadata: {
-      source: 'msty-studio',
+      source: 'control-plane',
       timestamp: new Date().toISOString(),
       priority: 5
     }
@@ -29,4 +29,6 @@ router.advertiseCapability(exampleCap).then(() => {
   return router.route(intent);
 }).then(result => {
   console.log('[Control Plane] Execution result:', result);
+}).catch(err => {
+  console.error('[Control Plane] Error:', err);
 });

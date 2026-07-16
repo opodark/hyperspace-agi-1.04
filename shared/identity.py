@@ -124,15 +124,19 @@ def verify_request_headers(headers: dict, body: bytes = b"", max_age_s: int = 30
     """Verifica gli header di firma di una richiesta inter-nodo in ingresso.
 
     Controlla:
-    - presenza di tutti gli header richiesti
+    - presenza di tutti gli header richiesti (case-insensitive: dict(request.headers)
+      di un'app ASGI restituisce sempre chiavi minuscole per spec, indipendentemente
+      da come il chiamante li ha inviati)
     - timestamp non troppo vecchio (replay protection, default 30s)
     - firma ECDSA valida su sha256(timestamp + body)
     """
     try:
-        node_id   = headers.get("X-Node-Id", "")
-        pubkey_hex = headers.get("X-Node-Pubkey", "")
-        ts_str    = headers.get("X-Node-Timestamp", "")
-        sig_b64   = headers.get("X-Node-Signature", "")
+        h = {str(k).lower(): v for k, v in headers.items()}
+
+        node_id    = h.get("x-node-id", "")
+        pubkey_hex = h.get("x-node-pubkey", "")
+        ts_str     = h.get("x-node-timestamp", "")
+        sig_b64    = h.get("x-node-signature", "")
 
         if not all([node_id, pubkey_hex, ts_str, sig_b64]):
             return False
