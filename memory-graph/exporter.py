@@ -1,21 +1,21 @@
 # memory-graph/exporter.py
-# HyperSpace AGI v1.02 -- Memory Graph Exporter + LLM Titler
-# Legge memory dal CP, genera titoli via LLM (qwen2:0.5b default),
+# HyperSpace AGI v1.03 -- Memory Graph Exporter + LLM Titler
+# Legge memory dal CP, genera titoli via il control plane stesso
+# (task/create + task/assign, stesso routing di qualsiasi altro task),
 # scrive .md nel vault Obsidian con frontmatter YAML e wikilinks.
 #
 # Env vars:
 #   CP_URL, VAULT_PATH, EXPORT_INTERVAL
 #   TITLER_ENABLED    true/false (default: true)
-#   TITLER_URL        URL Ollama o LM Studio (default: http://host.docker.internal:1234)
-#   TITLER_MODEL      modello da usare (default: qwen2:0.5b)
-#   TITLER_BACKEND    ollama | lmstudio (default: ollama)
+#   TITLER_MODEL      modello preferito tra quelli già disponibili
+#                      nella mesh (default: qwen2:0.5b)
 #
 # API:
 #   GET  /status
 #   GET  /export
 #   POST /export/force
 
-import os, time, threading, json, re, hashlib
+import os, time, threading, json, re, hashlib, uuid
 from datetime import datetime, timezone
 from flask import Flask, jsonify
 import requests
@@ -26,9 +26,7 @@ CP_URL           = os.getenv("CP_URL", "http://control-plane:8085")
 VAULT_PATH       = os.getenv("VAULT_PATH", "/vault")
 EXPORT_INTERVAL  = int(os.getenv("EXPORT_INTERVAL", "30"))
 TITLER_ENABLED   = os.getenv("TITLER_ENABLED", "true").lower() == "true"
-TITLER_URL       = os.getenv("TITLER_URL", "http://host.docker.internal:11434")
 TITLER_MODEL     = os.getenv("TITLER_MODEL", "qwen2:0.5b")
-TITLER_BACKEND   = os.getenv("TITLER_BACKEND", "ollama")  # ollama | lmstudio
 
 TITLE_CACHE_PATH = os.path.join(VAULT_PATH, ".title_cache.json")
 _title_cache: dict = {}
@@ -39,6 +37,7 @@ state = {
     "last_error":    None,
     "total_exports": 0,
     "titles_generated": 0,
+    "titles_failed": 0,
     "running":       False,
 }
 
@@ -54,7 +53,7 @@ def _ts_to_iso(ts) -> str:
     return str(ts)[:19]
 
 
-# ── Titolatore LLM ────────────────────────────────────────────
+# ── Titolatore — riusa il control plane invece di un'istanza Ollama dedicata ──
 
 def _load_title_cache():
     global _title_cache
@@ -81,46 +80,42 @@ def _entry_hash(entry: dict) -> str:
 
 
 def _call_llm_title(etype: str, content: str) -> str | None:
+    """Genera un titolo passando dal control plane (task/create + task/assign),
+    così il task viene instradato con lo stesso scoring di qualsiasi altro
+    task della mesh, invece di dipendere da un'istanza Ollama dedicata.
+    NOTA: passa deliberatamente da /task/* e non da /v1/chat/completions,
+    per non finire anche in memory.json.gz (evitando che ogni titolo generi
+    a sua volta una nuova nota da esportare al giro successivo).
+    """
     prompt = (
         f"Genera un titolo di massimo 6 parole per questa memoria di un agente IA.\n"
         f"Rispondi SOLO con il titolo, niente altro.\n\n"
         f"Tipo: {etype}\n"
         f"Contenuto: {content[:300]}"
     )
+    task_id = f"title-{uuid.uuid4().hex[:10]}"
     try:
-        if TITLER_BACKEND == "lmstudio":
-            r = requests.post(
-                f"{TITLER_URL}/v1/chat/completions",
-                json={
-                    "model": TITLER_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 20,
-                    "temperature": 0.3,
-                },
-                timeout=8,
-            )
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip().strip('"')
-        else:  # ollama
-            r = requests.post(
-                f"{TITLER_URL}/api/generate",
-                json={
-                    "model": TITLER_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"num_predict": 20, "temperature": 0.3},
-                },
-                timeout=8,
-            )
-            r.raise_for_status()
-            return r.json().get("response", "").strip().strip('"')
+        requests.post(
+            f"{CP_URL}/task/create",
+            json={"task_id": task_id, "prompt": prompt, "model": TITLER_MODEL},
+            timeout=8,
+        )
+        r = requests.post(
+            f"{CP_URL}/task/assign",
+            json={"task_id": task_id},
+            timeout=20,  # generazione titolo può richiedere più di qualche secondo
+        )
+        r.raise_for_status()
+        response_text = r.json().get("task", {}).get("result", {}).get("response", "")
+        title = response_text.strip().strip('"')
+        return title or None
     except Exception:
         return None
 
 
 def _get_title(entry: dict) -> str:
     etype   = entry.get("type") or entry.get("event_type") or "memory"
-    # Accetta sia 'content' che 'prompt'/'response' (formato nodo v1.02)
+    # Accetta sia 'content' che 'prompt'/'response' (formato nodo v1.02+)
     content = str(
         entry.get("content")
         or entry.get("prompt")
@@ -141,9 +136,11 @@ def _get_title(entry: dict) -> str:
     title = _call_llm_title(etype, content)
     if not title or len(title) > 80:
         title = f"[{etype}] {ts_str}"
+        state["titles_failed"] += 1
+    else:
+        state["titles_generated"] += 1
 
     _title_cache[h] = title
-    state["titles_generated"] += 1
     _save_title_cache()
     return title
 
@@ -207,7 +204,7 @@ def _entry_to_md(entry: dict) -> tuple[str, str]:
         f"---\n"
     )
 
-    # Corpo nota: mostra prompt + response se presenti (formato nodo v1.02)
+    # Corpo nota: mostra prompt + response se presenti (formato nodo v1.02+)
     body = content
     if response and response != content:
         body = f"**Prompt:**\n{content}\n\n**Response:**\n{response}"
@@ -233,7 +230,7 @@ def _write_index(entries: list, vault: str):
         "| ts | type | node | title |",
         "|---|---|---|---|",
     ]
-    for e in sorted(entries, key=lambda x: x.get("ts") or x.get("timestamp") or "", reverse=True)[:200]:
+    for e in sorted(entries, key=lambda x: _ts_to_iso(x.get("ts") or x.get("timestamp")) or "" , reverse=True)[:200]:
         ts    = _ts_to_iso(e.get("ts") or e.get("timestamp"))
         etype = e.get("type") or e.get("event_type") or "memory"
         node  = (e.get("node_id") or e.get("source") or "")[:16]
@@ -297,11 +294,10 @@ def export_loop():
 @app.route("/status")
 def status():
     return jsonify({
-        "service": "memory-graph", "version": "1.02",
+        "service": "memory-graph", "version": "1.03",
         "vault": VAULT_PATH, "cp_url": CP_URL,
         "export_interval": EXPORT_INTERVAL,
-        "titler": {"enabled": TITLER_ENABLED, "model": TITLER_MODEL,
-                   "backend": TITLER_BACKEND, "url": TITLER_URL},
+        "titler": {"enabled": TITLER_ENABLED, "model": TITLER_MODEL, "routing": "control-plane"},
         **state,
     })
 

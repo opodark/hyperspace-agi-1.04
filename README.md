@@ -25,9 +25,9 @@ The inference engine (Ollama, LM Studio, or any OpenAI-compatible backend) runs 
 - `registry/` — service discovery, node registry, public landing/dashboard.
 - `control-plane/` — orchestration, OpenAI-compatible API, tool calling loop, connector fabric, dashboard, task management.
 - `node/` — agent worker runtime (ECDSA identity, PEX, `/execute`).
-- `memory-graph/` — exports control-plane memory to the Obsidian vault, with note titling.
+- `memory-graph/` — exports control-plane memory to the Obsidian vault; note titling is routed through the control-plane task queue (`/task/create` + `/task/assign`), reusing the same node scoring as any other task.
 - `obsidian/` — Obsidian in the browser (KasmVNC) for browsing the memory vault.
-- `ollama-titler/` — optional dedicated Ollama instance for note titling, only needed on nodes without a usable native Ollama (see `docker-compose.yml` for the `standalone-titler` profile).
+- `federation-gateway/` — the only component meant to be exposed publicly for confederated control planes; forwards solely the whitelisted `/federate/execute` and `/federation/identity` routes to the internal control-plane.
 - `infra-ui/` — real-time dashboard bridge (SSE, log viewer, mesh topology).
 - `authority/`, `worker/` — trust/seed services and execution workers from the earlier multi-worker layout (`docker-compose-2full.yml`).
 - `web-node/` — browser-side node subtree for lightweight clients.
@@ -121,6 +121,7 @@ After boot, services are reachable on `localhost`:
 | Memory Graph            | http://localhost:8090/status    |
 | Obsidian GUI             | http://localhost:8091           |
 | SearXNG                 | http://localhost:8092           |
+| Federation Gateway       | http://localhost:8095           |
 
 On Windows, use `docker-compose.windows.yml` instead (see comments at the top of that file for the `.env.windows` → `.env` copy step it expects).
 

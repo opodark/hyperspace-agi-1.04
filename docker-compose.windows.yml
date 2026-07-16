@@ -15,9 +15,9 @@ version: '3.9'
 #    funzionante; il routing generale/coder e i path HS_* restano
 #    predisposti per quando control-plane verrà aggiornato al nuovo
 #    schema 1.04.
-#  - registry / node-1 / searxng / bridge / memory-graph / obsidian /
-#    ollama-titler sono lo stesso stack mesh di v1.02, portato qui e
-#    riletto sui path/env Windows (host.docker.internal, .env.windows).
+#  - registry / node-1 / searxng / bridge / memory-graph / obsidian sono
+#    lo stesso stack mesh di v1.02, portato qui e riletto sui path/env
+#    Windows (host.docker.internal, .env.windows).
 #    Tutte le variabili "mesh" non definite in .env.windows (REGISTRY_
 #    PUBLIC_URL, PUBLIC_ENDPOINT, ecc.) usano i default già presenti
 #    in v1.02 tramite ${VAR:-default}.
@@ -225,29 +225,10 @@ services:
       retries: 3
       start_period: 15s
 
-  # -- Ollama Titler (OPZIONALE — solo nodi senza Ollama nativo utilizzabile)
-  # Di default il titling usa l'Ollama nativo dell'host (vedi TITLER_URL
-  # sotto). Questo container va abilitato solo su nodi deboli che non hanno
-  # un Ollama nativo raggiungibile: aggiunge ~3GB (immagine ollama + volume
-  # modelli suoi) duplicati rispetto all'Ollama già in uso dal resto dello
-  # stack. Per attivarlo:
-  #   docker compose -f docker-compose.windows.yml --profile standalone-titler up -d
-  # e settare TITLER_URL=http://hyperspace-ollama-titler:11434 in .env
-  hyperspace-ollama-titler:
-    build:
-      context: ./ollama-titler
-      dockerfile: Dockerfile
-    container_name: hyperspace-ollama-titler
-    restart: ${RESTART_POLICY}
-    profiles: ["standalone-titler"]
-    volumes:
-      - ollama_titler_data:/root/.ollama
-    environment:
-      OLLAMA_NUM_THREADS: "2"
-    ports:
-      - "127.0.0.1:11435:11434"
-
   # -- Memory Graph (esporta memoria CP -> vault Obsidian) --------------------
+  # La titolazione NON usa più un'istanza Ollama dedicata: passa da
+  # /task/create + /task/assign del control-plane, riusando lo stesso
+  # scoring/routing di qualsiasi altro task della mesh.
   hyperspace-memory-graph:
     build:
       context: ./memory-graph
@@ -263,12 +244,7 @@ services:
       VAULT_PATH: /vault
       EXPORT_INTERVAL: "${MEMORY_EXPORT_INTERVAL:-30}"
       TITLER_ENABLED: "${TITLER_ENABLED:-true}"
-      # default: riusa l'Ollama nativo dell'host — nessun container extra.
-      # Su nodi deboli, abilita il profilo standalone-titler e sovrascrivi
-      # questa var a http://hyperspace-ollama-titler:11434 in .env
-      TITLER_URL: "${TITLER_URL:-http://host.docker.internal:11434}"
       TITLER_MODEL: "${TITLER_MODEL:-qwen2:0.5b}"
-      TITLER_BACKEND: "${TITLER_BACKEND:-ollama}"
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -298,5 +274,4 @@ services:
     shm_size: "1gb"
 
 volumes:
-  ollama_titler_data:
   obsidian_config:

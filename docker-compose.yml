@@ -1,44 +1,29 @@
 # ============================================================
-# HyperSpace AGI — Compose Unico (stack completo, stile v1.02)
+# HyperSpace AGI 1.04 — Compose Unico (stack completo, stile v1.02)
 #
-# Sostituisce lo stub incompleto lasciato dal merge 1.04
-# (build: . senza Dockerfile in root + comando npm su immagine Python).
 # Ripristinato dallo stack funzionante di v1.02, stessa struttura di
 # cartelle già presente in questo repo (registry/, node/, memory-graph/,
-# obsidian/, ollama-titler/, infra-ui/, control-plane/, shared/, data/).
+# obsidian/, infra-ui/, control-plane/, federation-gateway/, shared/, data/).
 #
 # USAGE — scegli UN solo profilo GPU alla volta:
 #
-#   Nessun profilo (usa LM Studio o Ollama nativo sull'host):
-#     docker compose up -d
+#   docker compose up -d
 #
-#   Ollama CPU nel container:
-#     docker compose --profile cpu up -d
-#
-#   Ollama NVIDIA GPU:
-#     docker compose --profile nvidia up -d
-#
-#   Ollama AMD ROCm:
-#     docker compose --profile amd up -d
-#
-#   Ollama Intel GPU:
-#     docker compose --profile intel up -d
-#
-#   Ollama Vulkan:
-#     docker compose --profile vulkan up -d
-#
-#   Ollama Titler dedicato (solo nodi senza Ollama nativo utilizzabile —
-#   vedi nota sul servizio ollama-titler qui sotto):
-#     docker compose --profile standalone-titler up -d
+#   Ollama CPU:     docker compose --profile cpu up -d
+#   Ollama NVIDIA:  docker compose --profile nvidia up -d
+#   Ollama AMD:     docker compose --profile amd up -d
+#   Ollama Intel:   docker compose --profile intel up -d
+#   Ollama Vulkan:  docker compose --profile vulkan up -d
 #
 # Dashboard:       http://localhost:8099
 # Control Plane:   http://localhost:8085
 # Registry:        http://localhost:8086/nodes
-# Node 1:          http://localhost:8081
+# Node 1:          http://localhost:8084
 # Memory Exporter: http://localhost:8090/status
 # Obsidian GUI:    http://localhost:8091   <- Obsidian nel browser (KasmVNC)
 #                  vault: ./data/obsidian-vault
 # SearXNG:         http://localhost:8092  (web search engine self-hosted)
+# Federation GW:   http://localhost:8095  (solo endpoint esposto ai CP confederati)
 # ============================================================
 
 services:
@@ -49,6 +34,9 @@ services:
       context: ./registry
       dockerfile: Dockerfile
     container_name: hyperspace_registry
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "${REGISTRY_PORT:-8086}:${REGISTRY_PORT:-8086}"
     environment:
@@ -71,6 +59,9 @@ services:
   searxng:
     image: searxng/searxng:latest
     container_name: hyperspace_searxng
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "${SEARXNG_PORT:-8092}:8080"
     volumes:
@@ -100,6 +91,9 @@ services:
       context: ./infra-ui
       dockerfile: Dockerfile
     container_name: hyperspace_bridge
+    env_file:
+      - path: ./.env
+        required: false
     depends_on:
       registry:
         condition: service_healthy
@@ -122,36 +116,18 @@ services:
       retries: 3
       start_period: 15s
 
-  # -- Ollama Titler (OPZIONALE — solo nodi senza Ollama nativo utilizzabile) -----------
-  # Di default il titling in memory-graph usa l'Ollama nativo dell'host
-  # (TITLER_URL=http://host.docker.internal:11434). Questo container va
-  # attivato solo su nodi deboli che non hanno un Ollama nativo raggiungibile:
-  # aggiunge ~3GB (immagine ollama + volume modelli suoi) duplicati rispetto
-  # all'Ollama già in uso dal resto dello stack. Per attivarlo:
-  #   docker compose --profile standalone-titler up -d
-  # e settare TITLER_URL=http://ollama-titler:11434 in .env
-  ollama-titler:
-    build:
-      context: ./ollama-titler
-      dockerfile: Dockerfile
-    container_name: hyperspace_ollama_titler
-    profiles: ["standalone-titler"]
-    ports:
-      - "11435:11434"
-    volumes:
-      - ollama_titler_data:/root/.ollama
-    environment:
-      OLLAMA_NUM_THREADS: "2"
-    networks:
-      - hyperspace-net
-    restart: unless-stopped
-
   # -- Memory Graph ---------------------------------------------------------------------
+  # La titolazione delle note NON usa più un'istanza Ollama dedicata:
+  # passa da /task/create + /task/assign del control-plane, riusando lo
+  # stesso scoring/routing di qualsiasi altro task della mesh.
   memory-graph:
     build:
       context: ./memory-graph
       dockerfile: Dockerfile
     container_name: hyperspace_memory_graph
+    env_file:
+      - path: ./.env
+        required: false
     depends_on:
       - control-plane
     ports:
@@ -163,12 +139,7 @@ services:
       VAULT_PATH:       "/vault"
       EXPORT_INTERVAL:  "${MEMORY_EXPORT_INTERVAL:-30}"
       TITLER_ENABLED:   "${TITLER_ENABLED:-true}"
-      # default: riusa l'Ollama nativo dell'host — nessun container extra.
-      # Su nodi deboli, abilita il profilo standalone-titler e sovrascrivi
-      # questa var a http://ollama-titler:11434 in .env
-      TITLER_URL:       "${TITLER_URL:-http://host.docker.internal:11434}"
       TITLER_MODEL:     "${TITLER_MODEL:-qwen2:0.5b}"
-      TITLER_BACKEND:   "${TITLER_BACKEND:-ollama}"
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -180,6 +151,9 @@ services:
   obsidian:
     image: lscr.io/linuxserver/obsidian:latest
     container_name: hyperspace_obsidian
+    env_file:
+      - path: ./.env
+        required: false
     depends_on:
       - memory-graph
     ports:
@@ -203,6 +177,9 @@ services:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama
     profiles: ["cpu"]
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "11434:11434"
     volumes:
@@ -218,6 +195,9 @@ services:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_nvidia
     profiles: ["nvidia"]
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "11434:11434"
     volumes:
@@ -242,6 +222,9 @@ services:
     image: ollama/ollama:rocm
     container_name: hyperspace_ollama_amd
     profiles: ["amd"]
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "11434:11434"
     volumes:
@@ -262,6 +245,9 @@ services:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_intel
     profiles: ["intel"]
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "11434:11434"
     volumes:
@@ -282,6 +268,9 @@ services:
     image: ollama/ollama:latest
     container_name: hyperspace_ollama_vulkan
     profiles: ["vulkan"]
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "11434:11434"
     volumes:
@@ -300,6 +289,9 @@ services:
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: hyperspace_open_webui
+    env_file:
+      - path: ./.env
+        required: false
     ports:
       - "3000:8080"
     volumes:
@@ -322,6 +314,9 @@ services:
       context: .
       dockerfile: control-plane/Dockerfile
     container_name: hyperspace_control_plane
+    env_file:
+      - path: ./.env
+        required: false
     depends_on:
       registry:
         condition: service_healthy
@@ -342,8 +337,35 @@ services:
       MEMORY_TTL_DAYS: "${MEMORY_TTL_DAYS:-7}"
       MEMORY_MAX_ENTRIES: "${MEMORY_MAX_ENTRIES:-200}"
       SEARXNG_URL: "http://searxng:8080"
+      FEDERATION_ENABLED: "${FEDERATION_ENABLED:-true}"
+      FEDERATION_PUBLIC_URL: "${FEDERATION_PUBLIC_URL:-}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+
+  # -- Federation Gateway -----------------------------------------------------------------
+  # Unico componente pensato per essere esposto pubblicamente (via Caddy/ngrok) nello
+  # scenario di CP confederati: inoltra solo le rotte esplicitamente whitelisted verso
+  # il control-plane interno (vedi federation-gateway/main.py). FEDERATION_PUBLIC_URL
+  # sul control-plane deve puntare all'URL pubblico di QUESTO servizio, non al CP.
+  federation-gateway:
+    build:
+      context: ./federation-gateway
+      dockerfile: Dockerfile
+    container_name: hyperspace_federation_gateway
+    env_file:
+      - path: ./.env
+        required: false
+    depends_on:
+      control-plane:
+        condition: service_started
+    ports:
+      - "${FEDERATION_GATEWAY_PORT:-8095}:8095"
+    environment:
+      CP_URL: "http://control-plane:8085"
+      PYTHONUNBUFFERED: "1"
     networks:
       - hyperspace-net
     restart: unless-stopped
@@ -354,6 +376,9 @@ services:
       context: .
       dockerfile: node/Dockerfile
     container_name: hyperspace_node_1
+    env_file:
+      - path: ./.env
+        required: false
     depends_on:
       registry:
         condition: service_healthy
@@ -392,6 +417,5 @@ networks:
 
 volumes:
   ollama_data:
-  ollama_titler_data:
   open_webui_data:
   obsidian_config:
