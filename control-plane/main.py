@@ -189,10 +189,11 @@ CP_PUBKEY       = _cp_identity["public_key"]
 _cp_private_key = _cp_identity["_private_key"]
 print(f"[CP] Federation identity: {CP_ID[:20]}... (federation={'ON' if FEDERATION_ENABLED else 'OFF'})")
 
-# Connector fabric — GitHub/Google/Office365 ecc., abilitati singolarmente in
-# base alle credenziali presenti in env (vedi connectors/base.py). I loro tool
-# vengono aggiunti a BUILTIN_TOOLS piu' sotto.
-_connector_manager = ConnectorManager()
+# Connettori esterni (GitHub, Google Workspace, Office365 — vedi connectors/).
+# Ognuno si auto-abilita solo se le sue env var/credenziali sono presenti
+# (BaseConnector.enabled -> is_available()); quelli senza credenziali non
+# finiscono nel tool loop. I loro tool vengono aggiunti a BUILTIN_TOOLS piu' sotto.
+connector_manager = ConnectorManager()
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def _normalize_endpoint(ep: str) -> str:
@@ -676,9 +677,7 @@ BUILTIN_TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     }
-]
-
-BUILTIN_TOOLS.extend(_connector_manager.get_all_tools())
+] + connector_manager.get_all_tools()
 
 # ── TOOL DISPATCHER ───────────────────────────────────────────────────────────
 def _execute_tool_call(tool_name: str, tool_args) -> str:
@@ -703,7 +702,7 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
     # ConnectorManager.execute() ritorna gia' un messaggio se nessuno gestisce
     # il tool.
     try:
-        return _connector_manager.execute(tool_name, tool_args)
+        return connector_manager.execute(tool_name, tool_args)
     except Exception as e:
         return f"Errore esecuzione tool '{tool_name}': {e}"
 

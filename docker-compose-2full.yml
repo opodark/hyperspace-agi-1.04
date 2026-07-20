@@ -130,13 +130,16 @@ services:
     image: ghcr.io/open-webui/open-webui:main
     container_name: hyperspace_open_webui
     depends_on:
-      - ollama
+      - control-plane
     ports:
       - "3000:8080"
     volumes:
       - open_webui_data:/app/backend/data
     environment:
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      # WebUI deve parlare al control-plane OpenAI-compatible (/v1/chat/completions),
+      # non a Ollama diretto: solo così passa dal tool-calling loop (incluso web_search).
+      OPENAI_API_BASE_URL: "http://control-plane:8085/v1"
+      OPENAI_API_KEY: "dummy"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-change-me}
     extra_hosts:
       - "host.docker.internal:host-gateway"

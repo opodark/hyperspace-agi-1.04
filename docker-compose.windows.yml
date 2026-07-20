@@ -102,7 +102,11 @@ services:
     env_file:
       - ./.env
     environment:
-      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # WebUI deve parlare al control-plane OpenAI-compatible (/v1/chat/completions),
+      # non a Ollama diretto: solo così passa dal routing nodo + tool-calling loop
+      # (incluso il tool web_search). OLLAMA_BASE_URL resta solo su hyperspace-core/hyperspace-node-1.
+      OPENAI_API_BASE_URL: "http://hyperspace-core:8085/v1"
+      OPENAI_API_KEY: "dummy"
       WEBUI_AUTH: "false"
       WEBUI_NAME: "HyperSpace Control"
     extra_hosts:
@@ -111,6 +115,8 @@ services:
       - ${HS_DATA_DIR}/open-webui:/app/backend/data
     ports:
       - "127.0.0.1:3000:8080"
+    depends_on:
+      - hyperspace-core
 
   # -- Registry -------------------------------------------------------------
   hyperspace-registry:

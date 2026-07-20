@@ -338,9 +338,10 @@ services:
       - open_webui_data:/app/backend/data
     environment:
       OLLAMA_BASE_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      # Rotta di default per il chat: passa dal control-plane (mesh, firma,
-      # task tracking) invece di colpire Ollama diretto. Selezionabile in
-      # webui come modello sotto la connessione "OpenAI", non "Ollama".
+      # WebUI deve parlare al control-plane OpenAI-compatible (/v1/chat/completions),
+      # non a Ollama diretto: solo così passa dal routing nodo + tool-calling loop
+      # (incluso il tool web_search). OPENAI_API_BASE_URLS/KEYS (plurale) sono i nomi
+      # correnti usati da Open WebUI — le varianti singolari sono deprecate.
       OPENAI_API_BASE_URLS: "http://control-plane:8085/v1"
       OPENAI_API_KEYS: "hyperspace-local"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-key-32chars-ok!}
