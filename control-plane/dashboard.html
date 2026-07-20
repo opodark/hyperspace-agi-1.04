@@ -564,7 +564,10 @@ async function refreshNodes(){
         +'<div class="nc-header"><span class="node-status-dot '+statusDotClass(n.status)+'"></span>'
         +'<span class="node-id" title="'+escH(n.node_id||'')+'">&#128187; '+escH(nid)+'</span>'
         +'<span class="tier-badge '+tierClass(tier)+'">'+tier+'</span>'
+	+(n.alias?'<span class="tier-badge" style="background:var(--primary-bg);color:var(--primary)">@'+escH(n.alias)+'</span>':'')
         +scoreBadge(score)
+	+'<button class="btn btn-ghost btn-sm" style="padding:1px 7px;font-size:.6rem;margin-left:auto" '
+        +'onclick="setAlias(\''+escH(n.node_id||'')+'\',\''+escH(n.alias||'')+'\')" title="Imposta/rimuovi alias">&#9998;</button>'
         +'</div>'
         +'<div class="node-meta">'
         +'<span class="nm-label">Endpoint</span><span class="nm-val" title="'+escH(ep)+'">'+escH(ep.replace('https://','').slice(0,30))+'</span>'
@@ -573,7 +576,8 @@ async function refreshNodes(){
         +'<span class="nm-label">Peers</span><span class="nm-val">'+(n.peers_active||0)+' active</span>'
         +'<span class="nm-label">Caps</span><span class="nm-val">'+escH(caps)+'</span>'
         +'<span class="nm-label">VRAM</span><span class="nm-val">'+(n.vram_gb||0)+' GB</span>'
-        +'</div><div class="node-peers">'
+        +'<span class="nm-label">Model ref</span><span class="nm-val">::'+escH(n.alias||(n.node_id||'').slice(0,8))+'</span>'
+	+'</div><div class="node-peers">'
         +'<span style="color:var(--text-faint);margin-right:4px">pubkey</span>'
         +'<span class="peer-tag" title="'+escH(n.public_key||'')+'">'+escH((n.public_key||'').slice(0,20))+'&hellip;</span>'
         +'</div></div>';
@@ -581,6 +585,22 @@ async function refreshNodes(){
   }catch(e){document.getElementById('nodesGrid').innerHTML='<div class="nodes-empty">Error: '+escH(e.message)+'</div>';}
 }
 setInterval(refreshNodes,15000); refreshNodes();
+
+async function setAlias(nodeId, currentAlias){
+  var alias = prompt('Alias per il nodo (lettere, numeri, - e _; vuoto = rimuovi):', currentAlias||'');
+  if(alias===null) return;
+  alias = alias.trim();
+  var url = '/nodes/'+encodeURIComponent(nodeId)+'/alias';
+  try{
+    var r = alias
+      ? await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:alias})})
+      : await fetch(url,{method:'DELETE'});
+    var d = await r.json();
+    if(d.error) alert('Errore: '+d.error);
+    refreshNodes();
+  }catch(e){alert('Errore: '+e.message);}
+}
+
 
 // ── TOPOLOGY (Cytoscape.js) ─────────────────────────────────────────
 var cy=null;

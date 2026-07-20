@@ -23,7 +23,7 @@
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import os, threading, time, requests, json, uuid, gzip, hashlib, socket
+import os, threading, time, requests, json, uuid, gzip, hashlib, socket, re
 from datetime import datetime, timedelta, timezone
 import sys
 
@@ -160,6 +160,7 @@ def _model_supports_tools(model_name: str) -> bool:
 
 tasks: dict = {}
 _nodes_by_id: dict  = {}
+_node_aliases: dict = {}   # node_id -> alias, cache in RAM sincronizzata con SQLite
 _known_endpoints: set = set()
 _synced_memory_keys: set = set()
 _last_discarded_warn_ids: set = set()  # throttling per il log "nodo senza endpoint"
@@ -215,7 +216,12 @@ def _best_endpoint(node_info):
     return ep
 
 def _node_list():
-    return list(_nodes_by_id.values())
+    out = []
+    for n in _nodes_by_id.values():
+        nn = dict(n)
+        nn["alias"] = _node_aliases.get(nn.get("node_id", ""), "")
+        out.append(nn)
+    return out
 
 def _load_nodes_from_db():
     nodes = db.get_all_nodes()
@@ -231,6 +237,16 @@ def _load_nodes_from_db():
     for ep in NODE_ENDPOINTS:
         _known_endpoints.add(_normalize_endpoint(ep))
     print(f"[CP] Loaded {len(_nodes_by_id)} nodes from DB, {len(_known_endpoints)} known endpoints")
+
+def _load_aliases_from_db():
+    global _node_aliases
+    _node_aliases = db.get_alias_map()
+    print(f"[CP] Loaded {len(_node_aliases)} node aliases from DB")
+
+def _node_ref_for(node_id: str) -> str:
+    """Riferimento breve da usare nel formato modello::ref: alias se
+    impostato, altrimenti node_id troncato."""
+    return _node_aliases.get(node_id) or node_id[:8]
 
 def _db_row_to_task(row: dict) -> dict:
     return {
@@ -384,6 +400,38 @@ def _select_best_node(active_nodes: list) -> dict:
         return None
     return max(executable, key=_node_score)
 
+def _parse_model_node_ref(model: str):
+    """Se il model id contiene '::', separa nome modello e riferimento nodo
+    (alias, node_id esatto o suo prefisso). Se il riferimento non risolve a
+    nessun nodo noto, ritorna comunque il model "pulito" e nessun pin —
+    fallback silenzioso allo scoring automatico invece di un errore secco,
+    utile se un alias e' stato rimosso dopo che Open WebUI l'ha già
+    cachato in una vecchia lista modelli."""
+    if "::" not in model:
+        return model, None
+    base, ref = model.split("::", 1)
+    base, ref = base.strip(), ref.strip()
+    if not ref:
+        return base, None
+    nid = db.get_node_id_by_alias(ref)
+    if nid:
+        return base, nid
+    for n in _node_list():
+        node_id = n.get("node_id", "")
+        if node_id == ref or node_id.startswith(ref):
+            return base, node_id
+    return base, None
+
+def _select_node_for_request(active: list, pinned_node_id: str = None):
+    if pinned_node_id:
+        pinned = next((n for n in active if n.get("node_id") == pinned_node_id), None)
+        if pinned and _best_endpoint(pinned):
+            return pinned
+        push_log('mesh_event',
+                 f'Nodo pinnato {pinned_node_id[:16]} non disponibile, fallback a scoring automatico',
+                 status='warn')
+    return _select_best_node(active)
+
 # ── MODELLI ───────────────────────────────────────────────────────────────────
 def _fetch_models():
     url = advanced_config["ollama"]["url"].rstrip("/")
@@ -407,6 +455,54 @@ def _fetch_models():
     except Exception as e:
         errors.append(f"lmstudio-style: {e}")
     return {"ok": False, "url": url, "backend": INFERENCE_BACKEND, "models": [], "errors": errors}
+
+_MODELS_CACHE = {"ts": 0.0, "data": None}
+_MODELS_CACHE_TTL = 15  # secondi — Open WebUI ripolla spesso /v1/models
+
+def _fetch_node_models(node: dict) -> list:
+    """Modelli disponibili su un nodo specifico della mesh."""
+    if node.get("is_local"):
+        return _fetch_models().get("models", [])
+    ep = _best_endpoint(node)
+    if not ep:
+        return []
+    try:
+        r = requests.get(f"{ep}/ollama/models", timeout=4)
+        if r.status_code == 200:
+            return r.json().get("models", []) or []
+    except Exception:
+        pass
+    return []
+
+def _aggregate_mesh_models(force: bool = False) -> dict:
+    """Aggrega i modelli di tutti i nodi attivi. Ritorna:
+      - 'bare':     lista modelli senza suffisso (routing automatico, come oggi)
+      - 'per_node': lista di dict {id, base_model, node_id, node_alias, tier}
+                    con id nel formato 'modello::ref' per il pinning esplicito
+    """
+    now = time.time()
+    if not force and _MODELS_CACHE["data"] is not None and (now - _MODELS_CACHE["ts"]) < _MODELS_CACHE_TTL:
+        return _MODELS_CACHE["data"]
+
+    active = [n for n in _node_list() if n.get("status") == "active"]
+    bare_models = set()
+    per_node = []
+    for node in active:
+        nid = node.get("node_id", "")
+        ref = _node_ref_for(nid)
+        for m in _fetch_node_models(node):
+            bare_models.add(m)
+            per_node.append({
+                "id":         f"{m}::{ref}",
+                "base_model": m,
+                "node_id":    nid,
+                "node_alias": _node_aliases.get(nid, ""),
+                "tier":       node.get("tier", "leaf"),
+            })
+
+    result = {"bare": sorted(bare_models), "per_node": per_node}
+    _MODELS_CACHE.update(ts=now, data=result)
+    return result
 
 # ── SSE HEADERS ───────────────────────────────────────────────────────────────
 def _sse_headers():
@@ -840,11 +936,23 @@ def _try_federated_execution(prompt: str, model: str):
 
 # ── /v1/models ────────────────────────────────────────────────────────────────
 @app.route('/v1/models')
+
+@app.route('/v1/models')
 def v1_models():
-    result     = _fetch_models()
+    agg = _aggregate_mesh_models()
     models_out = [
         {"id": m, "object": "model", "created": 0, "owned_by": "hyperspace-agi"}
-        for m in result.get("models", [DEFAULT_MODEL])
+        for m in agg["bare"]
+    ]
+    models_out += [
+        {
+            "id": e["id"], "object": "model", "created": 0, "owned_by": "hyperspace-agi",
+            "hyperspace": {
+                "base_model": e["base_model"], "node_id": e["node_id"],
+                "node_alias": e["node_alias"], "tier": e["tier"],
+            },
+        }
+        for e in agg["per_node"]
     ]
     if not models_out:
         models_out = [{"id": DEFAULT_MODEL, "object": "model", "created": 0, "owned_by": "hyperspace-agi"}]
@@ -856,11 +964,13 @@ def v1_chat_completions():
     if request.method == 'OPTIONS':
         return '', 204
 
-    data     = request.get_json(force=True, silent=True) or {}
-    messages = data.get("messages", [])
-    model    = data.get("model", advanced_config["ollama"]["defaultModel"])
-    stream   = data.get("stream", False)
-    task_id  = str(uuid.uuid4())[:8]
+    data      = request.get_json(force=True, silent=True) or {}
+    messages  = data.get("messages", [])
+    raw_model = data.get("model", advanced_config["ollama"]["defaultModel"])
+    model, pinned_node_id = _parse_model_node_ref(raw_model)
+    data      = {**data, "model": model}   # a valle il nodo riceve solo il nome modello "pulito"
+    stream    = data.get("stream", False)
+    task_id   = str(uuid.uuid4())[:8]
 
     prompt = ""
     for m in reversed(messages):
@@ -881,7 +991,7 @@ def v1_chat_completions():
     push_log('system', f'WebUI task: {task_id}', detail=f'model={model} stream={stream} prompt={prompt[:80]}')
 
     active      = [n for n in _node_list() if n.get("status") == "active"]
-    selected    = _select_best_node(active)
+    selected    = _select_node_for_request(active, pinned_node_id)
     ollama_base = advanced_config["ollama"]["url"].rstrip("/")
 
     # ── STREAM ────────────────────────────────────────────────────────────────
@@ -1203,6 +1313,40 @@ def get_mesh_nodes():
 @app.route('/nodes/active')
 def get_nodes_active():
     return jsonify([n for n in _node_list() if n.get("status") == "active"])
+
+@app.route('/nodes/aliases')
+def list_node_aliases():
+    return jsonify(_node_aliases)
+
+@app.route('/nodes/<node_id>/alias', methods=['POST'])
+def set_node_alias_route(node_id):
+    data  = request.get_json(force=True, silent=True) or {}
+    alias = str(data.get("alias", "")).strip()
+    if not alias:
+        return jsonify({"error": "alias obbligatorio"}), 400
+    if not re.match(r'^[a-zA-Z0-9_-]{1,32}$', alias):
+        return jsonify({"error": "alias non valido: solo lettere, numeri, - e _ (max 32 caratteri)"}), 400
+    if node_id not in _nodes_by_id:
+        return jsonify({"error": "nodo non trovato"}), 404
+    owner = db.get_node_id_by_alias(alias)
+    if owner and owner != node_id:
+        return jsonify({"error": f"alias '{alias}' già assegnato al nodo {owner[:16]}…"}), 409
+    try:
+        db.set_node_alias(node_id, alias)
+    except Exception as e:
+        return jsonify({"error": f"alias non disponibile: {e}"}), 409
+    _load_aliases_from_db()
+    _MODELS_CACHE["data"] = None  # forza refresh cache modelli col nuovo ref
+    push_log('mesh_event', f'Alias impostato: {node_id[:16]} -> {alias}', status='success')
+    return jsonify({"ok": True, "node_id": node_id, "alias": alias})
+
+@app.route('/nodes/<node_id>/alias', methods=['DELETE'])
+def remove_node_alias_route(node_id):
+    db.delete_node_alias(node_id)
+    _load_aliases_from_db()
+    _MODELS_CACHE["data"] = None
+    push_log('mesh_event', f'Alias rimosso: {node_id[:16]}', status='info')
+    return jsonify({"ok": True})
 
 @app.route('/mesh/node/<path:endpoint>/status')
 def get_node_status(endpoint):
@@ -1729,11 +1873,13 @@ def dashboard_alias():
 if __name__ == '__main__':
     _load_nodes_from_db()
     _load_tasks_from_db()
+    _load_aliases_from_db()
     _register_local_node()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=8085, debug=False)
 else:
     _load_nodes_from_db()
     _load_tasks_from_db()
+    _load_aliases_from_db()
     _register_local_node()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
