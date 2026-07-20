@@ -70,9 +70,10 @@ async def log_to_control_plane(entry: dict):
     """Invia l'interazione al control-plane come log mesh_event."""
     if not CONTROL_PLANE_URL:
         return
+    tps_suffix = f" · {entry['tokens_per_sec']} tok/s" if entry.get("tokens_per_sec") else ""
     payload = {
         "type":       "webui_interaction",
-        "summary":    f"[{NODE_ID[:10]}] {entry.get('model','?')}: {entry.get('prompt','')[:80]}",
+        "summary":    f"[{NODE_ID[:10]}] {entry.get('model','?')}: {entry.get('prompt','')[:80]}{tps_suffix}",
         "detail":     json.dumps(entry, ensure_ascii=False),
         "sourceNode": NODE_ID[:12],
         "targetNode": "webui",
@@ -100,13 +101,77 @@ async def propagate_to_peers(entry: dict):
             except Exception:
                 pass
 
+# ── METRICHE TOKEN/S ──────────────────────────────────────
+# Estratte dai contatori nativi di Ollama (eval_count/eval_duration) quando
+# disponibili (/api/generate, /api/chat), o approssimate da wall-clock +
+# usage OpenAI-style per /v1/chat/completions (Ollama non riporta lì i
+# tempi nativi). Il tick periodico durante lo streaming alimenta il pannello
+# "nerd stats" realtime del control-plane; il valore finale (più preciso,
+# basato su eval_duration) sostituisce l'ultimo tick a fine generazione.
+TICK_INTERVAL_S = 0.4
+
+async def _send_tick(iid: str, model: str, tokens_so_far: int,
+                      tokens_per_sec: float, elapsed_ms: int, done: bool = False):
+    if not CONTROL_PLANE_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{CONTROL_PLANE_URL}/metrics/tick", json={
+                "interaction_id": iid, "node_id": NODE_ID, "model": model,
+                "tokens_so_far": tokens_so_far, "tokens_per_sec": tokens_per_sec,
+                "elapsed_ms": elapsed_ms, "done": done,
+            })
+    except Exception:
+        pass
+
+def _tick_state(iid: str) -> dict:
+    return {"iid": iid, "tokens": 0, "t0": time.time(), "last_tick": 0.0}
+
+def _maybe_tick(state: dict, model: str):
+    """Schedula (fire-and-forget) un tick se è passato abbastanza tempo dall'ultimo."""
+    now = time.time()
+    if now - state["last_tick"] < TICK_INTERVAL_S:
+        return
+    state["last_tick"] = now
+    elapsed = now - state["t0"]
+    tps = round(state["tokens"] / elapsed, 2) if elapsed > 0 else 0.0
+    asyncio.create_task(_send_tick(state["iid"], model, state["tokens"], tps, int(elapsed * 1000)))
+
+def _metrics_from_native_done(chunk: dict, wall_ms: int) -> dict:
+    """Ollama-native (/api/generate, /api/chat): eval_duration è in nanosecondi
+    e misura solo il tempo di generazione vero (esclude load/queue), quindi è
+    più preciso del wall-clock."""
+    eval_count   = chunk.get("eval_count") or 0
+    eval_ns      = chunk.get("eval_duration") or 0
+    prompt_count = chunk.get("prompt_eval_count") or 0
+    prompt_ns    = chunk.get("prompt_eval_duration") or 0
+    m = {"tokens_in": prompt_count, "tokens_out": eval_count, "duration_ms": wall_ms}
+    if eval_count and eval_ns:
+        m["tokens_per_sec"] = round(eval_count / (eval_ns / 1e9), 2)
+    if prompt_count and prompt_ns:
+        m["prompt_tokens_per_sec"] = round(prompt_count / (prompt_ns / 1e9), 2)
+    return m
+
+def _metrics_from_usage(usage: dict, wall_ms: int) -> dict:
+    """OpenAI-compat (/v1/chat/completions): niente eval_duration nativo, quindi
+    tok/s è approssimato dal wall-clock della richiesta (include un filo di
+    overhead di rete/coda rispetto al valore native)."""
+    usage = usage or {}
+    tok_in  = usage.get("prompt_tokens") or 0
+    tok_out = usage.get("completion_tokens") or 0
+    m = {"tokens_in": tok_in, "tokens_out": tok_out, "duration_ms": wall_ms}
+    if tok_out and wall_ms:
+        m["tokens_per_sec"] = round(tok_out / (wall_ms / 1000), 2)
+    return m
+
 # ── INTERCETTA E LOGGA ───────────────────────────────────
 async def _record_interaction(
     prompt: str, response_text: str, model: str,
-    source: str = "webui", duration_ms: int = 0
+    source: str = "webui", duration_ms: int = 0,
+    interaction_id: str = "", metrics: dict = None,
 ):
     entry = {
-        "interaction_id": str(uuid.uuid4()),
+        "interaction_id": interaction_id or str(uuid.uuid4()),
         "ts":             datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "node_id":        NODE_ID,
         "node_tier":      NODE_TIER,
@@ -116,12 +181,17 @@ async def _record_interaction(
         "response":       response_text[:2000],  # tronca a 2KB per memoria
         "duration_ms":    duration_ms,
     }
+    if metrics:
+        entry.update(metrics)
     save_memory(entry)
     await asyncio.gather(
         log_to_control_plane(entry),
         propagate_to_peers(entry),
         return_exceptions=True,
     )
+    if interaction_id:
+        asyncio.create_task(_send_tick(interaction_id, model, entry.get("tokens_out", 0),
+                                        entry.get("tokens_per_sec", 0), duration_ms, done=True))
 
 # ── PROXY ROUTES — Ollama-native ─────────────────────────────
 
@@ -154,10 +224,12 @@ async def proxy_generate(request: Request):
     model  = body.get("model", "")
     stream = body.get("stream", True)
     t0 = time.time()
+    iid = str(uuid.uuid4())
 
     if stream:
         async def stream_and_log():
             full_response = ""
+            tick = _tick_state(iid)
             try:
                 async with httpx.AsyncClient(timeout=300.0) as client:
                     async with client.stream(
@@ -169,11 +241,15 @@ async def proxy_generate(request: Request):
                                 try:
                                     chunk = json.loads(line)
                                     full_response += chunk.get("response", "")
+                                    tick["tokens"] += 1
+                                    _maybe_tick(tick, model)
                                     if chunk.get("done"):
                                         dur = int((time.time() - t0) * 1000)
+                                        metrics = _metrics_from_native_done(chunk, dur)
                                         await _record_interaction(
                                             prompt, full_response, model,
-                                            duration_ms=dur
+                                            duration_ms=dur, interaction_id=iid,
+                                            metrics=metrics,
                                         )
                                 except Exception:
                                     pass
@@ -187,8 +263,10 @@ async def proxy_generate(request: Request):
                 r = await client.post(f"{OLLAMA_URL}/api/generate", json=body)
                 data = r.json()
                 dur  = int((time.time() - t0) * 1000)
+                metrics = _metrics_from_native_done(data, dur)
                 await _record_interaction(
-                    prompt, data.get("response", ""), model, duration_ms=dur
+                    prompt, data.get("response", ""), model, duration_ms=dur,
+                    interaction_id=iid, metrics=metrics,
                 )
                 return Response(content=r.content, media_type="application/json")
         except Exception as e:
@@ -208,10 +286,12 @@ async def proxy_chat(request: Request):
     )
     stream = body.get("stream", True)
     t0 = time.time()
+    iid = str(uuid.uuid4())
 
     if stream:
         async def stream_chat_and_log():
             full_response = ""
+            tick = _tick_state(iid)
             try:
                 async with httpx.AsyncClient(timeout=300.0) as client:
                     async with client.stream(
@@ -224,11 +304,15 @@ async def proxy_chat(request: Request):
                                     chunk = json.loads(line)
                                     msg = chunk.get("message", {})
                                     full_response += msg.get("content", "")
+                                    tick["tokens"] += 1
+                                    _maybe_tick(tick, model)
                                     if chunk.get("done"):
                                         dur = int((time.time() - t0) * 1000)
+                                        metrics = _metrics_from_native_done(chunk, dur)
                                         await _record_interaction(
                                             prompt_summary, full_response,
-                                            model, duration_ms=dur
+                                            model, duration_ms=dur, interaction_id=iid,
+                                            metrics=metrics,
                                         )
                                 except Exception:
                                     pass
@@ -243,8 +327,10 @@ async def proxy_chat(request: Request):
                 data = r.json()
                 dur  = int((time.time() - t0) * 1000)
                 content = data.get("message", {}).get("content", "")
+                metrics = _metrics_from_native_done(data, dur)
                 await _record_interaction(
-                    prompt_summary, content, model, duration_ms=dur
+                    prompt_summary, content, model, duration_ms=dur,
+                    interaction_id=iid, metrics=metrics,
                 )
                 return Response(content=r.content, media_type="application/json")
         except Exception as e:
@@ -266,10 +352,19 @@ async def proxy_openai_chat(request: Request):
     )
     stream = body.get("stream", False)
     t0 = time.time()
+    iid = str(uuid.uuid4())
 
     if stream:
+        # Chiediamo a Ollama di riportare gli usage token nell'ultimo chunk SSE
+        # (supportato dal suo endpoint OpenAI-compatibile). Se il backend non lo
+        # supporta, l'unico effetto collaterale è che quel campo resta assente:
+        # nessuna rottura del framing per il client a valle.
+        body = {**body, "stream_options": {**body.get("stream_options", {}), "include_usage": True}}
+
         async def stream_and_log():
             full_response = ""
+            usage = None
+            tick = _tick_state(iid)
             try:
                 async with httpx.AsyncClient(timeout=300.0) as client:
                     async with client.stream(
@@ -288,15 +383,23 @@ async def proxy_openai_chat(request: Request):
                                 for line in raw_chunk.decode("utf-8", errors="ignore").splitlines():
                                     if line.startswith("data: ") and "[DONE]" not in line:
                                         chunk = json.loads(line[len("data: "):])
+                                        if chunk.get("usage"):
+                                            usage = chunk["usage"]
                                         delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                        full_response += delta.get("content", "")
+                                        content = delta.get("content", "")
+                                        if content:
+                                            full_response += content
+                                            tick["tokens"] += 1
+                                            _maybe_tick(tick, model)
                             except Exception:
                                 pass
             except Exception as e:
                 yield f'data: {{"error": "{e}"}}\n\n'.encode()
             finally:
                 dur = int((time.time() - t0) * 1000)
-                await _record_interaction(prompt_summary, full_response, model, duration_ms=dur)
+                metrics = _metrics_from_usage(usage, dur)
+                await _record_interaction(prompt_summary, full_response, model, duration_ms=dur,
+                                          interaction_id=iid, metrics=metrics)
 
         return StreamingResponse(stream_and_log(), media_type="text/event-stream")
     else:
@@ -307,9 +410,12 @@ async def proxy_openai_chat(request: Request):
                 try:
                     data    = r.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    usage   = data.get("usage")
                 except Exception:
-                    content = ""
-                await _record_interaction(prompt_summary, content, model, duration_ms=dur)
+                    content, usage = "", None
+                metrics = _metrics_from_usage(usage, dur)
+                await _record_interaction(prompt_summary, content, model, duration_ms=dur,
+                                          interaction_id=iid, metrics=metrics)
                 return Response(content=r.content, status_code=r.status_code,
                                 media_type=r.headers.get("content-type", "application/json"))
         except Exception as e:

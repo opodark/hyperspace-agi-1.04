@@ -40,8 +40,7 @@ def _get_account():
 class Office365Connector(BaseConnector):
     name = "office365"
 
-    @property
-    def enabled(self) -> bool:
+    def is_available(self) -> bool:
         return bool(os.getenv("MS_CLIENT_ID") and os.getenv("MS_CLIENT_SECRET"))
 
     def get_tools(self) -> list[dict]:

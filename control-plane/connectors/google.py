@@ -49,8 +49,7 @@ def _build_service(api: str, version: str):
 class GoogleWorkspaceConnector(BaseConnector):
     name = "google"
 
-    @property
-    def enabled(self) -> bool:
+    def is_available(self) -> bool:
         return bool(os.getenv("GOOGLE_CREDENTIALS_JSON"))
 
     def get_tools(self) -> list[dict]:

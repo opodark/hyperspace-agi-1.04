@@ -56,6 +56,8 @@ REGISTRY_URL         = os.getenv("REGISTRY_URL", "http://registry:8086").strip()
 REGISTRY_PUBLIC_URL  = os.getenv("REGISTRY_PUBLIC_URL", "https://sanctuary-mower-plated.ngrok-free.dev").strip().rstrip("/")
 SIGN_REQUESTS        = os.getenv("SIGN_REQUESTS", "true").lower() == "true"
 _FORCED_TIER         = os.getenv("NODE_TIER", "").strip().lower()
+NODE_SPECIALIZATION  = os.getenv("NODE_SPECIALIZATION", "generalist").strip()
+NODE_AVATAR          = os.getenv("NODE_AVATAR", "🤖").strip()
 
 PEER_MAX_AGE_S       = int(os.getenv("PEER_MAX_AGE_S", "120"))
 
@@ -116,6 +118,8 @@ NODE_PROFILE = {
     "capabilities": NODE_CAPABILITIES,
     "vram_gb":      VRAM_GB,
     "version":      "1.03.0",
+    "specialization": NODE_SPECIALIZATION,
+    "avatar":         NODE_AVATAR,
 }
 
 # ── PEER REGISTRY ─────────────────────────────────────────
@@ -204,6 +208,8 @@ async def register_to_registry():
             "vram_gb":      str(VRAM_GB),
             "uptime_s":     str(int(time.time() - _boot_time)),
             "public_key":   NODE_PUBKEY[:32],
+            "specialization": NODE_PROFILE["specialization"],
+            "avatar":         NODE_PROFILE["avatar"],
         }
     }
     body = str(payload).encode()
