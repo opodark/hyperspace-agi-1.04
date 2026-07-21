@@ -302,6 +302,10 @@ services:
       # (incluso il tool web_search). OLLAMA_BASE_URL resta solo su control-plane/node-1.
       OPENAI_API_BASE_URL: "http://control-plane:8085/v1"
       OPENAI_API_KEY: "dummy"
+      # senza questo, WebUI auto-rileva e riattiva da sola una connessione
+      # Ollama diretta (http://host.docker.internal:11434), bypassando il
+      # control-plane: va disabilitata esplicitamente, non basta omettere OLLAMA_BASE_URL.
+      ENABLE_OLLAMA_API: "false"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-key-32chars-ok!}
       WEBUI_AUTH: "false"
       WEBUI_NAME: "HyperSpace Control"

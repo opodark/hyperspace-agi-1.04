@@ -140,6 +140,7 @@ services:
       # non a Ollama diretto: solo così passa dal tool-calling loop (incluso web_search).
       OPENAI_API_BASE_URL: "http://control-plane:8085/v1"
       OPENAI_API_KEY: "dummy"
+      ENABLE_OLLAMA_API: "false"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-change-me}
     extra_hosts:
       - "host.docker.internal:host-gateway"

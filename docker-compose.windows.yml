@@ -107,6 +107,7 @@ services:
       # (incluso il tool web_search). OLLAMA_BASE_URL resta solo su hyperspace-core/hyperspace-node-1.
       OPENAI_API_BASE_URL: "http://hyperspace-core:8085/v1"
       OPENAI_API_KEY: "dummy"
+      ENABLE_OLLAMA_API: "false"
       WEBUI_AUTH: "false"
       WEBUI_NAME: "HyperSpace Control"
     extra_hosts:
