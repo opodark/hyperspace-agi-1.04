@@ -124,6 +124,7 @@ def _register_local_node():
         "last_seen":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "capabilities": ["ollama", "control-plane"],
         "is_local":     True,
+        "models":       _fetch_models().get("models", []),
     }
     _nodes_by_id[_LOCAL_NODE_ID] = info
     if ep:
@@ -359,26 +360,34 @@ def _node_score(node: dict) -> float:
     uptime_s = min(int(node.get("uptime_s", 0)), 604800) / 604800.0
     return tier_s * 0.40 + vram_s * 0.30 + peers_s * 0.20 + uptime_s * 0.10
 
-def _select_best_node(active_nodes: list) -> dict:
-    """Seleziona il nodo migliore. Preferisce sempre il nodo locale se attivo
-    E ha un endpoint eseguibile. Esclude SEMPRE i nodi senza endpoint (es. il
-    nodo locale pseudo-registrato per bookkeeping/tier quando
-    LOCAL_NODE_ENDPOINT non e' configurato): non hanno un /execute reale da
-    chiamare, e in passato potevano comunque "vincere" lo scoring grazie al
-    tier root/hub e alla VRAM host rilevata via sysctl, causando richieste
-    verso un endpoint vuoto."""
+def _select_best_node(active_nodes: list, model: str = "") -> dict:
+    """Seleziona il nodo migliore. Se 'model' e' specificato, filtra prima ai
+    soli nodi che lo hanno disponibile (vedi _mesh_models/_fetch_node_models)
+    — altrimenti restituisce None invece di instradare alla cieca verso un
+    nodo che risponderebbe 404/vuoto perche' non ha quel modello scaricato.
+    Tra i candidati residui, preferisce sempre il nodo locale se attivo E ha
+    un endpoint eseguibile. Esclude SEMPRE i nodi senza endpoint (es. il nodo
+    locale pseudo-registrato per bookkeeping/tier quando LOCAL_NODE_ENDPOINT
+    non e' configurato): non hanno un /execute reale da chiamare, e in passato
+    potevano comunque "vincere" lo scoring grazie al tier root/hub e alla
+    VRAM host rilevata via sysctl, causando richieste verso un endpoint vuoto."""
     if not active_nodes:
         return None
+    candidates = active_nodes
+    if model:
+        candidates = [n for n in active_nodes if model in (n.get("models") or [])]
+        if not candidates:
+            return None
     if _LOCAL_NODE_ENABLED and _LOCAL_NODE_ENDPOINT:
         local = next(
-            (n for n in active_nodes
+            (n for n in candidates
              if n.get("node_id") == _LOCAL_NODE_ID and n.get("status") == "active"),
             None
         )
         if local:
             return local
-    executable = [n for n in active_nodes if _best_endpoint(n)]
-    discarded  = [n for n in active_nodes if not _best_endpoint(n)]
+    executable = [n for n in candidates if _best_endpoint(n)]
+    discarded  = [n for n in candidates if not _best_endpoint(n)]
     if discarded:
         discarded_ids = {n.get("node_id", "?") for n in discarded}
         # Logga solo quando cambia l'insieme dei nodi scartati, non ad ogni
@@ -420,6 +429,32 @@ def _fetch_models():
     except Exception as e:
         errors.append(f"lmstudio-style: {e}")
     return {"ok": False, "url": url, "backend": INFERENCE_BACKEND, "models": [], "errors": errors}
+
+def _fetch_node_models(ep: str) -> list:
+    """Modelli Ollama disponibili su un nodo remoto — chiamato ad ogni ciclo
+    di heartbeat da _poll_mesh_nodes cosi' l'inventario resta aggiornato
+    automaticamente senza bisogno di configurazione manuale per nodo."""
+    try:
+        r = requests.get(f"{ep}/ollama/models", timeout=3)
+        if r.status_code == 200:
+            return r.json().get("models", []) or []
+    except Exception:
+        pass
+    return []
+
+def _mesh_models() -> dict:
+    """Aggrega i modelli riportati da ogni nodo attivo (locale incluso) in
+    una mappa modello -> [node_id, ...]. E' la fonte di verita' unica sia
+    per /v1/models (elenco per Open WebUI) sia per il routing model-aware
+    in _select_best_node."""
+    out: dict = {}
+    for n in _node_list():
+        if n.get("status") != "active":
+            continue
+        nid = n.get("node_id", "?")
+        for m in (n.get("models") or []):
+            out.setdefault(m, []).append(nid)
+    return out
 
 # ── SSE HEADERS ───────────────────────────────────────────────────────────────
 def _sse_headers():
@@ -854,13 +889,15 @@ def _try_federated_execution(prompt: str, model: str):
 # ── /v1/models ────────────────────────────────────────────────────────────────
 @app.route('/v1/models')
 def v1_models():
-    result     = _fetch_models()
+    mesh_ids = sorted(_mesh_models().keys())
+    if not mesh_ids:
+        # Mesh appena avviata, nessun nodo ha ancora riportato modelli:
+        # fallback una tantum sull'Ollama locale del CP.
+        mesh_ids = _fetch_models().get("models", [])
     models_out = [
         {"id": m, "object": "model", "created": 0, "owned_by": "hyperspace-agi"}
-        for m in result.get("models", [DEFAULT_MODEL])
+        for m in mesh_ids
     ]
-    if not models_out:
-        models_out = [{"id": DEFAULT_MODEL, "object": "model", "created": 0, "owned_by": "hyperspace-agi"}]
     return jsonify({"object": "list", "data": models_out})
 
 # ── /v1/chat/completions ──────────────────────────────────────────────────────
@@ -894,7 +931,7 @@ def v1_chat_completions():
     push_log('system', f'WebUI task: {task_id}', detail=f'model={model} stream={stream} prompt={prompt[:80]}')
 
     active      = [n for n in _node_list() if n.get("status") == "active"]
-    selected    = _select_best_node(active)
+    selected    = _select_best_node(active, model=model)
     ollama_base = advanced_config["ollama"]["url"].rstrip("/")
 
     # ── STREAM ────────────────────────────────────────────────────────────────
@@ -1245,6 +1282,13 @@ def deregister():
 def get_mesh_nodes():
     return jsonify(_node_list())
 
+@app.route('/mesh/models')
+def get_mesh_models():
+    """Inventario modelli mesh-wide: modello -> nodi che lo hanno, costruito
+    automaticamente dall'heartbeat (vedi _fetch_node_models/_mesh_models)."""
+    m = _mesh_models()
+    return jsonify({"models": m, "count": len(m)})
+
 @app.route('/nodes/active')
 def get_nodes_active():
     return jsonify([n for n in _node_list() if n.get("status") == "active"])
@@ -1405,8 +1449,14 @@ def assign_task():
     active = [n for n in _node_list() if n.get("status") == "active"]
     if not active:
         return jsonify({"error": "No active nodes"}), 503
-    selected = _select_best_node(active)
+    requested_model = tasks[task_id].get("payload", {}).get("model", "") or ""
+    selected = _select_best_node(active, model=requested_model)
     if not selected:
+        if requested_model and not any(requested_model in (n.get("models") or []) for n in active):
+            push_log('inter_node_message',
+                     f'Task {task_id} fallito: nessun nodo ha il modello {requested_model}',
+                     status='failed')
+            return jsonify({"error": f"nessun nodo dispone del modello '{requested_model}'"}), 503
         # Nessun nodo attivo ha un endpoint eseguibile (es. solo il nodo
         # locale di bookkeeping, senza LOCAL_NODE_ENDPOINT configurato).
         push_log('inter_node_message', f'Task {task_id} fallito: nessun nodo eseguibile',
@@ -1619,10 +1669,10 @@ def federate_execute():
     task_id = data.get("task_id") or f"fed-{uuid.uuid4().hex[:10]}"
 
     active   = [n for n in _node_list() if n.get("status") == "active"]
-    selected = _select_best_node(active)
+    selected = _select_best_node(active, model=model)
     if not selected:
         db.touch_federated_peer(sender_id, "no_capacity")
-        return jsonify({"error": "nessun nodo locale disponibile"}), 503
+        return jsonify({"error": "nessun nodo locale disponibile con il modello richiesto"}), 503
 
     endpoint = _best_endpoint(selected)
     try:
@@ -1718,6 +1768,7 @@ def _poll_mesh_nodes():
                     "endpoint":  ep,
                     "status":    "active",
                     "last_seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "models":    _fetch_node_models(ep),
                 })
                 if nid:
                     existing = _nodes_by_id.get(nid)
@@ -1756,6 +1807,8 @@ def _poll_mesh_nodes():
             if n.get("status") == "active" and n.get("node_id") != _LOCAL_NODE_ID
         ]
         local_node = _nodes_by_id.get(_LOCAL_NODE_ID)
+        if local_node is not None:
+            local_node["models"] = _fetch_models().get("models", [])
         if local_node and not remote_active and local_node.get("tier") != "root":
             local_node["tier"] = "root"
             db.upsert_node(local_node)
