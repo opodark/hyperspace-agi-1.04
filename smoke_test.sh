@@ -30,7 +30,9 @@ echo "$resp3" | jq .
 
 
 echo "\n4) POST /v1/chat/completions (non-stream)"
-read -r -d '' PAYLOAD <<EOF
+# read -d '' ritorna sempre exit 1 a fine heredoc (nessun byte nullo da trovare):
+# con 'set -e' interromperebbe lo script anche se PAYLOAD e' stato letto bene.
+read -r -d '' PAYLOAD <<EOF || true
 {"messages":[{"role":"user","content":"Smoke test: rispondi con OK"}],"model":"$MODEL","stream":false}
 EOF
 
