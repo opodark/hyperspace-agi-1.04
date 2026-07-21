@@ -108,7 +108,7 @@ loadModels();
 async function createTask(){
   const id=document.getElementById('tId').value.trim();
   const prompt=document.getElementById('tPrompt').value.trim();
-  const model=document.getElementById('tModel').value.trim()||'phi3';
+  const model=document.getElementById('tModel').value.trim();
   if(!id){alert('Task ID obbligatorio');return;}
   document.getElementById('taskStatus').textContent='Creazione...';
   const r=await fetch('/task/create',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -121,7 +121,7 @@ async function createTask(){
 async function createAndAssign(){
   const id=document.getElementById('tId').value.trim();
   const prompt=document.getElementById('tPrompt').value.trim();
-  const model=document.getElementById('tModel').value.trim()||'phi3';
+  const model=document.getElementById('tModel').value.trim();
   if(!id){alert('Task ID obbligatorio');return;}
   if(!prompt){alert('Prompt obbligatorio');return;}
   document.getElementById('taskStatus').textContent='\u23F3 Esecuzione in corso...';

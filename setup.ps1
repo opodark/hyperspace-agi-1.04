@@ -423,8 +423,6 @@ if (Test-Path 'docker-compose.windows.yml') {
     $composeFile = 'docker-compose.windows.yml'
 } elseif (Test-Path 'docker-compose.yml') {
     $composeFile = 'docker-compose.yml'
-} elseif (Test-Path 'docker-compose.prod.yml') {
-    $composeFile = 'docker-compose.prod.yml'
 } else {
     Fail "Nessun docker-compose trovato"
 }

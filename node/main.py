@@ -47,7 +47,7 @@ OLLAMA_URL           = os.getenv("OLLAMA_URL", "http://ollama:11434")
 # propagazione ai peer) — la stessa che oggi copre gia' /api/generate e
 # /api/chat quando qualcuno chiama ollama-proxy direttamente.
 OLLAMA_PROXY_URL     = os.getenv("OLLAMA_PROXY_URL", "http://localhost:11435")
-DEFAULT_MODEL        = os.getenv("OLLAMA_MODEL", "phi3")
+DEFAULT_MODEL        = os.getenv("OLLAMA_MODEL", "")
 HEARTBEAT_EVERY      = int(os.getenv("HEARTBEAT_EVERY", 15))
 PUBLIC_ENDPOINT      = os.getenv("PUBLIC_ENDPOINT", "").strip().rstrip("/")
 BOOT_PEERS           = [p.strip().rstrip("/") for p in os.getenv("BOOT_PEERS", "").split(",") if p.strip()]

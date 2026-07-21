@@ -29,7 +29,7 @@ The inference engine (Ollama, LM Studio, or any OpenAI-compatible backend) runs 
 - `obsidian/` — Obsidian in the browser (KasmVNC) for browsing the memory vault.
 - `federation-gateway/` — the only component meant to be exposed publicly for confederated control planes; forwards solely the whitelisted `/federate/execute` and `/federation/identity` routes to the internal control-plane.
 - `infra-ui/` — real-time dashboard bridge (SSE, log viewer, mesh topology).
-- `authority/`, `worker/` — trust/seed services and execution workers from the earlier multi-worker layout (`docker-compose-2full.yml`).
+- `authority/`, `worker/` — trust/seed services and execution workers from the earlier multi-worker layout (`legacy/docker-compose-2full.yml`).
 - `web-node/` — browser-side node subtree for lightweight clients.
 - `shared/` — shared models, events, identity, database helpers, registry client.
 - `docs/` — architecture and deployment notes.

@@ -28,7 +28,7 @@ version: '3.9'
 #
 # (Compose interpola le ${VAR} nello YAML solo da un file chiamato
 # letteralmente .env accanto al compose file, non da env_file: — da qui
-# la copia. Stessa convenzione di docker-compose.prod.yml con .env.mac
+# la copia. Stessa convenzione di docker-compose.yml con .env.mac
 # / .env.ubuntu.)
 #
 # Dashboard core:    http://localhost:8088
