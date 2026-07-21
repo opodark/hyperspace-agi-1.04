@@ -164,6 +164,19 @@ _known_endpoints: set = set()
 _synced_memory_keys: set = set()
 _last_discarded_warn_ids: set = set()  # throttling per il log "nodo senza endpoint"
 
+# Nodi browser (endpoint sintetico browser://...) non sono raggiungibili in
+# ingresso dal CP — un tab non ha un server HTTP proprio, a differenza dei
+# nodi Docker richiamati sincronamente in /task/assign via _call_node_execute.
+# Per loro il task resta in coda qui finché il nodo non lo ritira via polling
+# (GET /tasks/next) e ne posta il risultato (POST /tasks/<id>/result).
+_pending_by_node: dict = {}
+
+def _is_browser_endpoint(ep: str) -> bool:
+    # Substring, non prefix: righe persistite prima del fix a
+    # _normalize_endpoint potrebbero avere endpoint mangled in
+    # "http://browser://web-xxx" invece di "browser://web-xxx" pulito.
+    return "browser://" in (ep or "")
+
 hb_state = {
     "cycle": 0, "last_tick": None, "last_conn": None,
     "last_memory_sync": None,
@@ -199,7 +212,7 @@ def _normalize_endpoint(ep: str) -> str:
     ep = ep.strip().rstrip("/")
     if not ep:
         return ep
-    if ep.startswith("http://") or ep.startswith("https://"):
+    if ep.startswith("http://") or ep.startswith("https://") or ep.startswith("browser://"):
         return ep
     return f"http://{ep}"
 
@@ -1109,6 +1122,38 @@ def mesh_announce():
              f'endpoint={ep} accepted={should_update}', source=nid[:12], status='success')
     return jsonify({"ok": True, "registered": ep, "accepted": should_update})
 
+@app.route('/heartbeat', methods=['POST'])
+def heartbeat():
+    data = request.get_json(force=True, silent=True) or {}
+    nid  = data.get("node_id", "")
+    if not nid:
+        return jsonify({"ok": False, "error": "missing node_id"}), 400
+    node = _nodes_by_id.get(nid)
+    if not node:
+        # Nodo non (più) noto al CP — es. riavvio del CP senza persistenza in
+        # memoria, o rimosso da un /deregister precedente. Il client tratta
+        # questo come fallimento e ri-annuncia da solo (vedi useWebNode.ts).
+        return jsonify({"ok": False, "error": "unknown node_id"}), 404
+    stats = data.get("stats") or {}
+    node["status"]          = "active"
+    node["last_seen"]       = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    node["tasks_received"]  = stats.get("tasks_received", node.get("tasks_received", 0))
+    node["tasks_completed"] = stats.get("tasks_completed", node.get("tasks_completed", 0))
+    db.upsert_node(node)
+    return jsonify({"ok": True, "next_in_s": advanced_config["mesh"]["heartbeatEvery"]})
+
+@app.route('/deregister', methods=['POST'])
+def deregister():
+    data = request.get_json(force=True, silent=True) or {}
+    nid  = data.get("node_id", "")
+    if nid in _nodes_by_id:
+        _pending_by_node.pop(nid, None)
+        node = _nodes_by_id.pop(nid)
+        db.upsert_node({**node, "status": "offline"})
+        push_log('mesh_event', f'Node left: {nid[:12]}', data.get("reason", ""),
+                 source=nid[:12], status='info')
+    return jsonify({"ok": True})
+
 @app.route('/mesh/nodes')
 def get_mesh_nodes():
     return jsonify(_node_list())
@@ -1250,10 +1295,14 @@ def create_task():
     task_id = data.get('task_id') or str(uuid.uuid4())[:8]
     prompt  = data.get('prompt', '')
     model   = data.get('model', advanced_config['ollama']['defaultModel'])
+    # "type" instrada verso una capability del web-node (translate/summarize/
+    # embed/moderation/validate) quando il task finisce a un nodo browser —
+    # ignorato dai nodi Docker, che eseguono sempre il prompt via Ollama.
+    task_type = data.get('type', 'summarize')
     task    = {
         "id": task_id, "status": "created", "node": None,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "payload": {"prompt": prompt, "model": model}
+        "payload": {"prompt": prompt, "model": model, "type": task_type, "text": prompt}
     }
     tasks[task_id] = task
     db.insert_task(task)
@@ -1286,6 +1335,16 @@ def assign_task():
     push_log('inter_node_message', f'Task {task_id} -> {node_id[:12]}', f'score={score}',
              target=node_id[:12], status='pending', trace_id=tid)
     _notify_bridge("task", {"from": "cp", "to": node_id[:12], "type": "task", "label": f'Task {task_id}'})
+
+    if _is_browser_endpoint(endpoint):
+        # Nodo browser: non richiamabile in ingresso (nessun server HTTP nel
+        # tab). Resta in coda finché il nodo lo ritira da solo via polling
+        # (GET /tasks/next) e ne posta il risultato (POST /tasks/<id>/result).
+        _pending_by_node.setdefault(node_id, []).append(task_id)
+        push_log('inter_node_message', f'Task {task_id} in coda per nodo browser {node_id[:12]}',
+                 status='pending', target=node_id[:12], trace_id=tid)
+        return jsonify({"message": "queued", "task": task})
+
     try:
         exec_payload = {
             "task_id": task_id,
@@ -1306,6 +1365,45 @@ def assign_task():
                  source=node_id[:12], status='failed', trace_id=tid)
         return jsonify({"error": str(e)}), 500
     return jsonify({"message": "done", "task": task})
+
+@app.route('/tasks/next')
+def tasks_next():
+    """Polling pull per nodi browser — vedi _pending_by_node sopra."""
+    node_id = request.args.get('node_id', '')
+    queue   = _pending_by_node.get(node_id) or []
+    if not queue:
+        return ('', 204)
+    task_id = queue.pop(0)
+    task = tasks.get(task_id)
+    if not task:
+        return ('', 204)
+    payload = task.get("payload", {})
+    envelope = {
+        "task_id": task_id,
+        "type": payload.get("type", "summarize"),
+        "payload": payload,
+        "constraints": {"timeout_ms": 30000, "max_tokens": 512},
+    }
+    return jsonify(envelope)
+
+@app.route('/tasks/<task_id>/result', methods=['POST'])
+def tasks_result(task_id):
+    """Esito da un nodo browser per un task ritirato via /tasks/next."""
+    if task_id not in tasks:
+        return jsonify({"error": "Task not found"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    task = tasks[task_id]
+    result = data.get("result")
+    task.update({
+        "status": "done",
+        "result": result,
+        "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    db.update_task(task_id, "done", result=json.dumps(result))
+    node_id = data.get("node_id", "")
+    push_log('inter_node_message', f'Task {task_id} done (browser)', json.dumps(result or {}),
+             source=node_id[:12] if node_id else '', target='control-plane', status='success')
+    return jsonify({"ok": True})
 
 @app.route('/tasks')
 def get_tasks():

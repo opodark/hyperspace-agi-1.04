@@ -37,6 +37,7 @@ services:
       # la memoria collettiva, che il control-plane logga instradando verso il nodo.
       OPENAI_API_BASE_URL: "http://control-plane:8085/v1"
       OPENAI_API_KEY: "dummy"
+      ENABLE_OLLAMA_API: "false"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-change-me}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -109,8 +110,8 @@ services:
   # ── Registry ──────────────────────────────────────────
   registry:
     build:
-      context: .
-      dockerfile: registry/Dockerfile
+      context: ./registry
+      dockerfile: Dockerfile
     container_name: hyperspace_registry
     ports:
       - "8086:8086"
