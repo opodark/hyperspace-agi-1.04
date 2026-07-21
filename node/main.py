@@ -368,8 +368,9 @@ async def announce_to_peer(endpoint: str):
         import json as _j
         body = _j.dumps(payload, sort_keys=True).encode()
         hdrs = _signed_headers(body)
+        hdrs["Content-Type"] = "application/json"
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(f"{base_url}/announce", json=payload, headers=hdrs)
+            r = await client.post(f"{base_url}/announce", data=body, headers=hdrs)
             if r.status_code == 200:
                 data = r.json()
                 for peer in data.get("peers", []):
