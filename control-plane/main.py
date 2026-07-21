@@ -1,8 +1,8 @@
 # control-plane/main.py
-# HyperSpace AGI v1.03 — Control Plane
+# HyperSpace AGI v1.04 — Control Plane
 # feat: /v1/chat/completions OpenAI-compatible endpoint
 # feat: tool calling loop — web_search, omega_query, omega_store, get_mesh_status
-# feat: memory sync inter-nodo nell'heartbeat + smart task routing (tier/vram/load)
+# feat: memory sync inter-nodo nell'heartbeat + smart task routing (carico + tier/vram/uptime)
 # feat: memory compression — gzip + TTL/max-entries pruning
 # feat: OMEGA Obsidian bridge — /health + /mcp JSON-RPC 2.0
 # feat: CORS middleware for Open WebUI compatibility
@@ -12,6 +12,16 @@
 #       nodi locali attivi. Il CP non deve mai essere esposto pubblicamente
 #       da solo: davanti va il federation-gateway, che inoltra SOLO
 #       /federate/execute e /federation/identity (vedi federation-gateway/).
+# v1.04: scoring di routing rivisto — la VRAM ora pesa di più di tutto il
+#        resto (un nodo CPU-only, anche libero, è strutturalmente lento e va
+#        preferito solo come ultima risorsa), il carico reale del nodo
+#        (active_requests/queued_requests da /status) sostituisce
+#        peers_active nella formula, e il control-plane prova in sequenza
+#        i migliori N nodi candidati (non solo il primo) quando un nodo
+#        risponde 503 node_busy_timeout — sia sul ramo stream che non-stream.
+#        Pesi configurabili via ROUTING_WEIGHT_* ed esposti alla dashboard
+#        tramite /config/routing-weights per tenere allineato il badge
+#        visivo con quello che decide davvero il routing.
 # fix: tool loop robusto — fallback no-tools se modello non supporta function calling
 # fix: health check JSON-aware — nodi zombie ngrok marcati unreachable
 # fix: _TOOL_HANDLERS definito dopo le funzioni omega (NameError fix)
@@ -19,7 +29,8 @@
 # fix: SSE stream headers
 # fix: web_search — SearXNG self-hosted (http://searxng:8080) invece di DuckDuckGo Instant API
 # fix: best selection sceglie il nodo con score più alto senza escludere quelli con endpoint vuoto
-# fix: ora il CP firma le richieste inoltrate al nodo 
+# fix: ora il CP firma le richieste inoltrate al nodo
+# fix: /registry/nodes ora proxy verso /nodes/active (flat + carico), non /nodes grezzo
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
@@ -58,6 +69,24 @@ MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
 # SearXNG — motore di ricerca self-hosted (container searxng nella stessa rete Docker)
 # Override via env: SEARXNG_URL=http://searxng:8080
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080").rstrip("/")
+
+# ── ROUTING: PESI DELLO SCORING ─────────────────────────────────────────────
+# La VRAM pesa più di tutto il resto messo insieme: un nodo CPU-only
+# (vram_gb=0) va nettamente sfavorito anche quando è libero, perché è
+# strutturalmente lento — il carico serve solo a evitare di accodare
+# richieste su un nodo GPU già saturo, non a preferire la CPU rispetto a una
+# GPU semplicemente occupata. Non serve che sommino esattamente a 1.0, sono
+# pesi relativi. Esposti in sola lettura via /config/routing-weights così la
+# dashboard può allineare il badge visivo senza duplicare i default a mano.
+ROUTING_WEIGHT_VRAM   = float(os.getenv("ROUTING_WEIGHT_VRAM", "0.55"))
+ROUTING_WEIGHT_LOAD   = float(os.getenv("ROUTING_WEIGHT_LOAD", "0.25"))
+ROUTING_WEIGHT_TIER   = float(os.getenv("ROUTING_WEIGHT_TIER", "0.10"))
+ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
+
+# Quanti nodi candidati (per score decrescente) il control-plane prova in
+# sequenza prima di ricadere su federazione/ollama-direct, quando un nodo
+# risponde "occupato" (503 node_busy_timeout).
+ROUTING_MAX_CANDIDATES = int(os.getenv("ROUTING_MAX_CANDIDATES", "3"))
 
 # ── FEDERAZIONE CP-to-CP ───────────────────────────────────────────────────────
 # FEDERATION_ENABLED    : true (default) — disabilita per isolare completamente il CP
@@ -117,10 +146,13 @@ def _register_local_node():
         "endpoint":     ep,
         "tier":         tier,
         "status":       "active",
-        "version":      "1.03.0",
+        "version":      "1.04.0",
         "vram_gb":      vram_gb,
         "peers_active": len(active_others),
         "uptime_s":     0,
+        "active_requests": 0,
+        "queued_requests": 0,
+        "max_concurrent":  1,
         "last_seen":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "capabilities": ["ollama", "control-plane"],
         "is_local":     True,
@@ -355,12 +387,42 @@ def _memory_append(entry: dict):
 # ── SMART TASK ROUTING ────────────────────────────────────────────────────────
 _TIER_SCORE = {"root": 3, "hub": 2, "leaf": 1}
 
+class NodeBusyError(Exception):
+    """Il nodo ha risposto 503 node_busy_timeout: la sua coda interna è
+    rimasta satura oltre il timeout configurato lato nodo. Il chiamante
+    prova il prossimo nodo migliore invece di aspettare o fallire subito."""
+    def __init__(self, node_id: str, message: str = ""):
+        self.node_id = node_id
+        super().__init__(message or f"nodo {node_id} occupato (coda satura)")
+
 def _node_score(node: dict) -> float:
+    """Score di routing. La VRAM pesa più di tutto (ROUTING_WEIGHT_VRAM):
+    un nodo CPU-only è strutturalmente lento anche da libero. Il carico
+    (active_requests+queued_requests rispetto a max_concurrent, entrambi
+    riportati da /status del nodo) evita di accodare richieste su un nodo
+    GPU già saturo, preferendo un nodo più libero anche se meno potente.
+    peers_active NON entra più nel punteggio: è una metrica di
+    connettività P2P, non un proxy di capacità di calcolo."""
     tier_s   = _TIER_SCORE.get(node.get("tier", "leaf"), 1) / 3.0
     vram_s   = min(float(node.get("vram_gb", 0)), 24.0) / 24.0
-    peers_s  = min(int(node.get("peers_active", 0)), 10) / 10.0
     uptime_s = min(int(node.get("uptime_s", 0)), 604800) / 604800.0
-    return tier_s * 0.40 + vram_s * 0.30 + peers_s * 0.20 + uptime_s * 0.10
+
+    max_c    = max(int(node.get("max_concurrent", 1) or 1), 1)
+    active_r = int(node.get("active_requests", 0))
+    queued_r = int(node.get("queued_requests", 0))
+    # >1.0 quando il nodo ha già più richieste (attive+in coda) della sua
+    # capacità dichiarata; il clamp a 1.5 evita che un nodo con una coda
+    # mostruosa faccia collassare load_s in modo indistinguibile da uno
+    # solo leggermente sovraccarico.
+    load_ratio = min((active_r + queued_r) / max_c, 1.5)
+    load_s     = max(0.0, 1.0 - load_ratio)
+
+    return (
+        vram_s   * ROUTING_WEIGHT_VRAM
+        + load_s   * ROUTING_WEIGHT_LOAD
+        + tier_s   * ROUTING_WEIGHT_TIER
+        + uptime_s * ROUTING_WEIGHT_UPTIME
+    )
 
 def _select_best_node(active_nodes: list) -> dict:
     """Seleziona il nodo migliore. Preferisce sempre il nodo locale se attivo
@@ -399,6 +461,23 @@ def _select_best_node(active_nodes: list) -> dict:
     if not executable:
         return None
     return max(executable, key=_node_score)
+
+def _rank_candidate_nodes(active_nodes: list, pinned_node_id: str = None, max_candidates: int = None) -> list:
+    """Nodi eseguibili ordinati per score decrescente, col nodo pinnato (se
+    presente e disponibile) in testa. Usato per il retry quando il nodo
+    scelto risponde 'occupato' (503 node_busy_timeout): invece di fallire
+    subito o aspettare, il CP prova in sequenza fino a max_candidates nodi
+    migliori."""
+    max_candidates = max_candidates or ROUTING_MAX_CANDIDATES
+    executable = [n for n in active_nodes if _best_endpoint(n)]
+    if not executable:
+        return []
+    ranked = sorted(executable, key=_node_score, reverse=True)
+    if pinned_node_id:
+        pinned = next((n for n in ranked if n.get("node_id") == pinned_node_id), None)
+        if pinned:
+            ranked = [pinned] + [n for n in ranked if n is not pinned]
+    return ranked[:max_candidates]
 
 def _parse_model_node_ref(model: str):
     """Se il model id contiene '::', separa nome modello e riferimento nodo
@@ -635,7 +714,7 @@ def _omega_stats(args: dict) -> str:
         f"ttl_days: {MEMORY_TTL_DAYS}\n"
         f"file_size_kb: {round(size_bytes / 1024, 2)}\n"
         f"mesh_nodes_active: {nodes_active}\n"
-        f"engine: hyperspace-agi v1.03"
+        f"engine: hyperspace-agi v1.04"
     )
 
 # ── WEB SEARCH ────────────────────────────────────────────────────────────────
@@ -651,7 +730,7 @@ def _tool_web_search(args: dict) -> str:
     # ── 1. SearXNG JSON API ───────────────────────────────────────────────────
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.03)",
+            "User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.04)",
             "Accept":     "application/json",
         }
         params = {
@@ -686,7 +765,7 @@ def _tool_web_search(args: dict) -> str:
     # ── 2. Fallback: DuckDuckGo lite (scraping HTML) ─────────────────────────
     try:
         import re
-        headers2  = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.03)"}
+        headers2  = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.04)"}
         r2        = requests.get("https://lite.duckduckgo.com/lite/",
                                  params={"q": query}, headers=headers2, timeout=8)
         snippets  = re.findall(r'class="result-snippet"[^>]*>([^<]+)<', r2.text)
@@ -714,7 +793,10 @@ def _tool_get_mesh_status(args: dict) -> str:
         f"Ultimo tick: {hb_state.get('last_tick', 'N/A')}",
     ]
     for n in active:
-        lines.append(f"  - {n.get('node_id','?')[:16]} | tier={n.get('tier','?')} vram={n.get('vram_gb','?')}GB")
+        lines.append(
+            f"  - {n.get('node_id','?')[:16]} | tier={n.get('tier','?')} vram={n.get('vram_gb','?')}GB "
+            f"load={n.get('active_requests',0)}/{n.get('max_concurrent',1)}"
+        )
     return "\n".join(lines)
 
 # ── TOOL DEFINITIONS ─────────────────────────────────────────────────────────
@@ -803,12 +885,17 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         return f"Errore esecuzione tool '{tool_name}': {e}"
 
 # ── TOOL CALLING LOOP ─────────────────────────────────────────────────────────
-def _call_ollama(ollama_base: str, payload: dict, sign: bool = False) -> dict:
+def _call_ollama(ollama_base: str, payload: dict, sign: bool = False, node_id: str = "") -> dict:
     """Chiama /v1/chat/completions. Se sign=True (target = un nodo della
     mesh), firma la richiesta con l'identita' ECDSA del CP — il nodo ora
     richiede questa firma su questo path (vedi node/main.py SIGNED_PATHS).
     Se sign=False (target = Ollama diretto, fallback), nessuna firma:
-    Ollama non la capirebbe comunque."""
+    Ollama non la capirebbe comunque.
+
+    Se il nodo risponde 503 node_busy_timeout (la sua coda interna è rimasta
+    satura oltre il timeout), solleva NodeBusyError invece di trattarlo come
+    un errore generico: il chiamante (_run_tool_loop / route) può così
+    provare il prossimo nodo candidato senza far fallire subito il task."""
     if sign:
         body = json.dumps(payload, sort_keys=True).encode()
         headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
@@ -816,6 +903,15 @@ def _call_ollama(ollama_base: str, payload: dict, sign: bool = False) -> dict:
         r = requests.post(f"{ollama_base}/v1/chat/completions", data=body, headers=headers, timeout=180)
     else:
         r = requests.post(f"{ollama_base}/v1/chat/completions", json=payload, timeout=180)
+
+    if r.status_code == 503:
+        try:
+            err = r.json().get("error", {})
+        except Exception:
+            err = {}
+        if err.get("type") == "node_busy_timeout":
+            raise NodeBusyError(node_id, err.get("message", ""))
+
     raw = r.text.strip()
     if not raw:
         raise ValueError(f"Ollama body vuoto (HTTP {r.status_code})")
@@ -824,7 +920,7 @@ def _call_ollama(ollama_base: str, payload: dict, sign: bool = False) -> dict:
     except Exception:
         raise ValueError(f"Risposta non-JSON da Ollama (HTTP {r.status_code}): {raw[:200]}")
 
-def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: bool = False) -> dict:
+def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: bool = False, node_id: str = "") -> dict:
     messages       = list(data.get("messages", []))
     model          = data.get("model", DEFAULT_MODEL)
     supports_tools = _model_supports_tools(model)
@@ -834,7 +930,9 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
         payload = {**data, "messages": messages, "stream": False}
         payload.pop("tools", None)
         try:
-            return _call_ollama(ollama_base, payload, sign=sign)
+            return _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
+        except NodeBusyError:
+            raise
         except Exception as e:
             return {"error": {"message": str(e), "type": "server_error"}}
 
@@ -846,14 +944,18 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
     for iteration in range(max_iterations):
         payload = {**data, "messages": messages, "tools": all_tools, "stream": False}
         try:
-            resp = _call_ollama(ollama_base, payload, sign=sign)
+            resp = _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
+        except NodeBusyError:
+            raise
         except ValueError as e:
             push_log('system', f'tool_loop fallback no-tools: {str(e)[:120]}', status='warn')
             if iteration == 0:
                 plain = {**data, "messages": messages, "stream": False}
                 plain.pop("tools", None)
                 try:
-                    return _call_ollama(ollama_base, plain, sign=sign)
+                    return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
+                except NodeBusyError:
+                    raise
                 except Exception as e2:
                     return {"error": {"message": str(e2), "type": "server_error"}}
             return last_resp or {"error": {"message": str(e), "type": "server_error"}}
@@ -936,8 +1038,6 @@ def _try_federated_execution(prompt: str, model: str):
 
 # ── /v1/models ────────────────────────────────────────────────────────────────
 @app.route('/v1/models')
-
-@app.route('/v1/models')
 def v1_models():
     agg = _aggregate_mesh_models()
     models_out = [
@@ -991,27 +1091,21 @@ def v1_chat_completions():
     push_log('system', f'WebUI task: {task_id}', detail=f'model={model} stream={stream} prompt={prompt[:80]}')
 
     active      = [n for n in _node_list() if n.get("status") == "active"]
-    selected    = _select_node_for_request(active, pinned_node_id)
     ollama_base = advanced_config["ollama"]["url"].rstrip("/")
 
     # ── STREAM ────────────────────────────────────────────────────────────────
     # NOTA: lo streaming oggi resta locale (nodo o ollama-direct). La
     # federazione verso un altro CP entra in gioco solo nel percorso
     # non-stream — proxare uno stream SSE cross-CP e' un passo successivo.
+    #
+    # Prova in sequenza i migliori nodi candidati (per score): se un nodo
+    # risponde 503 node_busy_timeout PRIMA di iniziare a inviare byte, il
+    # generatore passa al successivo. Una volta che il primo chunk reale è
+    # stato inoltrato al client non si cambia più nodo (l'header 200 è già
+    # partito), quindi eventuali errori a metà stream vengono solo segnalati
+    # inline, non ritentati su un altro nodo.
     if stream:
-        if selected and _best_endpoint(selected):
-            node_id      = selected.get("node_id", "cp")
-            endpoint     = _best_endpoint(selected)
-            target_url   = f"{endpoint}/v1/chat/completions"
-            target_is_node = True
-        else:
-            node_id      = "ollama-direct"
-            endpoint     = ollama_base
-            target_url   = f"{ollama_base}/v1/chat/completions"
-            target_is_node = False
-        task["node"] = node_id
-        db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
-
+        candidates = _rank_candidate_nodes(active, pinned_node_id)
         stream_data = dict(data)
         if _model_supports_tools(model):
             ct = stream_data.get("tools", [])
@@ -1021,45 +1115,93 @@ def v1_chat_completions():
             stream_data.pop("tools", None)
 
         def _stream_gen():
-            try:
-                if target_is_node:
-                    # Firmato: solo il CP puo' invocare /v1/chat/completions
-                    # di un nodo (vedi node/main.py SIGNED_PATHS).
+            served = False
+            for candidate in candidates:
+                node_id_c  = candidate.get("node_id", "cp")
+                endpoint_c = _best_endpoint(candidate)
+                try:
                     body = json.dumps(stream_data, sort_keys=True).encode()
                     headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
                     headers["Content-Type"] = "application/json"
-                    req = requests.post(target_url, data=body, headers=headers, stream=True, timeout=180)
-                else:
-                    req = requests.post(target_url, json=stream_data, stream=True, timeout=180)
+                    req = requests.post(f"{endpoint_c}/v1/chat/completions",
+                                        data=body, headers=headers, stream=True, timeout=180)
+                except Exception:
+                    continue  # nodo irraggiungibile, prova il prossimo candidato
+
+                if req.status_code == 503:
+                    try:
+                        if req.json().get("error", {}).get("type") == "node_busy_timeout":
+                            push_log('inter_node_message',
+                                     f'stream {task_id}: {node_id_c[:12]} occupato, provo il prossimo',
+                                     status='warn')
+                            continue
+                    except Exception:
+                        pass
+
+                # Da qui in poi ci impegniamo con questo nodo: nessun altro retry.
+                task["node"] = node_id_c
+                db.update_task(task_id, "assigned", node_id=node_id_c, endpoint=endpoint_c)
+                try:
+                    with req as resp:
+                        for chunk in resp.iter_content(chunk_size=None):
+                            if chunk:
+                                yield chunk
+                    task["status"]       = "done"
+                    task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    db.update_task(task_id, "done")
+                    push_log('inter_node_message', f'stream {task_id} done',
+                             source=node_id_c[:12], target='webui', status='success')
+                except Exception as e:
+                    yield f'data: {{"error": "{e}"}}\n\n'.encode()
+                    task["status"] = "failed"
+                    db.update_task(task_id, "failed", error=str(e))
+                served = True
+                break
+
+            if served:
+                return
+
+            # Nessun nodo locale utilizzabile (assente o tutti occupati/irraggiungibili).
+            task["node"] = "ollama-direct"
+            db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
+            try:
+                req = requests.post(f"{ollama_base}/v1/chat/completions", json=stream_data, stream=True, timeout=180)
                 with req as resp:
                     for chunk in resp.iter_content(chunk_size=None):
                         if chunk:
                             yield chunk
-            except Exception as e:
-                yield f'data: {{"error": "{e}"}}\n\n'.encode()
-            finally:
                 task["status"]       = "done"
                 task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 db.update_task(task_id, "done")
                 push_log('inter_node_message', f'stream {task_id} done',
-                         source=task.get("node", "ollama")[:12], target='webui', status='success')
+                         source='ollama-direct', target='webui', status='success')
+            except Exception as e:
+                yield f'data: {{"error": "{e}"}}\n\n'.encode()
+                task["status"] = "failed"
+                db.update_task(task_id, "failed", error=str(e))
 
         return Response(stream_with_context(_stream_gen()), headers=_sse_headers())
 
     # ── NON-STREAM ────────────────────────────────────────────────────────────
-    if selected and _best_endpoint(selected):
-        node_id  = selected.get("node_id", "cp")
-        endpoint = _best_endpoint(selected)
+    candidates = _rank_candidate_nodes(active, pinned_node_id)
+    for candidate in candidates:
+        node_id  = candidate.get("node_id", "cp")
+        endpoint = _best_endpoint(candidate)
         task["node"] = node_id
         db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
         push_log('inter_node_message', f'task {task_id} -> {node_id[:12]}',
                  f'model={model}', source='webui', target=node_id[:12], status='pending')
         try:
-            result_json = _run_tool_loop(data, endpoint, sign=True)
+            result_json = _run_tool_loop(data, endpoint, sign=True, node_id=node_id)
             _finalize_task(task, task_id, node_id, model, prompt, result_json)
             return jsonify(result_json)
+        except NodeBusyError:
+            push_log('inter_node_message', f'task {task_id}: {node_id[:12]} occupato, provo il prossimo',
+                     status='warn', target=node_id[:12])
+            continue
         except Exception as e:
             push_log('inter_node_message', f'task {task_id} fallback ollama', str(e), status='warn')
+            break
 
     # Nessun nodo locale disponibile: prova la federazione prima di ricadere
     # su Ollama diretto. Un CP federato viene trattato come un "super-nodo":
@@ -1113,7 +1255,7 @@ def omega_health():
     entries      = _load_memory()
     nodes_active = len([n for n in _node_list() if n.get("status") == "active"])
     return jsonify({
-        "status": "ok", "engine": "hyperspace-agi", "version": "1.03",
+        "status": "ok", "engine": "hyperspace-agi", "version": "1.04",
         "memories": len(entries), "nodes_active": nodes_active,
         "ttl_days": MEMORY_TTL_DAYS,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1412,7 +1554,12 @@ def hb_status():
 @app.route('/registry/nodes')
 def registry_nodes():
     try:
-        return jsonify(requests.get(f"{REGISTRY_URL}/nodes", timeout=5).json())
+        # /nodes/active (non /nodes) è già TTL-filtrato e in forma flat —
+        # espone anche active_requests/queued_requests/max_concurrent
+        # (vedi registry/registry.py:_active_nodes), a differenza del
+        # NodeRecord grezzo con metadata annidata che restituiva /nodes.
+        r = requests.get(f"{REGISTRY_URL}/nodes/active", timeout=5)
+        return jsonify(r.json().get("nodes", []))
     except Exception as e:
         return jsonify({"error": str(e), "registry_url": REGISTRY_URL}), 503
 
@@ -1423,6 +1570,21 @@ def registry_health():
         return jsonify({"ok": r.status_code == 200, "status": r.status_code})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
+
+# ── ROUTING WEIGHTS ────────────────────────────────────────────────────────────
+# Espone i pesi correnti dello scoring alla dashboard, così il badge
+# score/load visualizzato riflette davvero cosa decide il routing invece di
+# una formula hardcoded lato client che può disallinearsi silenziosamente
+# se questi valori cambiano via .env.
+@app.route('/config/routing-weights')
+def get_routing_weights():
+    return jsonify({
+        "vram":   ROUTING_WEIGHT_VRAM,
+        "load":   ROUTING_WEIGHT_LOAD,
+        "tier":   ROUTING_WEIGHT_TIER,
+        "uptime": ROUTING_WEIGHT_UPTIME,
+        "max_candidates": ROUTING_MAX_CANDIDATES,
+    })
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 @app.route('/config/advanced')
@@ -1500,43 +1662,59 @@ def assign_task():
     active = [n for n in _node_list() if n.get("status") == "active"]
     if not active:
         return jsonify({"error": "No active nodes"}), 503
-    selected = _select_best_node(active)
-    if not selected:
+
+    candidates = _rank_candidate_nodes(active)
+    if not candidates:
         # Nessun nodo attivo ha un endpoint eseguibile (es. solo il nodo
         # locale di bookkeeping, senza LOCAL_NODE_ENDPOINT configurato).
         push_log('inter_node_message', f'Task {task_id} fallito: nessun nodo eseguibile',
                  status='failed')
         return jsonify({"error": "No executable nodes (solo bookkeeping locale?)"}), 503
-    endpoint = _best_endpoint(selected)
-    node_id  = selected["node_id"]
-    score    = round(_node_score(selected), 3)
-    task     = tasks[task_id]
-    task.update({"status": "assigned", "node": node_id, "endpoint": endpoint, "routing_score": score})
-    db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
-    tid = str(uuid.uuid4())[:8]
-    push_log('inter_node_message', f'Task {task_id} -> {node_id[:12]}', f'score={score}',
-             target=node_id[:12], status='pending', trace_id=tid)
-    _notify_bridge("task", {"from": "cp", "to": node_id[:12], "type": "task", "label": f'Task {task_id}'})
-    try:
-        exec_payload = {
-            "task_id": task_id,
-            "prompt":  task.get("payload", {}).get("prompt", ""),
-            "model":   task.get("payload", {}).get("model", ""),
-        }
-        r = _call_node_execute(endpoint, exec_payload, timeout=120)
-        r.raise_for_status()
-        task.update({"result": r.json(), "status": "done",
-                     "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
-        db.update_task(task_id, "done", result=json.dumps(task["result"]))
-        push_log('inter_node_message', f'Task {task_id} done', json.dumps(task.get("result",{})),
-                 source=node_id[:12], target='control-plane', status='success', trace_id=tid)
-    except Exception as e:
-        task.update({"status": "failed", "error": str(e)})
-        db.update_task(task_id, "failed", error=str(e))
-        push_log('inter_node_message', f'Task {task_id} failed', str(e),
-                 source=node_id[:12], status='failed', trace_id=tid)
-        return jsonify({"error": str(e)}), 500
-    return jsonify({"message": "done", "task": task})
+
+    task = tasks[task_id]
+    last_error = None
+    for selected in candidates:
+        endpoint = _best_endpoint(selected)
+        node_id  = selected["node_id"]
+        score    = round(_node_score(selected), 3)
+        task.update({"status": "assigned", "node": node_id, "endpoint": endpoint, "routing_score": score})
+        db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
+        tid = str(uuid.uuid4())[:8]
+        push_log('inter_node_message', f'Task {task_id} -> {node_id[:12]}', f'score={score}',
+                 target=node_id[:12], status='pending', trace_id=tid)
+        _notify_bridge("task", {"from": "cp", "to": node_id[:12], "type": "task", "label": f'Task {task_id}'})
+        try:
+            exec_payload = {
+                "task_id": task_id,
+                "prompt":  task.get("payload", {}).get("prompt", ""),
+                "model":   task.get("payload", {}).get("model", ""),
+            }
+            r = _call_node_execute(endpoint, exec_payload, timeout=120)
+            if r.status_code == 503:
+                try:
+                    if r.json().get("error", {}).get("type") == "node_busy_timeout":
+                        last_error = f"{node_id[:12]} occupato (coda satura)"
+                        push_log('inter_node_message', f'Task {task_id}: {node_id[:12]} occupato, provo il prossimo',
+                                 status='warn', trace_id=tid)
+                        continue
+                except Exception:
+                    pass
+            r.raise_for_status()
+            task.update({"result": r.json(), "status": "done",
+                         "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+            db.update_task(task_id, "done", result=json.dumps(task["result"]))
+            push_log('inter_node_message', f'Task {task_id} done', json.dumps(task.get("result",{})),
+                     source=node_id[:12], target='control-plane', status='success', trace_id=tid)
+            return jsonify({"message": "done", "task": task})
+        except Exception as e:
+            last_error = str(e)
+            task.update({"status": "failed", "error": last_error})
+            db.update_task(task_id, "failed", error=last_error)
+            push_log('inter_node_message', f'Task {task_id} failed', last_error,
+                     source=node_id[:12], status='failed', trace_id=tid)
+            continue
+
+    return jsonify({"error": last_error or "tutti i nodi candidati occupati o non disponibili"}), 503
 
 @app.route('/tasks')
 def get_tasks():
@@ -1815,7 +1993,7 @@ def _poll_mesh_nodes():
 
 def heartbeat_loop():
     time.sleep(3)
-    push_log('system', 'Control-plane v1.03 started',
+    push_log('system', 'Control-plane v1.04 started',
              detail=f'nodes={len(_nodes_by_id)} endpoints={list(_known_endpoints)} federation_id={CP_ID[:16]}',
              status='info')
     hb_state["running"] = True

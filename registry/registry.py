@@ -1,6 +1,10 @@
 # registry/registry.py
 # HyperSpace AGI v1.02 — Public Registry
 # feat: landing page pubblica, /dashboard nodi live, /nodes/active TTL-filtered
+# v1.03: _active_nodes() espone anche active_requests/queued_requests/
+#        max_concurrent (letti dalla metadata inviata dal nodo in /register),
+#        cosi' il control-plane e la dashboard possono leggere il carico
+#        corrente senza dover contattare ogni nodo direttamente.
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -11,7 +15,7 @@ from threading import Lock
 import uvicorn
 import os
 
-app = FastAPI(title="HyperSpace Registry", version="1.02")
+app = FastAPI(title="HyperSpace Registry", version="1.03")
 lock = Lock()
 
 TTL_SECONDS        = int(os.getenv("NODE_TTL", "300"))   # default 300s = 20 cicli heartbeat
@@ -37,6 +41,20 @@ def prune_stale_nodes():
         del nodes[nid]
 
 
+def _safe_int(v, default=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _active_nodes() -> list:
     with lock:
         prune_stale_nodes()
@@ -47,12 +65,19 @@ def _active_nodes() -> list:
                 "role":           n.role,
                 "metadata":       n.metadata,
                 "last_seen":      n.last_seen,
-                "uptime_s":       int(n.metadata.get("uptime_s", "0")),
-                "vram_gb":        float(n.metadata.get("vram_gb", "0")),
+                "uptime_s":       _safe_int(n.metadata.get("uptime_s", "0")),
+                "vram_gb":        _safe_float(n.metadata.get("vram_gb", "0")),
                 "tier":           n.metadata.get("tier", "leaf"),
                 "version":        n.metadata.get("version", ""),
                 "specialization": n.metadata.get("specialization", "generalist"),
                 "avatar":         n.metadata.get("avatar", "🤖"),
+                # Carico corrente, inviato dal nodo a ogni /register (vedi
+                # node/main.py:register_to_registry). Assenti su nodi con
+                # versione precedente: default a 0/1 per non rompere il
+                # calcolo dello score lato dashboard/control-plane.
+                "active_requests": _safe_int(n.metadata.get("active_requests", "0")),
+                "queued_requests": _safe_int(n.metadata.get("queued_requests", "0")),
+                "max_concurrent":  _safe_int(n.metadata.get("max_concurrent", "1"), default=1),
             }
             for n in nodes.values()
         ]
@@ -92,9 +117,11 @@ def list_nodes():
         return list(nodes.values())
 
 
-@app.get("/nodes/active", summary="Lista nodi attivi per auto-discovery (usata dai nodi al boot)")
+@app.get("/nodes/active", summary="Lista nodi attivi per auto-discovery (usata dai nodi al boot) e dalla dashboard")
 def list_nodes_active():
-    """Ritorna solo i nodi vivi con TTL — usato da node/main.py al boot per auto-discovery."""
+    """Ritorna solo i nodi vivi con TTL, in forma flat (incluso il carico
+    corrente) — usato da node/main.py al boot per auto-discovery e dal
+    control-plane/dashboard per /registry/nodes."""
     return {"nodes": _active_nodes(), "ttl_seconds": TTL_SECONDS}
 
 

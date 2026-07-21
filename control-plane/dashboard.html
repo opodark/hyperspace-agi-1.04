@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>HyperSpace AGI v1.02</title>
+<title>HyperSpace AGI v1.04</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.29.2/cytoscape.min.js"></script>
 <style>
@@ -206,7 +206,7 @@ main{padding:18px 20px;display:grid}
 <header>
   <div class="logo">
     <svg width="26" height="26" viewBox="0 0 28 28" fill="none"><polygon points="14,2 26,9 26,19 14,26 2,19 2,9" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="14" cy="14" r="3.5" fill="currentColor" opacity=".75"/><line x1="14" y1="2" x2="14" y2="10.5" stroke="currentColor" stroke-width="1"/><line x1="26" y1="9" x2="17.5" y2="13" stroke="currentColor" stroke-width="1"/><line x1="26" y1="19" x2="17.5" y2="15" stroke="currentColor" stroke-width="1"/><line x1="14" y1="26" x2="14" y2="17.5" stroke="currentColor" stroke-width="1"/><line x1="2" y1="19" x2="10.5" y2="15" stroke="currentColor" stroke-width="1"/><line x1="2" y1="9" x2="10.5" y2="13" stroke="currentColor" stroke-width="1"/></svg>
-    HyperSpace AGI <span class="vbadge">v1.02</span>
+    HyperSpace AGI <span class="vbadge">v1.04</span>
   </div>
   <nav>
     <button class="active" onclick="showPanel('nodes',this)">&#127760; Mesh Nodes</button>
@@ -291,8 +291,8 @@ main{padding:18px 20px;display:grid}
   </div>
   <div class="card" style="padding:0;overflow:hidden">
     <table class="reg-table">
-      <thead><tr><th>Node ID</th><th>Endpoint</th><th>Tier</th><th>Score</th><th>Stato</th><th>Versione</th><th>Uptime</th><th>Last Seen</th></tr></thead>
-      <tbody id="regTableBody"><tr><td colspan="8" class="reg-empty">Caricamento&#8230;</td></tr></tbody>
+      <thead><tr><th>Node ID</th><th>Endpoint</th><th>Tier</th><th>Score</th><th>Load</th><th>Stato</th><th>Versione</th><th>Uptime</th><th>Last Seen</th></tr></thead>
+      <tbody id="regTableBody"><tr><td colspan="9" class="reg-empty">Caricamento&#8230;</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -388,6 +388,7 @@ main{padding:18px 20px;display:grid}
     </div>
     <div class="card"><div class="card-title">&#9881;&#65039; HB Status</div><button class="btn btn-ghost btn-sm" onclick="checkHb()">Refresh</button><div class="diag-out" id="dHb"></div></div>
     <div class="card"><div class="card-title">&#128202; Ping All Nodes</div><button class="btn btn-ghost btn-sm" onclick="pingAll()">Ping All</button><div class="diag-out" id="dPing"></div></div>
+    <div class="card"><div class="card-title">&#9878;&#65039; Routing Weights</div><button class="btn btn-ghost btn-sm" onclick="diagRoutingWeights()">Fetch</button><div class="diag-out" id="dRoutingWeights"></div></div>
   </div>
 </div>
 
@@ -491,45 +492,32 @@ async function refreshHbBar(){
 }
 setInterval(refreshHbBar,5000); refreshHbBar();
 
-// Metrics (token/s) — live tick a ritmo rapido, summary storico più lento
-async function refreshMetricsLive(){
+// ── ROUTING WEIGHTS ─────────────────────────────────────────────────────────
+// Pesi di routing letti dal control-plane, così il badge score/load in
+// dashboard riflette davvero cosa decide il routing invece di una formula
+// hardcoded lato client che potrebbe disallinearsi silenziosamente se i
+// pesi vengono cambiati via .env (ROUTING_WEIGHT_*).
+var ROUTING_WEIGHTS={vram:0.55,load:0.25,tier:0.10,uptime:0.10,max_candidates:3};
+async function loadRoutingWeights(){
   try{
-    var d=await(await fetch('/metrics/live')).json();
-    var gens=d.generations||[];
-    var sum=gens.reduce(function(a,g){return a+(g.tokens_per_sec||0);},0);
-    document.getElementById('mxLiveTps').textContent=sum.toFixed(1);
-    var list=document.getElementById('mxLiveList');
-    if(!gens.length){list.innerHTML='<div class="mx-empty">Nessuna generazione attiva.</div>';return;}
-    list.innerHTML=gens.map(function(g){
-      return '<div class="mx-live-item"><span>'+escH((g.node_id||'?').slice(0,14))+' &#183; '+escH(g.model||'?')+'</span><span class="mx-live-tps">'+(g.tokens_per_sec||0).toFixed(1)+' t/s</span></div>';
-    }).join('');
+    var d=await(await fetch('/config/routing-weights')).json();
+    ROUTING_WEIGHTS=d;
   }catch(e){}
 }
-async function refreshMetricsSummary(){
-  try{
-    var d=await(await fetch('/metrics/summary')).json();
-    document.getElementById('mxAvgTps').textContent=d.avg_tokens_per_sec!=null?d.avg_tokens_per_sec+' t/s':'&#8212;';
-    document.getElementById('mxReq').textContent=d.requests||0;
-    document.getElementById('mxTokOut').textContent=(d.tokens_out||0).toLocaleString();
-    document.getElementById('mxTokIn').textContent=(d.tokens_in||0).toLocaleString();
-    var models=d.models||[];
-    var rows='<div class="mx-model-row head"><span>Modello</span><span>Req</span><span>Avg tok/s</span><span>Tok out</span></div>';
-    rows+=models.map(function(m){
-      return '<div class="mx-model-row"><span>'+escH(m.model)+'</span><span>'+m.requests+'</span><span>'+(m.avg_tokens_per_sec!=null?m.avg_tokens_per_sec:'&#8212;')+'</span><span>'+(m.tokens_out||0).toLocaleString()+'</span></div>';
-    }).join('');
-    document.getElementById('mxModelList').innerHTML=rows;
-  }catch(e){}
-}
-function refreshMetrics(){refreshMetricsLive();refreshMetricsSummary();}
-setInterval(refreshMetricsLive,2000);
-setInterval(refreshMetricsSummary,8000);
-refreshMetrics();
+loadRoutingWeights();
+setInterval(loadRoutingWeights,60000);
 
-// Helpers
-function tierClass(t){return t==='root'?'tier-root':t==='hub'?'tier-hub':'tier-leaf';}
-function statusDotClass(s){return s==='active'?'active':s==='unreachable'?'unreachable':'unknown';}
-function formatUptime(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';}
-function escH(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function computeScore(n){
+  var tierS={'root':3,'hub':2,'leaf':1};
+  var ts=(tierS[n.tier||'leaf']||1)/3;
+  var vs=Math.min(parseFloat(n.vram_gb||0),24)/24;
+  var us=Math.min(parseInt(n.uptime_s||0),604800)/604800;
+  var maxC=Math.max(parseInt(n.max_concurrent||1),1);
+  var loadRatio=Math.min(((parseInt(n.active_requests||0))+(parseInt(n.queued_requests||0)))/maxC,1.5);
+  var ls=Math.max(0,1-loadRatio);
+  var w=ROUTING_WEIGHTS;
+  return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime;
+}
 
 // Score badge helper
 function scoreBadge(score){
@@ -537,6 +525,17 @@ function scoreBadge(score){
   var cls=s>=0.65?'score-high':s>=0.35?'score-mid':'score-low';
   var icon=s>=0.65?'&#9650;':s>=0.35?'&#9644;':'&#9660;';
   return '<span class="score-badge '+cls+'">'+icon+' '+s.toFixed(2)+'</span>';
+}
+
+// Load badge helper — mostra active/max e, se presente, la coda in attesa
+function loadBadge(n){
+  var maxC=Math.max(parseInt(n.max_concurrent||1),1);
+  var act=parseInt(n.active_requests||0);
+  var q=parseInt(n.queued_requests||0);
+  var ratio=act/maxC;
+  var cls=ratio>=1?'score-low':ratio>=0.5?'score-mid':'score-high';
+  var label=act+'/'+maxC+(q?' (+'+q+' coda)':'');
+  return '<span class="score-badge '+cls+'">'+label+'</span>';
 }
 
 // Nodes
@@ -553,13 +552,7 @@ async function refreshNodes(){
       var caps=(n.capabilities||[]).join(', ')||'?';
       var ver=n.version||'?';
       var ep=n.endpoint||'';
-      // Calcola score locale (stesso algoritmo del backend)
-      var tierS={'root':3,'hub':2,'leaf':1};
-      var ts=(tierS[tier]||1)/3;
-      var vs=Math.min(parseFloat(n.vram_gb||0),24)/24;
-      var ps=Math.min(parseInt(n.peers_active||0),10)/10;
-      var us=Math.min(parseInt(n.uptime_s||0),604800)/604800;
-      var score=ts*0.40+vs*0.30+ps*0.20+us*0.10;
+      var score=computeScore(n);
       return '<div class="node-card">'
         +'<div class="nc-header"><span class="node-status-dot '+statusDotClass(n.status)+'"></span>'
         +'<span class="node-id" title="'+escH(n.node_id||'')+'">&#128187; '+escH(nid)+'</span>'
@@ -573,7 +566,7 @@ async function refreshNodes(){
         +'<span class="nm-label">Endpoint</span><span class="nm-val" title="'+escH(ep)+'">'+escH(ep.replace('https://','').slice(0,30))+'</span>'
         +'<span class="nm-label">Version</span><span class="nm-val">'+escH(ver)+'</span>'
         +'<span class="nm-label">Uptime</span><span class="nm-val">'+uptime+'</span>'
-        +'<span class="nm-label">Peers</span><span class="nm-val">'+(n.peers_active||0)+' active</span>'
+        +'<span class="nm-label">Load</span><span class="nm-val">'+loadBadge(n)+'</span>'
         +'<span class="nm-label">Caps</span><span class="nm-val">'+escH(caps)+'</span>'
         +'<span class="nm-label">VRAM</span><span class="nm-val">'+(n.vram_gb||0)+' GB</span>'
         +'<span class="nm-label">Model ref</span><span class="nm-val">::'+escH(n.alias||(n.node_id||'').slice(0,8))+'</span>'
@@ -585,6 +578,12 @@ async function refreshNodes(){
   }catch(e){document.getElementById('nodesGrid').innerHTML='<div class="nodes-empty">Error: '+escH(e.message)+'</div>';}
 }
 setInterval(refreshNodes,15000); refreshNodes();
+
+// Helpers
+function tierClass(t){return t==='root'?'tier-root':t==='hub'?'tier-hub':'tier-leaf';}
+function statusDotClass(s){return s==='active'?'active':s==='unreachable'?'unreachable':'unknown';}
+function formatUptime(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';}
+function escH(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 async function setAlias(nodeId, currentAlias){
   var alias = prompt('Alias per il nodo (lettere, numeri, - e _; vuoto = rimuovi):', currentAlias||'');
@@ -706,32 +705,28 @@ async function refreshRegistry(){
     document.getElementById('regTiers').textContent=tiers.size;
     document.getElementById('regLastUpdate').textContent='Aggiornato '+new Date().toISOString().slice(11,19)+' UTC';
     var tbody=document.getElementById('regTableBody');
-    if(!nodes.length){tbody.innerHTML='<tr><td colspan="8" class="reg-empty">Nessun nodo registrato.</td></tr>';return;}
+    if(!nodes.length){tbody.innerHTML='<tr><td colspan="9" class="reg-empty">Nessun nodo registrato.</td></tr>';return;}
     tbody.innerHTML=nodes.map(function(n){
       var tier=n.tier||'leaf';
       var st=n.status||'unknown';
       var stColor=st==='active'?'var(--success)':st==='unreachable'?'var(--error)':'var(--text-faint)';
       var up=n.uptime_s?formatUptime(n.uptime_s):'';
       var ls=n.last_seen?(n.last_seen.replace('T',' ').slice(0,19)):'';
-      // Score calcolato lato client
-      var tierS={'root':3,'hub':2,'leaf':1};
-      var ts=(tierS[tier]||1)/3;
-      var vs=Math.min(parseFloat(n.vram_gb||0),24)/24;
-      var ps=Math.min(parseInt(n.peers_active||0),10)/10;
-      var us=Math.min(parseInt(n.uptime_s||0),604800)/604800;
-      var score=ts*0.40+vs*0.30+ps*0.20+us*0.10;
+      var ep=n.endpoint||n.public_address||'';
+      var score=computeScore(n);
       return '<tr>'
         +'<td><span class="reg-id" title="'+escH(n.node_id||'')+'">'+(n.node_id||'?').slice(0,20)+'&hellip;</span></td>'
-        +'<td><span class="reg-ep">'+escH(n.endpoint||'')+'</span></td>'
+        +'<td><span class="reg-ep">'+escH(ep)+'</span></td>'
         +'<td><span class="tier-badge '+tierClass(tier)+'">'+tier+'</span></td>'
         +'<td>'+scoreBadge(score)+'</td>'
+        +'<td>'+loadBadge(n)+'</td>'
         +'<td><span style="color:'+stColor+';font-family:var(--font-mono);font-size:.68rem">'+st+'</span></td>'
         +'<td><span style="font-family:var(--font-mono);font-size:.68rem;color:var(--text-muted)">'+escH(n.version||'')+'</span></td>'
         +'<td><span style="font-family:var(--font-mono);font-size:.68rem">'+up+'</span></td>'
         +'<td class="reg-ts">'+ls+'</td>'
         +'</tr>';
     }).join('');
-  }catch(e){document.getElementById('regTableBody').innerHTML='<tr><td colspan="8" class="reg-empty">Errore: '+escH(e.message)+'</td></tr>';}
+  }catch(e){document.getElementById('regTableBody').innerHTML='<tr><td colspan="9" class="reg-empty">Errore: '+escH(e.message)+'</td></tr>';}
 }
 setInterval(function(){var p=document.getElementById('panel-registry');if(p&&p.classList.contains('active'))refreshRegistry();},10000);
 
@@ -855,7 +850,7 @@ function renderLogs(logs,total){
       +'<span class="nc">'+escH(tgt)+'</span>'
       +'<span><span class="sbadge st-'+(l.status||'info')+'">'+(stEmoji[l.status||'info']||'')+' '+escH(l.status||'info')+'</span></span>'
       +'<span class="summary">'+escH(l.summary||'')+'</span>'
-      +'</div>'
+      +'</span>'
       +'<div class="detail-row" id="ld'+i+'"><b>TraceID:</b> '+escH(l.traceId||l.trace_id||'')+'&nbsp;|&nbsp;<b>ID:</b> '+escH(l.id||l.log_id||'')+'&nbsp;<b>Detail:</b> '+escH(l.detail||'--')+'</div>';
   }).join('');
   if(document.getElementById('autoScroll').checked)body.scrollTop=body.scrollHeight;
@@ -880,6 +875,7 @@ async function diagTopology(){document.getElementById('dTopo').textContent='...'
 async function diagRegistry(){document.getElementById('dReg').textContent='...';var d=await(await fetch('/registry/nodes')).json();document.getElementById('dReg').textContent=JSON.stringify(d,null,2);}
 async function checkOllama(){document.getElementById('dOllama').textContent='...';var d=await(await fetch('/ollama/status')).json();document.getElementById('dOllama').textContent=JSON.stringify(d,null,2);}
 async function checkHb(){var d=await(await fetch('/hb/status')).json();document.getElementById('dHb').textContent=JSON.stringify(d,null,2);}
+async function diagRoutingWeights(){document.getElementById('dRoutingWeights').textContent='...';var d=await(await fetch('/config/routing-weights')).json();document.getElementById('dRoutingWeights').textContent=JSON.stringify(d,null,2);}
 async function sendDream(){
   var node=document.getElementById('drNode').value.trim()||'node-sim';
   var sum=document.getElementById('drText').value.trim()||'Autonomous cycle';
