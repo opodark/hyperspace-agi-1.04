@@ -74,7 +74,7 @@ PEER_MAX_AGE_S       = int(os.getenv("PEER_MAX_AGE_S", "120"))
 # REQUEST_QUEUE_TIMEOUT_S : secondi massimi che una richiesta aspetta in coda
 #                           prima di ricevere un 503 esplicito (invece di
 #                           aspettare indefinitamente dietro il semaforo).
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 2))
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 1))
 REQUEST_QUEUE_TIMEOUT_S = int(os.getenv("REQUEST_QUEUE_TIMEOUT_S", 60))
 
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
