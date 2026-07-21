@@ -44,7 +44,7 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 NODE_ENDPOINTS     = [e.strip() for e in os.getenv("NODE_ENDPOINTS", "node:8084").split(",") if e.strip()]
 OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
-DEFAULT_MODEL      = os.getenv("OLLAMA_MODEL", "phi3")
+DEFAULT_MODEL      = os.getenv("OLLAMA_MODEL", "")
 INFERENCE_BACKEND  = os.getenv("INFERENCE_BACKEND", "ollama")
 REGISTRY_URL       = os.getenv("REGISTRY_URL", "http://registry:8086")
 _AUTHORITY_URL     = os.getenv("AUTHORITY_URL", "http://authority:8080")

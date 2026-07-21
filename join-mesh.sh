@@ -197,8 +197,8 @@ case "$LLM_CHOICE" in
     else
         OLLAMA_DOCKER_URL="http://host.docker.internal:${OLLAMA_PORT}"
     fi
-    OLLAMA_MODEL_DEFAULT="phi3"
-    read -rp "  Modello Ollama [default: ${OLLAMA_MODEL_DEFAULT}]: " OLLAMA_MODEL
+    OLLAMA_MODEL_DEFAULT=""
+    read -rp "  Modello Ollama [nessun default, va specificato]: " OLLAMA_MODEL
     OLLAMA_MODEL=${OLLAMA_MODEL:-$OLLAMA_MODEL_DEFAULT}
     ;;
 2)
@@ -211,12 +211,12 @@ case "$LLM_CHOICE" in
     ;;
 3)
     OLLAMA_DOCKER_URL="http://host.docker.internal:11434"
-    OLLAMA_MODEL="phi3"
+    OLLAMA_MODEL=""
     warn "Nessun backend LLM — il nodo funzionerà come relay puro."
     ;;
 *)
     OLLAMA_DOCKER_URL="http://host.docker.internal:11434"
-    OLLAMA_MODEL="phi3"
+    OLLAMA_MODEL=""
     ;;
 esac
 
@@ -227,7 +227,7 @@ cat > .env << EOF
 # Generato da join-mesh.sh — $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 OLLAMA_URL=${OLLAMA_DOCKER_URL}
 OLLAMA_MODEL=${OLLAMA_MODEL}
-NODE_HOSTNAME=node
+NODE_HOSTNAME=node-1
 NODE_PORT=8084
 NODE_TIER=leaf
 VRAM_GB=0.0
@@ -236,7 +236,7 @@ BOOT_PEERS=${BOOT_PEERS_DEFAULT}
 CONTROL_PLANE_URL=http://control-plane:8085
 REGISTRY_URL=http://registry:8086
 REGISTRY_PORT=8086
-NODE_ENDPOINTS=node:8084
+NODE_ENDPOINTS=node-1:8084
 HEARTBEAT_EVERY=30
 HEARTBEAT_INTERVAL=30
 NODE_TTL=90
@@ -247,8 +247,7 @@ EOF
 
 log ".env generato ✓"
 
-COMPOSE_FILE="docker-compose.prod.yml"
-[ -f "$COMPOSE_FILE" ] || COMPOSE_FILE="docker-compose.yml"
+COMPOSE_FILE="docker-compose.yml"
 
 log "Build + avvio nodo leaf..."
 docker compose -f "$COMPOSE_FILE" up -d --build

@@ -64,7 +64,7 @@ services:
       PROXY_PORT: "11435"
       DATA_DIR: /app/data
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       NODE_TIER: ${NODE_TIER:-leaf}
       VRAM_GB: ${VRAM_GB:-0.0}
       SIGN_REQUESTS: ${SIGN_REQUESTS:-true}
@@ -97,7 +97,7 @@ services:
     environment:
       NODE_ENDPOINTS: ${NODE_ENDPOINTS:-node:8084}
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       AUTHORITY_ENABLED: "false"
       PUBLIC_ENDPOINT: ${PUBLIC_ENDPOINT:-}
       PYTHONUNBUFFERED: "1"

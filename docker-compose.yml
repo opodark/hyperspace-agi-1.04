@@ -382,7 +382,7 @@ services:
       REGISTRY_URL: "http://registry:${REGISTRY_PORT:-8086}"
       REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
       MEMORY_TTL_DAYS: "${MEMORY_TTL_DAYS:-7}"
       MEMORY_MAX_ENTRIES: "${MEMORY_MAX_ENTRIES:-200}"
@@ -450,7 +450,7 @@ services:
       PEER_MAX_AGE_S: "${PEER_MAX_AGE_S:-120}"
       NODE_TTL: "${NODE_TTL:-300}"
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
       VRAM_GB: ${VRAM_GB:-0.0}
       SIGN_REQUESTS: ${SIGN_REQUESTS:-true}

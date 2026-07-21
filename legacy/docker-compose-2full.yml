@@ -178,7 +178,7 @@ services:
       PYTHONUNBUFFERED: "1"
       AUTHORITY_URL: ${AUTHORITY_URL:-http://authority:8080}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -202,7 +202,7 @@ services:
       WORKER_PORT: "8084"
       AUTHORITY_URL: ${AUTHORITY_URL:-http://authority:8080}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -227,7 +227,7 @@ services:
       WORKER_PORT: "8084"
       AUTHORITY_URL: ${AUTHORITY_URL:-http://authority:8080}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -252,7 +252,7 @@ services:
       WORKER_PORT: "8084"
       AUTHORITY_URL: ${AUTHORITY_URL:-http://authority:8080}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
