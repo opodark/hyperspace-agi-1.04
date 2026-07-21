@@ -127,6 +127,21 @@ async def _poll_memory_stats(client: httpx.AsyncClient) -> None:
         pass
 
 
+async def _poll_metrics(client: httpx.AsyncClient) -> None:
+    try:
+        r = await client.get(f"{CP_URL}/metrics/live")
+        if r.status_code == 200:
+            _broadcast("metrics_live", r.json())
+    except Exception:
+        pass
+    try:
+        r = await client.get(f"{CP_URL}/metrics/summary")
+        if r.status_code == 200:
+            _broadcast("metrics_summary", r.json())
+    except Exception:
+        pass
+
+
 async def _poll_tasks(client: httpx.AsyncClient) -> None:
     global _last_task_snapshot
     try:
@@ -277,9 +292,24 @@ async def _poller() -> None:
             await _poll_log_type(client, "node_chat", per_page=20)
 
 
+# Poll dedicato, più veloce del giro principale: i tick di generazione in
+# corso (POST /metrics/tick sul control-plane) cambiano più volte al secondo,
+# il resto della mesh no. METRICS_POLL_INTERVAL separato per non forzare tutto
+# il resto della dashboard a un ritmo che non gli serve.
+METRICS_POLL_INTERVAL = float(os.getenv("METRICS_POLL_INTERVAL", "1"))
+
+
+async def _metrics_poller() -> None:
+    async with httpx.AsyncClient(timeout=4) as client:
+        while True:
+            await asyncio.sleep(METRICS_POLL_INTERVAL)
+            await _poll_metrics(client)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     asyncio.create_task(_poller())
+    asyncio.create_task(_metrics_poller())
 
 
 @app.get("/")

@@ -26,8 +26,7 @@ class GitHubConnector(BaseConnector):
         }
         self.base = "https://api.github.com"
 
-    @property
-    def enabled(self) -> bool:
+    def is_available(self) -> bool:
         return bool(self.token)
 
     def get_tools(self) -> list[dict]:

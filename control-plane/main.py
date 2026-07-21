@@ -204,7 +204,8 @@ print(f"[CP] Federation identity: {CP_ID[:20]}... (federation={'ON' if FEDERATIO
 
 # Connettori esterni (GitHub, Google Workspace, Office365 — vedi connectors/).
 # Ognuno si auto-abilita solo se le sue env var/credenziali sono presenti
-# (BaseConnector.enabled); quelli senza credenziali non finiscono nel tool loop.
+# (BaseConnector.enabled -> is_available()); quelli senza credenziali non
+# finiscono nel tool loop. I loro tool vengono aggiunti a BUILTIN_TOOLS piu' sotto.
 connector_manager = ConnectorManager()
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -431,7 +432,8 @@ def _sse_headers():
     }
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
-LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync"}
+LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
+             "webui_interaction", "dream", "node_chat"}
 
 def push_log(type_, summary, detail="", source="control-plane", target="", status="info", trace_id=""):
     entry = {
@@ -709,6 +711,9 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
             return handler(tool_args)
         except Exception as e:
             return f"Errore esecuzione tool '{tool_name}': {e}"
+    # Non e' un tool nativo: prova i connettori (github_*, o365_*, google_*).
+    # ConnectorManager.execute() ritorna gia' un messaggio se nessuno gestisce
+    # il tool.
     try:
         return connector_manager.execute(tool_name, tool_args)
     except Exception as e:
@@ -1090,6 +1095,88 @@ def add_log():
 def clear_logs():
     db.clear_logs()
     return jsonify({"ok": True})
+
+# ── METRICS (token/s nerd stats) ───────────────────────────────────────────────
+# Stato in-memory (non persistito): il proxy Ollama nel nodo posta un "tick"
+# leggero ogni ~400ms mentre genera, così il pannello realtime della dashboard
+# può mostrare tok/s live senza scrivere su sqlite ad ogni chunk. I valori
+# finali (più precisi, da eval_duration nativo di Ollama) restano invece nei
+# log "webui_interaction", da cui /metrics/summary calcola le medie storiche.
+_METRICS_LOCK = threading.Lock()
+_LIVE_GENERATIONS = {}   # interaction_id -> {node_id, model, tokens_so_far, tokens_per_sec, updated_at}
+_LIVE_STALE_S = 20       # tick scaduto (client caduto a metà streaming) -> rimosso alla prossima /metrics/live
+
+@app.route('/metrics/tick', methods=['POST'])
+def metrics_tick():
+    data = request.get_json(force=True, silent=True) or {}
+    iid = data.get('interaction_id', '')
+    if not iid:
+        return jsonify({"ok": False, "error": "missing interaction_id"}), 400
+    with _METRICS_LOCK:
+        if data.get('done'):
+            _LIVE_GENERATIONS.pop(iid, None)
+        else:
+            _LIVE_GENERATIONS[iid] = {
+                "interaction_id": iid,
+                "node_id":        data.get('node_id', ''),
+                "model":          data.get('model', ''),
+                "tokens_so_far":  data.get('tokens_so_far', 0),
+                "tokens_per_sec": data.get('tokens_per_sec', 0),
+                "elapsed_ms":     data.get('elapsed_ms', 0),
+                "updated_at":     time.time(),
+            }
+    return jsonify({"ok": True})
+
+@app.route('/metrics/live')
+def metrics_live():
+    now = time.time()
+    with _METRICS_LOCK:
+        for k in [k for k, v in _LIVE_GENERATIONS.items() if now - v["updated_at"] > _LIVE_STALE_S]:
+            _LIVE_GENERATIONS.pop(k, None)
+        gens = list(_LIVE_GENERATIONS.values())
+    return jsonify({"generations": gens, "count": len(gens)})
+
+@app.route('/metrics/summary')
+def metrics_summary():
+    limit = int(request.args.get('limit', 300))
+    rows  = db.query_logs(type_='webui_interaction', page=1, per_page=limit)
+    per_model = {}
+    total_req = total_tok_in = total_tok_out = 0
+    tps_values = []
+    for row in rows:
+        try:
+            detail = json.loads(row.get('detail') or '{}')
+        except Exception:
+            continue
+        model   = detail.get('model') or 'unknown'
+        tok_in  = detail.get('tokens_in') or 0
+        tok_out = detail.get('tokens_out') or 0
+        tps     = detail.get('tokens_per_sec')
+        m = per_model.setdefault(model, {"requests": 0, "tokens_in": 0, "tokens_out": 0, "tps_sum": 0.0, "tps_n": 0})
+        m["requests"]   += 1
+        m["tokens_in"]  += tok_in
+        m["tokens_out"] += tok_out
+        if tps:
+            m["tps_sum"] += tps
+            m["tps_n"]   += 1
+            tps_values.append(tps)
+        total_req     += 1
+        total_tok_in  += tok_in
+        total_tok_out += tok_out
+    models = [{
+        "model": name, "requests": m["requests"], "tokens_in": m["tokens_in"],
+        "tokens_out": m["tokens_out"],
+        "avg_tokens_per_sec": round(m["tps_sum"] / m["tps_n"], 2) if m["tps_n"] else None,
+    } for name, m in per_model.items()]
+    models.sort(key=lambda x: -x["requests"])
+    return jsonify({
+        "requests":           total_req,
+        "tokens_in":          total_tok_in,
+        "tokens_out":         total_tok_out,
+        "avg_tokens_per_sec": round(sum(tps_values) / len(tps_values), 2) if tps_values else None,
+        "models":             models,
+        "sample_size":        len(rows),
+    })
 
 # ── MESH ──────────────────────────────────────────────────────────────────────
 @app.route('/mesh/announce', methods=['POST'])

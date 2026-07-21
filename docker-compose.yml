@@ -43,6 +43,7 @@ services:
       REGISTRY_PORT: "${REGISTRY_PORT:-8086}"
       NODE_TTL: "${NODE_TTL:-300}"
       REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      ONBOARDING_URL: "http://localhost:${ONBOARDING_PORT:-8088}"
       PYTHONUNBUFFERED: "1"
     networks:
       - hyperspace-net
@@ -53,6 +54,42 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # -- Onboarding Wizard ------------------------------------------------------------------
+  # Landing page + wizard di primo avvio (env, download modello, specializzazione,
+  # avatar). Non tocca Docker: prepara tutto e alla fine mostra il comando
+  # 'docker compose up -d --build' da lanciare manualmente.
+  onboarding:
+    build:
+      context: ./onboarding
+      dockerfile: Dockerfile
+    container_name: hyperspace_onboarding
+    env_file:
+      - path: ./.env
+        required: false
+    depends_on:
+      registry:
+        condition: service_healthy
+    ports:
+      - "${ONBOARDING_PORT:-8088}:8088"
+    volumes:
+      - .:/repo
+    environment:
+      ENV_FILE_PATH:    /repo/.env
+      ENV_EXAMPLE_PATH: /repo/.env.example
+      REGISTRY_URL:     "http://registry:${REGISTRY_PORT:-8086}"
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # -- SearXNG (web search self-hosted) -------------------------------------------------
   # Usato internamente da control-plane per il tool web_search
@@ -292,16 +329,21 @@ services:
     env_file:
       - path: ./.env
         required: false
+    depends_on:
+      control-plane:
+        condition: service_started
     ports:
       - "3000:8080"
     volumes:
       - open_webui_data:/app/backend/data
     environment:
+      OLLAMA_BASE_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       # WebUI deve parlare al control-plane OpenAI-compatible (/v1/chat/completions),
       # non a Ollama diretto: solo così passa dal routing nodo + tool-calling loop
-      # (incluso il tool web_search). OLLAMA_BASE_URL resta solo su control-plane/node-1.
-      OPENAI_API_BASE_URL: "http://control-plane:8085/v1"
-      OPENAI_API_KEY: "dummy"
+      # (incluso il tool web_search). OPENAI_API_BASE_URLS/KEYS (plurale) sono i nomi
+      # correnti usati da Open WebUI — le varianti singolari sono deprecate.
+      OPENAI_API_BASE_URLS: "http://control-plane:8085/v1"
+      OPENAI_API_KEYS: "hyperspace-local"
       # senza questo, WebUI auto-rileva e riattiva da sola una connessione
       # Ollama diretta (http://host.docker.internal:11434), bypassando il
       # control-plane: va disabilitata esplicitamente, non basta omettere OLLAMA_BASE_URL.
@@ -315,8 +357,6 @@ services:
     networks:
       - hyperspace-net
     restart: unless-stopped
-    depends_on:
-      - control-plane
 
   # -- Control Plane --------------------------------------------------------------------
   control-plane:

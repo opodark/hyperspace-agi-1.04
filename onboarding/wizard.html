@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HyperSpace AGI — Avvio guidato</title>
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d0d10; --surface: #15151a; --surface2: #1c1c23;
+    --border: rgba(255,255,255,0.07); --text: #e2e2e8; --muted: #6b6b7a;
+    --accent: #00c896; --accent2: #38bdf8; --danger: #ff4757;
+  }
+  body { font-family: 'Satoshi', sans-serif; background: var(--bg); color: var(--text);
+         min-height: 100dvh; line-height: 1.6; display: flex; flex-direction: column; align-items: center; }
+
+  header { width: 100%; padding: 1.25rem 2rem; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; justify-content: space-between; }
+  .logo { display: flex; align-items: center; gap: .6rem; font-weight: 700; }
+  .logo svg { color: var(--accent); }
+  .mesh-stat { font-size: .85rem; color: var(--muted); }
+  .mesh-stat b { color: var(--accent); }
+
+  .dots { display: flex; gap: .5rem; padding: 1.5rem 0 0; }
+  .dot-step { width: 8px; height: 8px; border-radius: 50%; background: var(--surface2);
+              border: 1px solid var(--border); transition: all .2s; }
+  .dot-step.active { background: var(--accent); border-color: var(--accent); width: 22px; border-radius: 5px; }
+  .dot-step.done { background: var(--accent2); border-color: var(--accent2); }
+
+  main { width: 100%; max-width: 640px; padding: 2rem; flex: 1; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+          padding: 2rem; }
+  .step { display: none; }
+  .step.active { display: block; animation: fadein .25s ease; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  h1 { font-size: 1.4rem; margin-bottom: .4rem; }
+  .subtitle { color: var(--muted); font-size: .9rem; margin-bottom: 1.6rem; }
+
+  label { display: block; font-size: .85rem; color: var(--muted); margin: 1rem 0 .35rem; }
+  label:first-of-type { margin-top: 0; }
+  input[type=text] { width: 100%; background: var(--surface2); border: 1px solid var(--border);
+         color: var(--text); border-radius: 8px; padding: .65rem .8rem; font-size: .92rem;
+         font-family: inherit; }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  .hint { font-size: .78rem; color: var(--muted); margin-top: .35rem; }
+
+  .btn { padding: .65rem 1.4rem; border-radius: 8px; font-size: .9rem; font-weight: 600;
+         cursor: pointer; border: none; transition: all .2s; font-family: inherit; }
+  .btn-primary { background: var(--accent); color: #0d0d10; }
+  .btn-primary:hover { background: #00e0a8; }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  .nav-row { display: flex; justify-content: space-between; margin-top: 1.8rem; }
+
+  .grid-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: .7rem; }
+  .pick-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 12px;
+               padding: 1rem; cursor: pointer; transition: all .15s; text-align: center; }
+  .pick-card:hover { border-color: rgba(0,200,150,.4); }
+  .pick-card.selected { border-color: var(--accent); background: rgba(0,200,150,.08); }
+  .pick-card .icon { font-size: 1.6rem; display: block; margin-bottom: .4rem; }
+  .pick-card .label { font-size: .85rem; font-weight: 600; }
+  .pick-card .desc { font-size: .72rem; color: var(--muted); margin-top: .25rem; }
+
+  .avatar-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: .6rem; }
+  .avatar-cell { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+                 font-size: 1.5rem; padding: .6rem 0; text-align: center; cursor: pointer; }
+  .avatar-cell:hover { border-color: rgba(0,200,150,.4); }
+  .avatar-cell.selected { border-color: var(--accent); background: rgba(0,200,150,.08); }
+
+  .model-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
+  .model-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 999px;
+                padding: .4rem .9rem; font-size: .82rem; cursor: pointer; }
+  .model-chip:hover { border-color: rgba(56,189,248,.5); }
+  .model-chip.selected { border-color: var(--accent2); color: var(--accent2); background: rgba(56,189,248,.08); }
+
+  .progress-bar { height: 8px; background: var(--surface2); border-radius: 999px; overflow: hidden;
+                  margin-top: .5rem; }
+  .progress-bar > div { height: 100%; background: var(--accent); width: 0%; transition: width .2s; }
+  .progress-status { font-size: .78rem; color: var(--muted); margin-top: .4rem; }
+
+  .summary-row { display: flex; justify-content: space-between; padding: .5rem 0;
+                 border-bottom: 1px solid var(--border); font-size: .88rem; }
+  .summary-row:last-child { border-bottom: none; }
+  .summary-row .k { color: var(--muted); }
+
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 1rem; font-size: .82rem; overflow-x: auto; color: #a3e7d4; margin-top: .8rem; }
+
+  .status-card { border-radius: 12px; padding: 1rem 1.2rem; margin-top: 1.2rem; font-size: .88rem; }
+  .status-waiting { background: rgba(56,189,248,.08); border: 1px solid rgba(56,189,248,.3); color: var(--accent2); }
+  .status-online { background: rgba(0,200,150,.1); border: 1px solid rgba(0,200,150,.35); color: var(--accent); }
+
+  .badge { display: inline-flex; align-items: center; gap: .4rem; background: rgba(0,200,150,.1);
+           color: var(--accent); border: 1px solid rgba(0,200,150,.25); border-radius: 999px;
+           font-size: .78rem; padding: .25rem .8rem; margin-bottom: .4rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+    </svg>
+    HyperSpace AGI
+  </div>
+  <div class="mesh-stat"><b id="mesh-count">…</b> nodi attivi nella mesh</div>
+</header>
+
+<div class="dots" id="dots"></div>
+
+<main>
+  <div class="card">
+
+    <!-- STEP 0 — BENVENUTO -->
+    <section class="step" data-step="0">
+      <div class="badge">⬡ Avvio guidato</div>
+      <h1>Benvenuto su HyperSpace AGI</h1>
+      <p class="subtitle">In pochi passaggi configuriamo il tuo nodo: endpoint, modello, specializzazione e avatar. Alla fine ti diamo il comando per avviare tutto.</p>
+      <div class="nav-row" style="justify-content:flex-end">
+        <button class="btn btn-primary" onclick="goStep(1)">Inizia →</button>
+      </div>
+    </section>
+
+    <!-- STEP 1 — ENDPOINT -->
+    <section class="step" data-step="1">
+      <h1>Il tuo endpoint pubblico</h1>
+      <p class="subtitle">L'indirizzo con cui gli altri nodi della mesh ti raggiungono (ngrok, tailscale funnel, VPS...).</p>
+      <label for="in-endpoint">PUBLIC_ENDPOINT *</label>
+      <input type="text" id="in-endpoint" placeholder="https://il-tuo-tunnel.ngrok-free.app">
+      <div class="hint">Obbligatorio: senza un endpoint raggiungibile il tuo nodo non riceve task dagli altri peer.</div>
+
+      <label for="in-registry">REGISTRY_PUBLIC_URL <span style="color:var(--muted)">(avanzato)</span></label>
+      <input type="text" id="in-registry" placeholder="https://sanctuary-mower-plated.ngrok-free.dev">
+      <div class="hint">Lascia il valore di default se usi la mesh pubblica.</div>
+
+      <div class="nav-row">
+        <button class="btn btn-ghost" onclick="goStep(0)">← Indietro</button>
+        <button class="btn btn-primary" onclick="stepEndpointNext()">Avanti →</button>
+      </div>
+    </section>
+
+    <!-- STEP 2 — MODELLO -->
+    <section class="step" data-step="2">
+      <h1>Motore di inferenza</h1>
+      <p class="subtitle">Il backend Ollama locale e il modello da usare.</p>
+      <label for="in-ollama-url">OLLAMA_URL</label>
+      <input type="text" id="in-ollama-url" placeholder="http://host.docker.internal:11434">
+      <button class="btn btn-ghost" style="margin-top:.6rem" onclick="testOllama()">Testa connessione</button>
+      <div class="hint" id="ollama-test-result"></div>
+
+      <label>Modelli consigliati (supportano il tool-calling)</label>
+      <div class="model-row" id="model-shortlist"></div>
+
+      <label for="in-model">OLLAMA_MODEL</label>
+      <input type="text" id="in-model" placeholder="phi3">
+
+      <button class="btn btn-ghost" style="margin-top:.6rem" onclick="pullModel()">Scarica modello</button>
+      <div class="progress-bar"><div id="pull-bar"></div></div>
+      <div class="progress-status" id="pull-status"></div>
+
+      <div class="nav-row">
+        <button class="btn btn-ghost" onclick="goStep(1)">← Indietro</button>
+        <button class="btn btn-primary" onclick="stepModelNext()">Avanti →</button>
+      </div>
+    </section>
+
+    <!-- STEP 3 — SPECIALIZZAZIONE -->
+    <section class="step" data-step="3">
+      <h1>Specializzazione del nodo</h1>
+      <p class="subtitle">Scegli un profilo — è solo un'etichetta che aiuta a capire a colpo d'occhio a cosa serve il nodo.</p>
+      <div class="grid-cards" id="spec-grid"></div>
+      <label for="in-spec-custom">Personalizzata <span style="color:var(--muted)">(opzionale)</span></label>
+      <input type="text" id="in-spec-custom" placeholder="es. legal-research">
+      <div class="nav-row">
+        <button class="btn btn-ghost" onclick="goStep(2)">← Indietro</button>
+        <button class="btn btn-primary" onclick="goStep(4)">Avanti →</button>
+      </div>
+    </section>
+
+    <!-- STEP 4 — AVATAR -->
+    <section class="step" data-step="4">
+      <h1>Avatar del nodo</h1>
+      <p class="subtitle">Un'emoji che rappresenta il tuo nodo nelle dashboard.</p>
+      <div class="avatar-grid" id="avatar-grid"></div>
+      <label for="in-avatar-custom">Personalizzato <span style="color:var(--muted)">(opzionale)</span></label>
+      <input type="text" id="in-avatar-custom" placeholder="🦄" maxlength="4">
+      <div class="nav-row">
+        <button class="btn btn-ghost" onclick="goStep(3)">← Indietro</button>
+        <button class="btn btn-primary" onclick="goStep(5)">Avanti →</button>
+      </div>
+    </section>
+
+    <!-- STEP 5 — RIEPILOGO & AVVIO -->
+    <section class="step" data-step="5">
+      <h1>Riepilogo &amp; avvio</h1>
+      <p class="subtitle">Controlla la configurazione, salvala, poi avvia lo stack.</p>
+      <div id="summary"></div>
+      <div class="nav-row" style="justify-content:flex-start; gap:.8rem">
+        <button class="btn btn-primary" onclick="saveConfig()">Salva configurazione</button>
+      </div>
+
+      <div id="launch-block" style="display:none">
+        <label>Comando di avvio</label>
+        <pre id="launch-cmd">docker compose up -d --build</pre>
+        <button class="btn btn-ghost" onclick="copyCmd()">📋 Copia comando</button>
+
+        <div class="status-card status-waiting" id="live-status">
+          In attesa che il tuo nodo compaia nella mesh — lancia il comando sopra in un terminale, poi resta su questa pagina.
+        </div>
+      </div>
+
+      <div class="nav-row">
+        <button class="btn btn-ghost" onclick="goStep(4)">← Indietro</button>
+        <span></span>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<script>
+const TOTAL_STEPS = 6;
+let currentStep = 0;
+let pollTimer = null;
+
+const state = {
+  PUBLIC_ENDPOINT: '', REGISTRY_PUBLIC_URL: '', OLLAMA_URL: '', OLLAMA_MODEL: '',
+  NODE_SPECIALIZATION: '', NODE_AVATAR: ''
+};
+
+const RECOMMENDED_MODELS = ['phi3', 'phi4', 'qwen2.5:7b', 'llama3.2', 'mistral-nemo'];
+
+const SPECIALIZATIONS = [
+  {id:'generalist', label:'Generalista', icon:'🧩', desc:'Un po\' di tutto'},
+  {id:'research',   label:'Ricerca & Web', icon:'🔎', desc:'Ricerca e sintesi'},
+  {id:'coding',     label:'Coding', icon:'💻', desc:'Codice e debug'},
+  {id:'writing',    label:'Scrittura', icon:'✍️', desc:'Contenuti e copy'},
+  {id:'data',       label:'Analisi dati', icon:'📊', desc:'Numeri e dataset'},
+  {id:'creative',   label:'Creativo', icon:'🎨', desc:'Idee e storytelling'},
+];
+
+const AVATARS = ['🤖','🦾','🧠','⚡','🌐','🔮','🛰️','🦉','🐙','🦊','🐺','🌊'];
+
+function normEp(s) { return (s || '').trim().replace(/\/+$/, '').toLowerCase(); }
+
+function renderDots() {
+  const el = document.getElementById('dots');
+  el.innerHTML = '';
+  for (let i = 0; i < TOTAL_STEPS; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot-step' + (i === currentStep ? ' active' : i < currentStep ? ' done' : '');
+    el.appendChild(d);
+  }
+}
+
+function goStep(n) {
+  currentStep = n;
+  document.querySelectorAll('.step').forEach(s => s.classList.toggle('active', Number(s.dataset.step) === n));
+  renderDots();
+  if (n === 3) renderSpecGrid();
+  if (n === 4) renderAvatarGrid();
+  if (n === 5) renderSummary();
+}
+
+function stepEndpointNext() {
+  state.PUBLIC_ENDPOINT = document.getElementById('in-endpoint').value.trim();
+  state.REGISTRY_PUBLIC_URL = document.getElementById('in-registry').value.trim();
+  goStep(2);
+}
+
+function stepModelNext() {
+  state.OLLAMA_URL = document.getElementById('in-ollama-url').value.trim();
+  state.OLLAMA_MODEL = document.getElementById('in-model').value.trim();
+  goStep(3);
+}
+
+function renderModelShortlist() {
+  const row = document.getElementById('model-shortlist');
+  row.innerHTML = '';
+  RECOMMENDED_MODELS.forEach(m => {
+    const chip = document.createElement('div');
+    chip.className = 'model-chip';
+    chip.textContent = m;
+    chip.onclick = () => {
+      document.getElementById('in-model').value = m;
+      row.querySelectorAll('.model-chip').forEach(c => c.classList.remove('selected'));
+      chip.classList.add('selected');
+    };
+    row.appendChild(chip);
+  });
+}
+
+function renderSpecGrid() {
+  const grid = document.getElementById('spec-grid');
+  grid.innerHTML = '';
+  SPECIALIZATIONS.forEach(s => {
+    const card = document.createElement('div');
+    card.className = 'pick-card' + (state.NODE_SPECIALIZATION === s.id ? ' selected' : '');
+    card.innerHTML = `<span class="icon">${s.icon}</span><div class="label">${s.label}</div><div class="desc">${s.desc}</div>`;
+    card.onclick = () => {
+      state.NODE_SPECIALIZATION = s.id;
+      document.getElementById('in-spec-custom').value = '';
+      renderSpecGrid();
+    };
+    grid.appendChild(card);
+  });
+}
+
+function renderAvatarGrid() {
+  const grid = document.getElementById('avatar-grid');
+  grid.innerHTML = '';
+  AVATARS.forEach(a => {
+    const cell = document.createElement('div');
+    cell.className = 'avatar-cell' + (state.NODE_AVATAR === a ? ' selected' : '');
+    cell.textContent = a;
+    cell.onclick = () => {
+      state.NODE_AVATAR = a;
+      document.getElementById('in-avatar-custom').value = '';
+      renderAvatarGrid();
+    };
+    grid.appendChild(cell);
+  });
+}
+
+document.getElementById('in-spec-custom').addEventListener('input', e => {
+  if (e.target.value.trim()) { state.NODE_SPECIALIZATION = e.target.value.trim(); renderSpecGrid(); }
+});
+document.getElementById('in-avatar-custom').addEventListener('input', e => {
+  if (e.target.value.trim()) { state.NODE_AVATAR = e.target.value.trim(); renderAvatarGrid(); }
+});
+
+async function testOllama() {
+  const url = document.getElementById('in-ollama-url').value.trim();
+  const resultEl = document.getElementById('ollama-test-result');
+  resultEl.textContent = 'Verifica in corso…';
+  try {
+    const r = await fetch('/api/ollama/tags?url=' + encodeURIComponent(url));
+    const data = await r.json();
+    if (data.ok) {
+      resultEl.textContent = data.models.length
+        ? `✅ Connesso — modelli installati: ${data.models.join(', ')}`
+        : '✅ Connesso — nessun modello ancora installato.';
+    } else {
+      resultEl.textContent = `⚠️ Non raggiungibile: ${data.error}`;
+    }
+  } catch (e) {
+    resultEl.textContent = `⚠️ Errore: ${e}`;
+  }
+}
+
+async function pullModel() {
+  const url = document.getElementById('in-ollama-url').value.trim();
+  const model = document.getElementById('in-model').value.trim();
+  const bar = document.getElementById('pull-bar');
+  const status = document.getElementById('pull-status');
+  if (!url || !model) { status.textContent = 'Compila OLLAMA_URL e OLLAMA_MODEL prima di scaricare.'; return; }
+  bar.style.width = '0%';
+  status.textContent = 'Avvio download…';
+  try {
+    const res = await fetch('/api/ollama/pull', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model, url})
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj.error) { status.textContent = `⚠️ ${obj.error}`; continue; }
+          if (obj.total && obj.completed) {
+            const pct = Math.round((obj.completed / obj.total) * 100);
+            bar.style.width = pct + '%';
+            status.textContent = `${obj.status || ''} — ${pct}%`;
+          } else {
+            status.textContent = obj.status || '';
+          }
+          if (obj.status === 'success') { bar.style.width = '100%'; status.textContent = '✅ Modello scaricato.'; }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {
+    status.textContent = `⚠️ Errore: ${e}`;
+  }
+}
+
+function renderSummary() {
+  const rows = [
+    ['Endpoint pubblico', state.PUBLIC_ENDPOINT || '—'],
+    ['Registry', state.REGISTRY_PUBLIC_URL || '(default)'],
+    ['Ollama URL', state.OLLAMA_URL || '—'],
+    ['Modello', state.OLLAMA_MODEL || '—'],
+    ['Specializzazione', state.NODE_SPECIALIZATION || 'generalist'],
+    ['Avatar', state.NODE_AVATAR || '🤖'],
+  ];
+  document.getElementById('summary').innerHTML = rows.map(([k, v]) =>
+    `<div class="summary-row"><span class="k">${k}</span><span>${v}</span></div>`
+  ).join('');
+}
+
+async function saveConfig() {
+  const payload = {};
+  Object.keys(state).forEach(k => { if (state[k]) payload[k] = state[k]; });
+  try {
+    const r = await fetch('/api/env', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json();
+    if (data.ok) {
+      document.getElementById('launch-block').style.display = 'block';
+      startLivePoll();
+    }
+  } catch (e) {
+    alert('Errore nel salvataggio: ' + e);
+  }
+}
+
+function copyCmd() {
+  navigator.clipboard.writeText(document.getElementById('launch-cmd').textContent);
+}
+
+function startLivePoll() {
+  if (pollTimer) clearInterval(pollTimer);
+  const target = normEp(state.PUBLIC_ENDPOINT);
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/mesh-status');
+      const data = await r.json();
+      const nodes = data.nodes || [];
+      const match = nodes.find(n => normEp(n.public_address) === target);
+      if (match) {
+        clearInterval(pollTimer);
+        const el = document.getElementById('live-status');
+        el.className = 'status-card status-online';
+        el.innerHTML = `✅ <b>Sei online!</b> Nodo <code>${match.node_id.slice(0,16)}…</code> — tier ${match.tier} · ${match.avatar || '🤖'} ${match.specialization || 'generalist'}`;
+      }
+    } catch (e) {}
+  }, 4000);
+}
+
+async function refreshMeshCount() {
+  try {
+    const r = await fetch('/api/mesh-status');
+    const data = await r.json();
+    document.getElementById('mesh-count').textContent = (data.nodes || []).length;
+  } catch (e) {
+    document.getElementById('mesh-count').textContent = '?';
+  }
+}
+
+async function prefillFromEnv() {
+  try {
+    const r = await fetch('/api/env');
+    const data = await r.json();
+    if (data.PUBLIC_ENDPOINT) document.getElementById('in-endpoint').value = data.PUBLIC_ENDPOINT;
+    if (data.REGISTRY_PUBLIC_URL) document.getElementById('in-registry').value = data.REGISTRY_PUBLIC_URL;
+    if (data.OLLAMA_URL) document.getElementById('in-ollama-url').value = data.OLLAMA_URL;
+    if (data.OLLAMA_MODEL) document.getElementById('in-model').value = data.OLLAMA_MODEL;
+    if (data.NODE_SPECIALIZATION) state.NODE_SPECIALIZATION = data.NODE_SPECIALIZATION;
+    if (data.NODE_AVATAR) state.NODE_AVATAR = data.NODE_AVATAR;
+  } catch (e) {}
+}
+
+goStep(0);
+renderModelShortlist();
+refreshMeshCount();
+prefillFromEnv();
+setInterval(refreshMeshCount, 15000);
+</script>
+
+</body>
+</html>
