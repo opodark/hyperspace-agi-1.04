@@ -855,7 +855,7 @@ function renderLogs(logs,total){
       +'<span class="nc">'+escH(tgt)+'</span>'
       +'<span><span class="sbadge st-'+(l.status||'info')+'">'+(stEmoji[l.status||'info']||'')+' '+escH(l.status||'info')+'</span></span>'
       +'<span class="summary">'+escH(l.summary||'')+'</span>'
-      +'</span>'
+      +'</div>'
       +'<div class="detail-row" id="ld'+i+'"><b>TraceID:</b> '+escH(l.traceId||l.trace_id||'')+'&nbsp;|&nbsp;<b>ID:</b> '+escH(l.id||l.log_id||'')+'&nbsp;<b>Detail:</b> '+escH(l.detail||'--')+'</div>';
   }).join('');
   if(document.getElementById('autoScroll').checked)body.scrollTop=body.scrollHeight;
