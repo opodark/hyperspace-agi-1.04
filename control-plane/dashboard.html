@@ -711,7 +711,6 @@ async function refreshRegistry(){
       var st=n.status||'unknown';
       var stColor=st==='active'?'var(--success)':st==='unreachable'?'var(--error)':'var(--text-faint)';
       var up=n.uptime_s?formatUptime(n.uptime_s):'';
-      #var ls=n.last_seen?(n.last_seen.replace('T',' ').slice(0,19)):'';
       var ls='';
       if(n.last_seen){
   	ls=(typeof n.last_seen==='number')
