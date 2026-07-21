@@ -148,6 +148,11 @@ _TOOL_CAPABLE_PATTERNS = [
     "hermes", "nexusraven", "gorilla",
     "phi4",
 ]
+# Varianti vision (es. qwen2.5vl) non supportano le tool call di Ollama anche
+# quando il modello testuale base e' in _TOOL_CAPABLE_PATTERNS — "qwen2.5vl"
+# altrimenti farebbe match su "qwen2.5" per substring e si vedrebbe rifiutare
+# le tools da Ollama ("does not support tools").
+_VISION_PATTERNS = ["vl", "vision", "llava"]
 
 def _model_supports_tools(model_name: str) -> bool:
     if _TOOL_CAPABLE_OVERRIDE == "*":
@@ -157,6 +162,8 @@ def _model_supports_tools(model_name: str) -> bool:
             if p.strip().lower() in model_name.lower():
                 return True
     m = model_name.lower().split(":")[0]
+    if any(p in m for p in _VISION_PATTERNS):
+        return False
     return any(p in m for p in _TOOL_CAPABLE_PATTERNS)
 
 tasks: dict = {}
@@ -405,6 +412,26 @@ def _select_best_node(active_nodes: list, model: str = "") -> dict:
     if not executable:
         return None
     return max(executable, key=_node_score)
+
+def _ranked_executable_nodes(active_nodes: list, model: str = "") -> list:
+    """Come _select_best_node ma ritorna TUTTI i nodi eseguibili ordinati per
+    punteggio decrescente, cosi' un chiamante puo' scorrere la lista e provare
+    il nodo successivo se il migliore fallisce per un motivo diverso dal
+    modello (crash, rete, OOM). Se 'model' e' specificato, filtra prima ai
+    soli nodi che lo hanno (vedi _mesh_models) — la lista dei modelli per
+    nodo la sa gia' scartare in anticipo chi non puo' comunque rispondere,
+    invece di scoprirlo un tentativo alla volta."""
+    candidates = active_nodes
+    if model:
+        candidates = [n for n in active_nodes if model in (n.get("models") or [])]
+    executable = [n for n in candidates if _best_endpoint(n)]
+    ranked     = sorted(executable, key=_node_score, reverse=True)
+    if _LOCAL_NODE_ENABLED and _LOCAL_NODE_ENDPOINT:
+        local = next((n for n in ranked if n.get("node_id") == _LOCAL_NODE_ID), None)
+        if local:
+            ranked.remove(local)
+            ranked.insert(0, local)
+    return ranked
 
 # ── MODELLI ───────────────────────────────────────────────────────────────────
 def _fetch_models():
@@ -987,19 +1014,31 @@ def v1_chat_completions():
         return Response(stream_with_context(_stream_gen()), headers=_sse_headers())
 
     # ── NON-STREAM ────────────────────────────────────────────────────────────
-    if selected and _best_endpoint(selected):
-        node_id  = selected.get("node_id", "cp")
-        endpoint = _best_endpoint(selected)
+    # Prova ogni nodo eseguibile in ordine di score: se il migliore non ha il
+    # modello richiesto (o fallisce), passa al successivo prima di ricadere su
+    # federazione/ollama diretto. _run_tool_loop non rilancia eccezioni per
+    # errori "normali" del backend (es. model not found): li restituisce come
+    # dict {"error": ...}, quindi il fallback guarda anche il contenuto della
+    # risposta, non solo le eccezioni di rete.
+    for candidate in _ranked_executable_nodes(active, model=model):
+        node_id  = candidate.get("node_id", "cp")
+        endpoint = _best_endpoint(candidate)
         task["node"] = node_id
         db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
         push_log('inter_node_message', f'task {task_id} -> {node_id[:12]}',
                  f'model={model}', source='webui', target=node_id[:12], status='pending')
         try:
             result_json = _run_tool_loop(data, endpoint, sign=True)
-            _finalize_task(task, task_id, node_id, model, prompt, result_json)
-            return jsonify(result_json)
         except Exception as e:
-            push_log('inter_node_message', f'task {task_id} fallback ollama', str(e), status='warn')
+            push_log('inter_node_message', f'task {task_id} nodo {node_id[:12]} fallito',
+                     str(e), status='warn')
+            continue
+        if isinstance(result_json, dict) and result_json.get("error"):
+            push_log('inter_node_message', f'task {task_id} nodo {node_id[:12]} errore',
+                     str(result_json.get("error"))[:160], status='warn')
+            continue
+        _finalize_task(task, task_id, node_id, model, prompt, result_json)
+        return jsonify(result_json)
 
     # Nessun nodo locale disponibile: prova la federazione prima di ricadere
     # su Ollama diretto. Un CP federato viene trattato come un "super-nodo":
