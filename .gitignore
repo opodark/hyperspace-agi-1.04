@@ -38,3 +38,6 @@ peers.json
 
 # Docker
 *.log
+
+# Node
+node_modules/

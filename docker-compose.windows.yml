@@ -65,7 +65,7 @@ services:
       OLLAMA_MODEL: ${HS_MODEL_GENERAL}
       INFERENCE_BACKEND: ollama
       REGISTRY_URL: http://hyperspace-registry:${REGISTRY_PORT:-8086}
-      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       NODE_ENDPOINTS: "${NODE_ENDPOINTS:-hyperspace-node-1:8084}"
       SEARXNG_URL: http://hyperspace-searxng:8080
       MEMORY_TTL_DAYS: "${MEMORY_TTL_DAYS:-7}"
@@ -132,7 +132,7 @@ services:
       TZ: ${TZ}
       REGISTRY_PORT: "${REGISTRY_PORT:-8086}"
       NODE_TTL: "${NODE_TTL:-300}"
-      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       PYTHONUNBUFFERED: "1"
     ports:
       - "127.0.0.1:${REGISTRY_PORT:-8086}:${REGISTRY_PORT:-8086}"
@@ -186,7 +186,7 @@ services:
       PUBLIC_ENDPOINT: ${PUBLIC_ENDPOINT:-}
       BOOT_PEERS: ${BOOT_PEERS:-}
       REGISTRY_URL: http://hyperspace-registry:${REGISTRY_PORT:-8086}
-      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       CONTROL_PLANE_URL: http://hyperspace-core:8085
       HEARTBEAT_EVERY: "${HEARTBEAT_EVERY:-15}"
       PEER_MAX_AGE_S: "${PEER_MAX_AGE_S:-120}"

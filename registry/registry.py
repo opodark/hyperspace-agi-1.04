@@ -15,7 +15,7 @@ app = FastAPI(title="HyperSpace Registry", version="1.02")
 lock = Lock()
 
 TTL_SECONDS        = int(os.getenv("NODE_TTL", "300"))   # default 300s = 20 cicli heartbeat
-REGISTRY_PUBLIC_URL = os.getenv("REGISTRY_PUBLIC_URL", "https://sanctuary-mower-plated.ngrok-free.dev")
+REGISTRY_PUBLIC_URL = os.getenv("REGISTRY_PUBLIC_URL", "")
 ONBOARDING_URL      = os.getenv("ONBOARDING_URL", "http://localhost:8088")
 
 class NodeRegistration(BaseModel):

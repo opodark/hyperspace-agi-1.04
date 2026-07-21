@@ -3,9 +3,9 @@ version: '3.8'
 # ============================================================
 # HyperSpace AGI v1.02 — Compose PRODUZIONE
 #
-# Architettura a due hub:
-#   Mac    → PUBLIC_ENDPOINT=https://charlesetta-haptical-unconcentratedly.ngrok-free.dev
-#   Ubuntu → PUBLIC_ENDPOINT=https://sanctuary-mower-plated.ngrok-free.dev
+# Architettura a due hub (esempi):
+#   Mac    → PUBLIC_ENDPOINT=https://your-mac-public-endpoint.example
+#   Ubuntu → PUBLIC_ENDPOINT=https://your-ubuntu-public-endpoint.example
 #
 # Uso:
 #   Mac:    cp .env.mac .env && docker compose -f docker-compose.prod.yml up -d --build

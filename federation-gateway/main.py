@@ -1,7 +1,7 @@
 # federation-gateway/main.py
 # HyperSpace AGI v1.03 — Federation Gateway
 #
-# Unico componente pensato per essere esposto pubblicamente (via Caddy/ngrok)
+# Unico componente pensato per essere esposto pubblicamente (via Caddy o tunnel)
 # nello scenario di CP confederati. Non contiene NESSUNA logica di verifica
 # firma o allowlist: quella vive nel control-plane (/federate/execute),
 # perché deve restare un'unica fonte di verità condivisa con la dashboard.

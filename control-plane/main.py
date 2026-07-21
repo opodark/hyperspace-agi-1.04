@@ -13,7 +13,7 @@
 #       da solo: davanti va il federation-gateway, che inoltra SOLO
 #       /federate/execute e /federation/identity (vedi federation-gateway/).
 # fix: tool loop robusto — fallback no-tools se modello non supporta function calling
-# fix: health check JSON-aware — nodi zombie ngrok marcati unreachable
+# fix: health check JSON-aware — nodi zombie marcati unreachable
 # fix: _TOOL_HANDLERS definito dopo le funzioni omega (NameError fix)
 # fix: DB reload al boot, status recovery, endpoint dedup
 # fix: SSE stream headers
@@ -1196,7 +1196,7 @@ def mesh_announce():
     should_update = True
     if existing:
         existing_ep = _normalize_endpoint(existing.get("endpoint", ""))
-        if existing_ep.startswith("https://") and not ep.startswith("https://") and not ep.startswith("browser://"):
+        if existing_ep == ep:
             should_update = False
     if should_update:
         info = {**data, "endpoint": ep, "status": "active",

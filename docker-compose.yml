@@ -42,7 +42,7 @@ services:
     environment:
       REGISTRY_PORT: "${REGISTRY_PORT:-8086}"
       NODE_TTL: "${NODE_TTL:-300}"
-      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       ONBOARDING_URL: "http://localhost:${ONBOARDING_PORT:-8088}"
       PYTHONUNBUFFERED: "1"
     networks:
@@ -380,7 +380,7 @@ services:
       PYTHONUNBUFFERED: "1"
       NODE_ENDPOINTS: "${NODE_ENDPOINTS:-node-1:8084}"
       REGISTRY_URL: "http://registry:${REGISTRY_PORT:-8086}"
-      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3}
       INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
@@ -396,7 +396,7 @@ services:
     restart: unless-stopped
 
   # -- Federation Gateway -----------------------------------------------------------------
-  # Unico componente pensato per essere esposto pubblicamente (via Caddy/ngrok) nello
+  # Unico componente pensato per essere esposto pubblicamente (via Caddy o tunnel) nello
   # scenario di CP confederati: inoltra solo le rotte esplicitamente whitelisted verso
   # il control-plane interno (vedi federation-gateway/main.py). FEDERATION_PUBLIC_URL
   # sul control-plane deve puntare all'URL pubblico di QUESTO servizio, non al CP.
@@ -444,7 +444,7 @@ services:
       PUBLIC_ENDPOINT: ${PUBLIC_ENDPOINT:-}
       BOOT_PEERS: ${BOOT_PEERS:-}
       REGISTRY_URL: "http://registry:${REGISTRY_PORT:-8086}"
-      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-https://sanctuary-mower-plated.ngrok-free.dev}"
+      REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8085}
       HEARTBEAT_EVERY: "${HEARTBEAT_EVERY:-15}"
       PEER_MAX_AGE_S: "${PEER_MAX_AGE_S:-120}"

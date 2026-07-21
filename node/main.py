@@ -53,7 +53,7 @@ PUBLIC_ENDPOINT      = os.getenv("PUBLIC_ENDPOINT", "").strip().rstrip("/")
 BOOT_PEERS           = [p.strip().rstrip("/") for p in os.getenv("BOOT_PEERS", "").split(",") if p.strip()]
 CONTROL_PLANE_URL    = os.getenv("CONTROL_PLANE_URL", "").strip().rstrip("/")
 REGISTRY_URL         = os.getenv("REGISTRY_URL", "http://registry:8086").strip().rstrip("/")
-REGISTRY_PUBLIC_URL  = os.getenv("REGISTRY_PUBLIC_URL", "https://sanctuary-mower-plated.ngrok-free.dev").strip().rstrip("/")
+REGISTRY_PUBLIC_URL  = os.getenv("REGISTRY_PUBLIC_URL", "").strip().rstrip("/")
 SIGN_REQUESTS        = os.getenv("SIGN_REQUESTS", "true").lower() == "true"
 _FORCED_TIER         = os.getenv("NODE_TIER", "").strip().lower()
 NODE_SPECIALIZATION  = os.getenv("NODE_SPECIALIZATION", "generalist").strip()
