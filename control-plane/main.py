@@ -51,6 +51,18 @@ _AUTHORITY_URL     = os.getenv("AUTHORITY_URL", "http://authority:8080")
 _AUTHORITY_ENABLED = os.getenv("AUTHORITY_ENABLED", "false").lower() == "true"
 UI_BRIDGE_URL      = os.getenv("UI_BRIDGE_URL", "http://localhost:8099")
 
+# OmniRoute — gateway esterno verso 278+ provider AI (molti free-tier), usato
+# come ultimo livello di fallback quando NESSUN nodo della mesh (locale o
+# federato) puo' rispondere. Non sostituisce l'inferenza locale: entra in
+# gioco solo quando tutto il resto ha gia' fallito. Funziona gia' con
+# provider free-tier di default, senza chiave configurata; OMNIROUTE_API_KEY
+# e' opzionale, per quando si collegano provider propri dalla dashboard
+# (http://<host>:20128). OMNIROUTE_ENABLED=false lo disattiva del tutto.
+OMNIROUTE_URL      = os.getenv("OMNIROUTE_URL", "http://omniroute:20128").rstrip("/")
+OMNIROUTE_API_KEY  = os.getenv("OMNIROUTE_API_KEY", "").strip()
+OMNIROUTE_MODEL    = os.getenv("OMNIROUTE_MODEL", "auto")
+OMNIROUTE_ENABLED  = os.getenv("OMNIROUTE_ENABLED", "true").lower() == "true"
+
 MEMORY_FILE_GZ     = os.path.join(BASE_DIR, "memory.json.gz")
 MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
 MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
@@ -913,6 +925,35 @@ def _try_federated_execution(prompt: str, model: str):
             return result, peer
     return None, None
 
+def _try_omniroute_fallback(data: dict, timeout: int = 60):
+    """Ultimo livello di fallback: inoltra la richiesta chat/completions cosi'
+    com'e' a OmniRoute (gateway verso 278+ provider esterni, molti free-tier),
+    chiamato SOLO quando mesh e federazione hanno gia' fallito entrambe.
+    OMNIROUTE_API_KEY e' opzionale: l'immagine ufficiale risponde gia' con
+    provider free-tier di default senza alcuna configurazione — la chiave
+    va aggiunta solo se/quando l'utente collega provider propri dalla
+    dashboard OmniRoute. OMNIROUTE_ENABLED=false disattiva del tutto questo
+    livello. Ritorna None su qualunque errore, cosi' il chiamante puo'
+    proseguire con l'ultimo fallback locale (ollama diretto) invariato."""
+    if not OMNIROUTE_ENABLED:
+        return None
+    payload = {**data, "model": data.get("model") or OMNIROUTE_MODEL, "stream": False}
+    headers = {"Authorization": f"Bearer {OMNIROUTE_API_KEY}"} if OMNIROUTE_API_KEY else {}
+    try:
+        r = requests.post(
+            f"{OMNIROUTE_URL}/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        result = r.json()
+        if isinstance(result, dict) and not result.get("error"):
+            return result
+    except Exception as e:
+        push_log('inter_node_message', 'OmniRoute fallback fallito', str(e), status='warn')
+    return None
+
 # ── /v1/models ────────────────────────────────────────────────────────────────
 @app.route('/v1/models')
 def v1_models():
@@ -1051,6 +1092,14 @@ def v1_chat_completions():
         push_log('inter_node_message', f'task {task_id} federato -> {fed_peer.get("label") or node_label}',
                  status='success')
         return jsonify(inner_result)
+
+    # Mesh e federazione hanno fallito entrambe: prova OmniRoute (provider
+    # esterni free-tier) prima dell'ultimo fallback locale su Ollama diretto.
+    omni_result = _try_omniroute_fallback(data)
+    if omni_result:
+        _finalize_task(task, task_id, "omniroute", model, prompt, omni_result)
+        push_log('inter_node_message', f'task {task_id} -> omniroute (fallback esterno)', status='success')
+        return jsonify(omni_result)
 
     task["node"] = "ollama-direct"
     db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)

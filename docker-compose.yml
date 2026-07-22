@@ -389,8 +389,31 @@ services:
       SEARXNG_URL: "http://searxng:8080"
       FEDERATION_ENABLED: "${FEDERATION_ENABLED:-true}"
       FEDERATION_PUBLIC_URL: "${FEDERATION_PUBLIC_URL:-}"
+      OMNIROUTE_URL: "${OMNIROUTE_URL:-http://omniroute:20128}"
+      OMNIROUTE_API_KEY: "${OMNIROUTE_API_KEY:-}"
+      OMNIROUTE_MODEL: "${OMNIROUTE_MODEL:-auto}"
+      OMNIROUTE_ENABLED: "${OMNIROUTE_ENABLED:-true}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - hyperspace-net
+    restart: unless-stopped
+
+  # -- OmniRoute --------------------------------------------------------------------------
+  # Gateway esterno verso 278+ provider AI (molti free-tier) — ultimo livello
+  # di fallback quando nessun nodo della mesh (locale o federato) risponde.
+  # Funziona gia' out-of-the-box con provider free-tier di default, senza
+  # setup. Per collegare provider propri: apri http://<host>:20128, dalla
+  # dashboard, copia la API key in Endpoints e impostala come
+  # OMNIROUTE_API_KEY nel .env. OMNIROUTE_ENABLED=false disattiva del tutto
+  # questo fallback (vedi _try_omniroute_fallback).
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    container_name: hyperspace_omniroute
+    ports:
+      - "${OMNIROUTE_PORT:-20128}:20128"
+    volumes:
+      - omniroute_data:/app/data
     networks:
       - hyperspace-net
     restart: unless-stopped
@@ -469,3 +492,4 @@ volumes:
   ollama_data:
   open_webui_data:
   obsidian_config:
+  omniroute_data:
