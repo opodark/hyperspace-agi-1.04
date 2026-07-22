@@ -71,6 +71,20 @@ OMNIROUTE_ENABLED  = os.getenv("OMNIROUTE_ENABLED", "true").lower() == "true"
 MESH_MODEL_ICON    = "🕸️ "
 OMNIROUTE_MODEL_ID = "🌐 OmniRoute (auto)"
 
+# Compressione prompt (Caveman via OmniRoute) — opzionale, disattivata di
+# default perche' comprime aggressivamente il fraseggio e puo' confondere
+# modelli piccoli/quantizzati se non testata sul proprio caso d'uso. Quando
+# attiva: i prompt lunghi diretti a un nodo della mesh locale passano prima
+# da OmniRoute (POST /api/compression/preview, l'engine Caveman reale, non
+# una reimplementazione nostra) per essere accorciati senza perdere
+# sostanza; le chiamate che vanno gia' a OmniRoute (fallback o selezione
+# esplicita) ricevono lo stesso trattamento gratis via header, senza
+# round-trip aggiuntivo. Fail-open su qualunque errore: in caso di dubbio
+# si manda il prompt originale, mai un errore all'utente per questo.
+PROMPT_COMPRESSION_ENABLED   = os.getenv("PROMPT_COMPRESSION_ENABLED", "false").lower() == "true"
+PROMPT_COMPRESSION_MODE      = os.getenv("PROMPT_COMPRESSION_MODE", "standard")
+PROMPT_COMPRESSION_MIN_CHARS = int(os.getenv("PROMPT_COMPRESSION_MIN_CHARS", "200"))
+
 MEMORY_FILE_GZ     = os.path.join(BASE_DIR, "memory.json.gz")
 MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
 MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
@@ -947,6 +961,8 @@ def _try_omniroute_fallback(data: dict, timeout: int = 60):
         return None
     payload = {**data, "model": data.get("model") or OMNIROUTE_MODEL, "stream": False}
     headers = {"Authorization": f"Bearer {OMNIROUTE_API_KEY}"} if OMNIROUTE_API_KEY else {}
+    if PROMPT_COMPRESSION_ENABLED:
+        headers["x-omniroute-compression"] = PROMPT_COMPRESSION_MODE
     try:
         r = requests.post(
             f"{OMNIROUTE_URL}/v1/chat/completions",
@@ -961,6 +977,40 @@ def _try_omniroute_fallback(data: dict, timeout: int = 60):
     except Exception as e:
         push_log('inter_node_message', 'OmniRoute fallback fallito', str(e), status='warn')
     return None
+
+def _compress_prompt_via_omniroute(text: str) -> str:
+    """Comprime un prompt lungo destinato a un nodo della mesh LOCALE (non
+    OmniRoute) usando l'engine Caveman reale di OmniRoute (POST
+    /api/compression/preview), invece di reimplementarne le regole a mano.
+    Chiamata solo se PROMPT_COMPRESSION_ENABLED e il testo supera
+    PROMPT_COMPRESSION_MIN_CHARS. Fail-open: qualunque errore (OmniRoute giu',
+    endpoint non disponibile, risposta inattesa) ritorna il testo originale
+    invariato, mai un'eccezione verso il chiamante."""
+    if not (PROMPT_COMPRESSION_ENABLED and OMNIROUTE_ENABLED):
+        return text
+    if len(text) < PROMPT_COMPRESSION_MIN_CHARS:
+        return text
+    try:
+        r = requests.post(
+            f"{OMNIROUTE_URL}/api/compression/preview",
+            json={"messages": [{"role": "user", "content": text}], "mode": PROMPT_COMPRESSION_MODE},
+            timeout=10,
+        )
+        r.raise_for_status()
+        result = r.json()
+        compressed = result.get("compressed", "")
+        # La preview include il prefisso "user: " del ruolo — lo toglie prima
+        # di riusare il testo come prompt vero e proprio verso il nodo.
+        if compressed.startswith("user: "):
+            compressed = compressed[len("user: "):]
+        if compressed and result.get("savingsPct", 0) > 0:
+            push_log('system', 'Prompt compresso (Caveman)',
+                     f'{result.get("originalTokens")}->{result.get("compressedTokens")} token '
+                     f'({result.get("savingsPct")}% risparmio)', status='info')
+            return compressed
+    except Exception as e:
+        push_log('inter_node_message', 'Compressione prompt fallita, invio originale', str(e), status='warn')
+    return text
 
 # ── /v1/models ────────────────────────────────────────────────────────────────
 @app.route('/v1/models')
@@ -1000,13 +1050,29 @@ def v1_chat_completions():
     data = {**data, "model": model}
 
     prompt = ""
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            c = m.get("content", "")
+    last_user_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            c = messages[i].get("content", "")
             prompt = c if isinstance(c, str) else str(c)
+            last_user_idx = i
             break
     if not prompt:
         prompt = json.dumps(messages)[:200]
+
+    # Comprime il prompt (Caveman via OmniRoute) solo per la mesh locale —
+    # la selezione esplicita di 🌐 OmniRoute riceve compressione via header
+    # sulla stessa chiamata, non serve un giro doppio. Salta i contenuti
+    # multimodali (liste, es. testo+immagine): comprimerli come stringa
+    # romperebbe la struttura del messaggio.
+    if not omniroute_direct and last_user_idx is not None:
+        raw_content = messages[last_user_idx].get("content")
+        if isinstance(raw_content, str):
+            compressed = _compress_prompt_via_omniroute(raw_content)
+            if compressed != raw_content:
+                messages = list(messages)
+                messages[last_user_idx] = {**messages[last_user_idx], "content": compressed}
+                data = {**data, "messages": messages}
 
     task = {
         "id": task_id, "status": "created", "node": None,

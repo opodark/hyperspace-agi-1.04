@@ -393,6 +393,9 @@ services:
       OMNIROUTE_API_KEY: "${OMNIROUTE_API_KEY:-}"
       OMNIROUTE_MODEL: "${OMNIROUTE_MODEL:-auto}"
       OMNIROUTE_ENABLED: "${OMNIROUTE_ENABLED:-true}"
+      PROMPT_COMPRESSION_ENABLED: "${PROMPT_COMPRESSION_ENABLED:-false}"
+      PROMPT_COMPRESSION_MODE: "${PROMPT_COMPRESSION_MODE:-standard}"
+      PROMPT_COMPRESSION_MIN_CHARS: "${PROMPT_COMPRESSION_MIN_CHARS:-200}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
