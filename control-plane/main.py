@@ -1757,6 +1757,139 @@ def node_pull_model(endpoint):
 def hb_status():
     return jsonify(dict(hb_state))
 
+# ── DOCTOR ────────────────────────────────────────────────────────────────────
+# Diagnosi a livello mesh, sola lettura — quello che il CP può vedere da
+# dentro (stato nodi, log recenti, federazione, OmniRoute). I check che
+# servono la macchina host (porte Docker reali, contenuto di .env) vivono
+# invece in mesh-doctor.sh, che gira sull'host e può anche applicare i fix
+# con conferma — questo endpoint non scrive né riavvia mai nulla.
+_INTERNAL_HOSTNAME_RE = re.compile(r'^[a-zA-Z][\w-]*:\d+$')
+
+def _doctor_check(id_, name, status, detail, fix_hint=""):
+    return {"id": id_, "name": name, "status": status, "detail": detail, "fix_hint": fix_hint}
+
+def _run_doctor_checks() -> list:
+    checks = []
+    nodes = _node_list()
+    active_nodes = [n for n in nodes if n.get("status") == "active"]
+    unreachable = [n for n in nodes if n.get("status") == "unreachable"]
+
+    if unreachable:
+        ids = ", ".join(n.get("node_id", "?")[:16] for n in unreachable)
+        checks.append(_doctor_check(
+            "nodes_unreachable", "Nodi irraggiungibili", "warn",
+            f"{len(unreachable)} nodo/i marcati unreachable: {ids}",
+            "Controlla che il container sia su, e che PUBLIC_ENDPOINT/NODE_ENDPOINTS puntino "
+            "alla porta host realmente pubblicata (docker port <container>).",
+        ))
+    else:
+        checks.append(_doctor_check("nodes_unreachable", "Nodi irraggiungibili", "ok",
+                                     f"{len(active_nodes)} nodo/i attivi, nessuno unreachable"))
+
+    internal_looking = [
+        n for n in active_nodes
+        if not n.get("is_local") and _INTERNAL_HOSTNAME_RE.match(_normalize_endpoint(n.get("endpoint", "")).replace("http://", "").replace("https://", ""))
+    ]
+    if internal_looking:
+        ids = ", ".join(n.get("node_id", "?")[:16] for n in internal_looking)
+        checks.append(_doctor_check(
+            "endpoint_reachability", "Endpoint potenzialmente non raggiungibili da fuori Docker", "warn",
+            f"{len(internal_looking)} nodo/i annunciano un hostname Docker interno invece di un IP/dominio: {ids}",
+            "Se questi nodi devono essere raggiunti da un'altra macchina (non solo dal CP sulla "
+            "stessa rete Docker), imposta PUBLIC_ENDPOINT=http://<IP-LAN>:<porta-host-pubblicata> "
+            "nel loro .env e riallinea NODE_ENDPOINTS sul CP allo stesso valore.",
+        ))
+    else:
+        checks.append(_doctor_check("endpoint_reachability", "Endpoint potenzialmente non raggiungibili da fuori Docker", "ok",
+                                     "nessun nodo remoto annuncia un hostname Docker interno"))
+
+    sig_failures = db.query_logs(q="firma", status="failed", per_page=10)
+    if sig_failures:
+        checks.append(_doctor_check(
+            "signature_failures", "Fallimenti di firma recenti", "warn",
+            f"{len(sig_failures)} evento/i con firma non valida negli ultimi log",
+            "Controlla che tutti i nodi/CP usino la stessa identità ECDSA persistita (volume "
+            "montato correttamente) e che i corpi firmati vengano inviati con data=<bytes esatti>, "
+            "non json=<dict> (che li riserializza in modo diverso da quello firmato).",
+        ))
+    else:
+        checks.append(_doctor_check("signature_failures", "Fallimenti di firma recenti", "ok",
+                                     "nessun fallimento di firma nei log recenti"))
+
+    model_failures = db.query_logs(q="modello", status="failed", per_page=10)
+    if model_failures:
+        checks.append(_doctor_check(
+            "model_availability", "Task falliti per modello mancante", "warn",
+            f"{len(model_failures)} task recenti falliti per modello non disponibile su nessun nodo",
+            "Verifica /v1/models per capire quali modelli mancano, e allinea gli Ollama dei nodi "
+            "(ollama pull <modello>) o correggi il nome modello richiesto dal client.",
+        ))
+    else:
+        checks.append(_doctor_check("model_availability", "Task falliti per modello mancante", "ok",
+                                     "nessun fallimento recente per modello mancante"))
+
+    if FEDERATION_ENABLED:
+        peers = db.get_all_federated_peers()
+        bad_peers = [p for p in peers if p.get("enabled") and p.get("last_status") in ("unreachable", "error", "no_capacity")]
+        if bad_peers:
+            labels = ", ".join(p.get("label") or p.get("peer_id", "?")[:12] for p in bad_peers)
+            checks.append(_doctor_check(
+                "federation_peers", "Peer federati in stato non ok", "warn",
+                f"{len(bad_peers)} peer con last_status problematico: {labels}",
+                "Verifica che il loro federation-gateway sia raggiungibile pubblicamente e che "
+                "l'allowlist (pubkey/endpoint) sia ancora corretta su entrambi i lati.",
+            ))
+        elif peers:
+            checks.append(_doctor_check("federation_peers", "Peer federati in stato non ok", "ok",
+                                         f"{len(peers)} peer configurati, tutti ok"))
+        else:
+            checks.append(_doctor_check("federation_peers", "Peer federati in stato non ok", "ok",
+                                         "federazione abilitata ma nessun peer configurato"))
+    else:
+        checks.append(_doctor_check("federation_peers", "Peer federati in stato non ok", "ok",
+                                     "federazione disabilitata (FEDERATION_ENABLED=false)"))
+
+    if OMNIROUTE_ENABLED:
+        try:
+            r = requests.get(f"{OMNIROUTE_URL}/v1/models", timeout=4)
+            omni_ok = r.status_code == 200
+        except Exception as e:
+            omni_ok = False
+        checks.append(_doctor_check(
+            "omniroute_reachable", "OmniRoute (fallback esterno) raggiungibile",
+            "ok" if omni_ok else "fail",
+            f"{OMNIROUTE_URL}: {'raggiungibile' if omni_ok else 'NON raggiungibile'}",
+            "" if omni_ok else "Controlla che il container omniroute sia su (docker compose ps) "
+                                "e che OMNIROUTE_URL punti al nome servizio giusto sulla rete Docker.",
+        ))
+    else:
+        checks.append(_doctor_check("omniroute_reachable", "OmniRoute (fallback esterno) raggiungibile", "ok",
+                                     "OmniRoute disattivato (OMNIROUTE_ENABLED=false)"))
+
+    last_sync = hb_state.get("last_memory_sync")
+    if len(active_nodes) >= 2 and not last_sync:
+        checks.append(_doctor_check(
+            "memory_sync", "Sync memoria inter-nodo", "warn",
+            "più nodi attivi ma nessun sync di memoria ancora registrato",
+            "Aspetta un altro ciclo di heartbeat, o controlla i log per errori in _sync_memory_across_nodes.",
+        ))
+    else:
+        checks.append(_doctor_check("memory_sync", "Sync memoria inter-nodo", "ok",
+                                     f"last_memory_sync={last_sync or 'n/d (meno di 2 nodi attivi)'}"))
+
+    return checks
+
+@app.route('/doctor')
+def doctor():
+    checks = _run_doctor_checks()
+    worst = "ok"
+    for c in checks:
+        if c["status"] == "fail":
+            worst = "fail"; break
+        if c["status"] == "warn" and worst == "ok":
+            worst = "warn"
+    return jsonify({"status": worst, "checks": checks, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+
 # ── REGISTRY PROXY ────────────────────────────────────────────────────────────
 @app.route('/registry/nodes')
 def registry_nodes():
@@ -2253,8 +2386,11 @@ def heartbeat_loop():
 
 # ── DASHBOARD ─────────────────────────────────────────────────────────────────
 @app.route('/')
-def dashboard():
-    return send_from_directory(BASE_DIR, 'dashboard.html')
+def desktop():
+    # Punto d'ingresso unico verso tutti i servizi HyperSpace (chat, dashboard
+    # mesh, live 3D, memoria, OmniRoute, wizard) — vedi desktop.html. La
+    # dashboard mesh vera e propria resta su /dashboard, invariata.
+    return send_from_directory(BASE_DIR, 'desktop.html')
 
 @app.route('/dashboard')
 def dashboard_alias():
