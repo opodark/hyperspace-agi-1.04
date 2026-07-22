@@ -135,11 +135,14 @@ def _get_title(entry: dict) -> str:
 
     title = _call_llm_title(etype, content)
     if not title or len(title) > 80:
-        title = f"[{etype}] {ts_str}"
+        # Non mettere in cache un fallimento: un errore transitorio (es. mesh
+        # momentaneamente senza nodi durante un riavvio del control-plane) non
+        # deve condannare la nota per sempre a un titolo generico — al
+        # prossimo export ci riprova da capo.
         state["titles_failed"] += 1
-    else:
-        state["titles_generated"] += 1
+        return f"[{etype}] {ts_str}"
 
+    state["titles_generated"] += 1
     _title_cache[h] = title
     _save_title_cache()
     return title
