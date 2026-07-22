@@ -63,6 +63,14 @@ OMNIROUTE_API_KEY  = os.getenv("OMNIROUTE_API_KEY", "").strip()
 OMNIROUTE_MODEL    = os.getenv("OMNIROUTE_MODEL", "auto")
 OMNIROUTE_ENABLED  = os.getenv("OMNIROUTE_ENABLED", "true").lower() == "true"
 
+# Prefissi puramente cosmetici per il menu modelli di Open WebUI — 🕸️ per i
+# modelli serviti dalla mesh locale, 🌐 per la voce che instrada esplicitamente
+# a OmniRoute (provider esterni). Vengono aggiunti solo in /v1/models e tolti
+# subito in /v1/chat/completions prima di usare il nome per il routing vero:
+# nessun nodo/Ollama/OmniRoute li riconoscerebbe come nomi di modello reali.
+MESH_MODEL_ICON    = "🕸️ "
+OMNIROUTE_MODEL_ID = "🌐 OmniRoute (auto)"
+
 MEMORY_FILE_GZ     = os.path.join(BASE_DIR, "memory.json.gz")
 MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
 MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
@@ -963,9 +971,11 @@ def v1_models():
         # fallback una tantum sull'Ollama locale del CP.
         mesh_ids = _fetch_models().get("models", [])
     models_out = [
-        {"id": m, "object": "model", "created": 0, "owned_by": "hyperspace-agi"}
+        {"id": f"{MESH_MODEL_ICON}{m}", "object": "model", "created": 0, "owned_by": "hyperspace-agi"}
         for m in mesh_ids
     ]
+    if OMNIROUTE_ENABLED:
+        models_out.append({"id": OMNIROUTE_MODEL_ID, "object": "model", "created": 0, "owned_by": "omniroute"})
     return jsonify({"object": "list", "data": models_out})
 
 # ── /v1/chat/completions ──────────────────────────────────────────────────────
@@ -979,6 +989,15 @@ def v1_chat_completions():
     model    = data.get("model", advanced_config["ollama"]["defaultModel"])
     stream   = data.get("stream", False)
     task_id  = str(uuid.uuid4())[:8]
+
+    # Toglie i prefissi cosmetici aggiunti in /v1/models prima di usare il
+    # nome per il routing vero — vedi commento su MESH_MODEL_ICON sopra.
+    omniroute_direct = (model == OMNIROUTE_MODEL_ID)
+    if omniroute_direct:
+        model = OMNIROUTE_MODEL
+    elif model.startswith(MESH_MODEL_ICON):
+        model = model[len(MESH_MODEL_ICON):]
+    data = {**data, "model": model}
 
     prompt = ""
     for m in reversed(messages):
@@ -1007,16 +1026,21 @@ def v1_chat_completions():
     # federazione verso un altro CP entra in gioco solo nel percorso
     # non-stream — proxare uno stream SSE cross-CP e' un passo successivo.
     if stream:
-        if selected and _best_endpoint(selected):
+        if omniroute_direct:
+            node_id      = "omniroute"
+            endpoint     = OMNIROUTE_URL
+            target_url   = f"{OMNIROUTE_URL}/v1/chat/completions"
+            target_kind  = "omniroute"
+        elif selected and _best_endpoint(selected):
             node_id      = selected.get("node_id", "cp")
             endpoint     = _best_endpoint(selected)
             target_url   = f"{endpoint}/v1/chat/completions"
-            target_is_node = True
+            target_kind  = "node"
         else:
             node_id      = "ollama-direct"
             endpoint     = ollama_base
             target_url   = f"{ollama_base}/v1/chat/completions"
-            target_is_node = False
+            target_kind  = "ollama"
         task["node"] = node_id
         db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
 
@@ -1030,13 +1054,16 @@ def v1_chat_completions():
 
         def _stream_gen():
             try:
-                if target_is_node:
+                if target_kind == "node":
                     # Firmato: solo il CP puo' invocare /v1/chat/completions
                     # di un nodo (vedi node/main.py SIGNED_PATHS).
                     body = json.dumps(stream_data, sort_keys=True).encode()
                     headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
                     headers["Content-Type"] = "application/json"
                     req = requests.post(target_url, data=body, headers=headers, stream=True, timeout=180)
+                elif target_kind == "omniroute":
+                    omni_headers = {"Authorization": f"Bearer {OMNIROUTE_API_KEY}"} if OMNIROUTE_API_KEY else {}
+                    req = requests.post(target_url, json=stream_data, headers=omni_headers, stream=True, timeout=180)
                 else:
                     req = requests.post(target_url, json=stream_data, stream=True, timeout=180)
                 with req as resp:
@@ -1055,6 +1082,19 @@ def v1_chat_completions():
         return Response(stream_with_context(_stream_gen()), headers=_sse_headers())
 
     # ── NON-STREAM ────────────────────────────────────────────────────────────
+    # Scelta esplicita di 🌐 OmniRoute dal menu: salta mesh e federazione,
+    # l'utente ha gia' deciso di voler uscire dalla mesh locale.
+    if omniroute_direct:
+        omni_result = _try_omniroute_fallback(data)
+        if omni_result:
+            _finalize_task(task, task_id, "omniroute", model, prompt, omni_result)
+            push_log('inter_node_message', f'task {task_id} -> omniroute (selezione esplicita)', status='success')
+            return jsonify(omni_result)
+        task["status"] = "failed"
+        task["error"]  = "OmniRoute non raggiungibile o nessun provider disponibile"
+        db.update_task(task_id, "failed", error=task["error"])
+        return jsonify({"error": {"message": task["error"], "type": "server_error"}}), 502
+
     # Prova ogni nodo eseguibile in ordine di score: se il migliore non ha il
     # modello richiesto (o fallisce), passa al successivo prima di ricadere su
     # federazione/ollama diretto. _run_tool_loop non rilancia eccezioni per
