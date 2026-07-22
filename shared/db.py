@@ -86,6 +86,11 @@ def init_db():
                 last_seen   TEXT,
                 last_status TEXT DEFAULT 'unknown'
             );
+            CREATE TABLE IF NOT EXISTS node_aliases (
+                node_id  TEXT PRIMARY KEY,
+                alias    TEXT UNIQUE NOT NULL,
+                set_at   TEXT DEFAULT (datetime('now'))
+            );
         """)
     print(f"[DB] Initialized at {DB_PATH}")
 
@@ -274,3 +279,38 @@ def touch_federated_peer(peer_id: str, status: str):
             "UPDATE federated_peers SET last_seen = datetime('now'), last_status = ? WHERE peer_id = ?",
             (status, peer_id),
         )
+
+# ── NODE ALIASES ────────────────────────────────────────────────────────────
+# Alias leggibili per il routing esplicito "modello::alias" da Open WebUI.
+# UNIQUE(alias) a livello DB come ultima rete di sicurezza contro le race
+# condition; il controllo "primario" anti-collisione resta lato app
+# (main.py verifica prima di chiamare set_node_alias).
+
+def set_node_alias(node_id: str, alias: str):
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO node_aliases (node_id, alias, set_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(node_id) DO UPDATE SET
+                alias  = excluded.alias,
+                set_at = excluded.set_at
+        """, (node_id, alias))
+
+
+def get_node_id_by_alias(alias: str):
+    with _conn() as con:
+        row = con.execute(
+            "SELECT node_id FROM node_aliases WHERE alias = ?", (alias,)
+        ).fetchone()
+    return row["node_id"] if row else None
+
+
+def get_alias_map() -> dict:
+    with _conn() as con:
+        rows = con.execute("SELECT node_id, alias FROM node_aliases").fetchall()
+    return {r["node_id"]: r["alias"] for r in rows}
+
+
+def delete_node_alias(node_id: str):
+    with _conn() as con:
+        con.execute("DELETE FROM node_aliases WHERE node_id = ?", (node_id,))

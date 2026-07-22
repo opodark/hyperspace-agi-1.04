@@ -6,6 +6,13 @@
 #        o di /execute). Prima mancava del tutto: la richiesta cadeva sempre
 #        su un 404, mascherato finché il nodo veniva scartato dallo scoring
 #        del CP (bug già corretto lato control-plane).
+# v1.04: semaforo di concorrenza + timeout di coda su /execute e
+#        /v1/chat/completions (stream e non-stream). Chi arriva quando il
+#        nodo è saturo aspetta al massimo REQUEST_QUEUE_TIMEOUT_S, poi
+#        riceve un 503 esplicito (type=node_busy_timeout) invece di restare
+#        appeso indefinitamente. /status ora espone active_requests/
+#        queued_requests/max_concurrent così il control-plane può pesare il
+#        carico reale nello scoring, non solo tier/vram/uptime statici.
 # fix: heartbeat try/except+retry, endpoint normalizzato, peer TTL configurabile
 # fix: /execute accetta campo 'task', salva in memory.jsonl, propaga al CP
 
@@ -61,10 +68,63 @@ NODE_AVATAR          = os.getenv("NODE_AVATAR", "🤖").strip()
 
 PEER_MAX_AGE_S       = int(os.getenv("PEER_MAX_AGE_S", "120"))
 
+# ── GESTIONE CARICO / CODA ──────────────────────────────────
+# MAX_CONCURRENT_REQUESTS : quante generazioni parallele questo nodo accetta
+#                           prima di mettere in coda le richieste successive.
+# REQUEST_QUEUE_TIMEOUT_S : secondi massimi che una richiesta aspetta in coda
+#                           prima di ricevere un 503 esplicito (invece di
+#                           aspettare indefinitamente dietro il semaforo).
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 1))
+REQUEST_QUEUE_TIMEOUT_S = int(os.getenv("REQUEST_QUEUE_TIMEOUT_S", 60))
+
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 _boot_time = time.time()
+
+# Un asyncio.Semaphore limita quante generazioni girano in parallelo su
+# questo nodo. Chi arriva quando è pieno aspetta, ma con un timeout: se la
+# coda non si libera entro REQUEST_QUEUE_TIMEOUT_S, il chiamante riceve un
+# 503 esplicito (type=node_busy_timeout) invece di restare appeso. Il
+# control-plane usa questo segnale per instradare al prossimo nodo migliore
+# invece di aspettare o fallire subito (vedi _rank_candidate_nodes lato CP).
+_inference_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+_load_lock  = threading.Lock()
+_load_state = {"active": 0, "queued": 0}
+
+
+async def _try_acquire_slot(timeout_s: float = REQUEST_QUEUE_TIMEOUT_S) -> bool:
+    """True se lo slot è stato acquisito (il chiamante DEVE poi chiamare
+    _release_slot()); False se la coda è rimasta satura oltre il timeout —
+    in quel caso nessuno slot è stato preso e non va rilasciato nulla."""
+    with _load_lock:
+        _load_state["queued"] += 1
+    try:
+        await asyncio.wait_for(_inference_semaphore.acquire(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        with _load_lock:
+            _load_state["queued"] -= 1
+    with _load_lock:
+        _load_state["active"] += 1
+    return True
+
+
+def _release_slot():
+    with _load_lock:
+        _load_state["active"] -= 1
+    _inference_semaphore.release()
+
+
+def _busy_response():
+    return Response(
+        content=json.dumps({"error": {
+            "message": f"nodo saturo: coda oltre {REQUEST_QUEUE_TIMEOUT_S}s",
+            "type": "node_busy_timeout",
+        }}),
+        status_code=503, media_type="application/json",
+    )
 
 # ── TIER ──────────────────────────────────────────────────
 def detect_vram_gb() -> float:
@@ -117,7 +177,7 @@ NODE_PROFILE = {
     "endpoint":     NODE_ADVERTISED_ENDPOINT,
     "capabilities": NODE_CAPABILITIES,
     "vram_gb":      VRAM_GB,
-    "version":      "1.03.0",
+    "version":      "1.04.0",
     "specialization": NODE_SPECIALIZATION,
     "avatar":         NODE_AVATAR,
 }
@@ -197,6 +257,8 @@ async def ollama_health() -> dict:
 
 # ── REGISTRAZIONE ─────────────────────────────────────────
 async def register_to_registry():
+    with _load_lock:
+        active_r, queued_r = _load_state["active"], _load_state["queued"]
     payload = {
         "node_id":        NODE_ID,
         "public_address": NODE_ADVERTISED_ENDPOINT,
@@ -210,6 +272,12 @@ async def register_to_registry():
             "public_key":   NODE_PUBKEY[:32],
             "specialization": NODE_PROFILE["specialization"],
             "avatar":         NODE_PROFILE["avatar"],
+            # Carico corrente — il registry pubblico li espone flat in
+            # /nodes/active così la dashboard e il control-plane possono
+            # leggerli senza chiamate aggiuntive dirette al nodo.
+            "active_requests": str(active_r),
+            "queued_requests": str(queued_r),
+            "max_concurrent":  str(MAX_CONCURRENT_REQUESTS),
         }
     }
     body = str(payload).encode()
@@ -300,8 +368,9 @@ async def announce_to_peer(endpoint: str):
         import json as _j
         body = _j.dumps(payload, sort_keys=True).encode()
         hdrs = _signed_headers(body)
+        hdrs["Content-Type"] = "application/json"
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(f"{base_url}/announce", json=payload, headers=hdrs)
+            r = await client.post(f"{base_url}/announce", data=body, headers=hdrs)
             if r.status_code == 200:
                 data = r.json()
                 for peer in data.get("peers", []):
@@ -385,12 +454,13 @@ def heartbeat_loop():
 async def startup_event():
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
-    print(f"[NODE:{NODE_ID[:10]}] started v1.03.0")
+    print(f"[NODE:{NODE_ID[:10]}] started v1.04.0")
     print(f"[NODE:{NODE_ID[:10]}] tier={NODE_PROFILE['tier']} (forced={_FORCED_TIER or 'no'})")
     print(f"[NODE:{NODE_ID[:10]}] advertised={NODE_ADVERTISED_ENDPOINT}")
     print(f"[NODE:{NODE_ID[:10]}] vram_gb={VRAM_GB} (env={_vram_env} detected={_vram_detected})")
     print(f"[NODE:{NODE_ID[:10]}] boot_peers={BOOT_PEERS or 'none — will use registry auto-discovery'}")
     print(f"[NODE:{NODE_ID[:10]}] peer_max_age_s={PEER_MAX_AGE_S}")
+    print(f"[NODE:{NODE_ID[:10]}] max_concurrent_requests={MAX_CONCURRENT_REQUESTS} queue_timeout_s={REQUEST_QUEUE_TIMEOUT_S}")
     print(f"[NODE:{NODE_ID[:10]}] registry={REGISTRY_URL}")
     print(f"[NODE:{NODE_ID[:10]}] registry_public={REGISTRY_PUBLIC_URL}")
     print(f"[NODE:{NODE_ID[:10]}] ollama -> {OLLAMA_URL}")
@@ -430,6 +500,8 @@ def health():
 @app.get("/status")
 def status():
     prune_stale_peers()
+    with _load_lock:
+        active_r, queued_r = _load_state["active"], _load_state["queued"]
     return {
         "node_id":        NODE_ID,
         "public_key":     NODE_PUBKEY,
@@ -442,6 +514,11 @@ def status():
         "peers_active":   len([p for p in _peers.values() if p["status"] == "active"]),
         "peers_total":    len(_peers),
         "memory_entries": len(_read_memory(9999)),
+        # Carico corrente — letto dal control-plane a ogni ciclo di
+        # heartbeat (_poll_mesh_nodes) e usato nello scoring di routing.
+        "active_requests": active_r,
+        "queued_requests": queued_r,
+        "max_concurrent":  MAX_CONCURRENT_REQUESTS,
         "running":        True,
     }
 
@@ -529,7 +606,13 @@ async def execute_task(task: dict):
         or f"Esegui task: {task_id}"
     )
     model = task.get("model") or task.get("payload", {}).get("model") or DEFAULT_MODEL
-    response_text = await ollama_generate(prompt, model)
+
+    if not await _try_acquire_slot():
+        return _busy_response()
+    try:
+        response_text = await ollama_generate(prompt, model)
+    finally:
+        _release_slot()
 
     # Salva in memoria locale e propaga al CP, solo se non sono dei task per i
     # titoli (task_id con prefisso "title-"), altrimenti si genera un loop
@@ -560,6 +643,10 @@ async def execute_task(task: dict):
 # ollama-proxy (stesso container, porta 11435), che si occupa di
 # log/memoria condivisa e poi tocca Ollama per ultimo. Catena completa:
 # CP (firma) -> nodo (autentica) -> ollama-proxy (strumenta) -> Ollama.
+#
+# Lo slot di concorrenza viene acquisito PRIMA di aprire la
+# StreamingResponse: se lo status 200 fosse già stato inviato non ci sarebbe
+# più modo di segnalare "occupato" al chiamante, che resterebbe appeso.
 @app.post("/v1/chat/completions")
 async def v1_chat_completions_proxy(request: Request):
     body = await request.body()
@@ -579,6 +666,9 @@ async def v1_chat_completions_proxy(request: Request):
     stream = bool(payload.get("stream", False))
 
     if stream:
+        if not await _try_acquire_slot():
+            return _busy_response()
+
         async def _stream_gen():
             try:
                 async with httpx.AsyncClient(timeout=180.0) as client:
@@ -591,8 +681,12 @@ async def v1_chat_completions_proxy(request: Request):
                                 yield chunk
             except Exception as e:
                 yield f'data: {{"error": "{e}"}}\n\n'.encode()
+            finally:
+                _release_slot()
         return StreamingResponse(_stream_gen(), media_type="text/event-stream")
 
+    if not await _try_acquire_slot():
+        return _busy_response()
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
             r = await client.post(
@@ -608,6 +702,8 @@ async def v1_chat_completions_proxy(request: Request):
             content=json.dumps({"error": {"message": str(e), "type": "server_error"}}),
             status_code=503, media_type="application/json",
         )
+    finally:
+        _release_slot()
 
 @app.get("/ollama/health")
 async def check_ollama():
