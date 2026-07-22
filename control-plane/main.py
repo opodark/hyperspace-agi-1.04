@@ -948,6 +948,21 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
     except Exception as e:
         return f"Errore esecuzione tool '{tool_name}': {e}"
 
+@app.route('/tools/execute', methods=['POST'])
+def tools_execute():
+    """Esegue un tool/connettore direttamente via HTTP, senza passare da una
+    chat completion. Riusa _execute_tool_call (stessi handler nativi +
+    connector_manager del percorso di tool-calling del modello) cosi'
+    un chiamante esterno — es. un Tool custom di Open WebUI — puo' invocare
+    o365_read_emails, web_search, ecc. come singola azione."""
+    data      = request.get_json(force=True, silent=True) or {}
+    tool_name = data.get("tool_name", "")
+    tool_args = data.get("args", {}) or {}
+    if not tool_name:
+        return jsonify({"error": "missing tool_name"}), 400
+    result = _execute_tool_call(tool_name, tool_args)
+    return jsonify({"result": result})
+
 # ── TOOL CALLING LOOP ─────────────────────────────────────────────────────────
 def _call_ollama(ollama_base: str, payload: dict, sign: bool = False, node_id: str = "") -> dict:
     """Chiama /v1/chat/completions. Se sign=True (target = un nodo della
