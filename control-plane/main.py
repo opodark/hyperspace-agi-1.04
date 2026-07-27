@@ -47,6 +47,7 @@ from shared.identity import (
     make_request_headers,
     verify_request_headers,
 )
+from shared.engine_profiles import engine_score as _shared_engine_score, all_engine_scores as _all_engine_scores
 from connectors.manager import ConnectorManager
 
 app = Flask(__name__)
@@ -82,7 +83,21 @@ ROUTING_WEIGHT_VRAM   = float(os.getenv("ROUTING_WEIGHT_VRAM", "0.55"))
 ROUTING_WEIGHT_LOAD   = float(os.getenv("ROUTING_WEIGHT_LOAD", "0.25"))
 ROUTING_WEIGHT_TIER   = float(os.getenv("ROUTING_WEIGHT_TIER", "0.10"))
 ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
+ROUTING_WEIGHT_VRAM   = float(os.getenv("ROUTING_WEIGHT_VRAM", "0.55"))
+ROUTING_WEIGHT_LOAD   = float(os.getenv("ROUTING_WEIGHT_LOAD", "0.25"))
+ROUTING_WEIGHT_TIER   = float(os.getenv("ROUTING_WEIGHT_TIER", "0.10"))
+ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
+# Peso dedicato al motore d'inferenza (vllm/tgi con batching continuo reggono
+# meglio il carico concorrente rispetto a Ollama, che serializza le
+# generazioni) — NON entra in calculate_tier(): quello resta un giudizio
+# sulla topologia/affidabilità del nodo, non sulla sua capacità di serving.
+# Il punteggio per motore (_ENGINE_SCORES/ENGINE_SCORE_DEFAULT) vive in
+# shared/engine_profiles.py — UNICA fonte di verità, riusata anche dal nodo
+# per stimare il default di MAX_LOAD_UNITS. Non duplicare qui.
+ROUTING_WEIGHT_ENGINE = float(os.getenv("ROUTING_WEIGHT_ENGINE", "0.15"))
 
+def _engine_score(node: dict) -> float:
+    return _shared_engine_score(node.get("engine", ""))
 # Quanti nodi candidati (per score decrescente) il control-plane prova in
 # sequenza prima di ricadere su federazione/ollama-direct, quando un nodo
 # risponde "occupato" (503 node_busy_timeout).
@@ -438,20 +453,27 @@ class NodeBusyError(Exception):
 
 def _node_score(node: dict) -> float:
     """Score di routing. La VRAM pesa più di tutto (ROUTING_WEIGHT_VRAM):
-    un nodo CPU-only è strutturalmente lento anche da libero. Il carico
-    (active_requests+queued_requests rispetto a max_concurrent, entrambi
-    riportati da /status del nodo) evita di accodare richieste su un nodo
-    GPU già saturo, preferendo un nodo più libero anche se meno potente.
-    peers_active NON entra più nel punteggio: è una metrica di
-    connettività P2P, non un proxy di capacità di calcolo."""
+    un nodo CPU-only è strutturalmente lento anche da libero. Il carico è
+    letto in UNITÀ (active_load+queued_load rispetto a max_load_units, non
+    più conteggio di richieste) — un nodo con una richiesta pesante su un
+    modello 70B pesa quanto più richieste leggere insieme, non quanto una
+    singola richiesta qualsiasi. Fallback sui vecchi nomi
+    (active_requests/max_concurrent) per i nodi non ancora aggiornati al
+    nuovo formato — vedi node/main.py. Il motore d'inferenza (engine_s) è un
+    termine separato: riflette quanto il motore regge carico concorrente
+    reale (es. batching continuo), cosa che load_s da sola non cattura
+    perché guarda solo l'occupazione attuale, non la capacità strutturale.
+    peers_active NON entra nel punteggio: è una metrica di connettività
+    P2P, non un proxy di capacità di calcolo."""
     tier_s   = _TIER_SCORE.get(node.get("tier", "leaf"), 1) / 3.0
     vram_s   = min(float(node.get("vram_gb", 0)), 24.0) / 24.0
     uptime_s = min(int(node.get("uptime_s", 0)), 604800) / 604800.0
+    engine_s = _engine_score(node)
 
-    max_c    = max(int(node.get("max_concurrent", 1) or 1), 1)
-    active_r = int(node.get("active_requests", 0))
-    queued_r = int(node.get("queued_requests", 0))
-    # >1.0 quando il nodo ha già più richieste (attive+in coda) della sua
+    max_c    = max(float(node.get("max_load_units", node.get("max_concurrent", 1)) or 1), 0.01)
+    active_r = float(node.get("active_load", node.get("active_requests", 0)))
+    queued_r = float(node.get("queued_load", node.get("queued_requests", 0)))
+    # >1.0 quando il nodo ha già più carico (attivo+in coda) della sua
     # capacità dichiarata; il clamp a 1.5 evita che un nodo con una coda
     # mostruosa faccia collassare load_s in modo indistinguibile da uno
     # solo leggermente sovraccarico.
@@ -463,6 +485,7 @@ def _node_score(node: dict) -> float:
         + load_s   * ROUTING_WEIGHT_LOAD
         + tier_s   * ROUTING_WEIGHT_TIER
         + uptime_s * ROUTING_WEIGHT_UPTIME
+        + engine_s * ROUTING_WEIGHT_ENGINE
     )
 
 def _node_ids_with_model(model: str) -> set:
@@ -1923,6 +1946,8 @@ def get_routing_weights():
         "load":   ROUTING_WEIGHT_LOAD,
         "tier":   ROUTING_WEIGHT_TIER,
         "uptime": ROUTING_WEIGHT_UPTIME,
+        "engine": ROUTING_WEIGHT_ENGINE,
+        "engine_scores": _all_engine_scores(),
         "max_candidates": ROUTING_MAX_CANDIDATES,
     })
 
@@ -2266,6 +2291,12 @@ def _sync_memory_across_nodes():
 
 # ── HEARTBEAT ─────────────────────────────────────────────────────────────────
 def _is_valid_json_response(r) -> bool:
+    """True solo se la risposta è 200 E JSON parsabile. Prima controllava
+    solo il Content-Type: un 404/500 con corpo JSON (es. il 404 di default
+    di FastAPI, {"detail":"Not Found"}) veniva classificato come risposta
+    valida, mascherando un endpoint mancante o rotto come "ping OK"."""
+    if r.status_code != 200:
+        return False
     ct = r.headers.get("Content-Type", "")
     if "text/html" in ct or "text/plain" in ct:
         return False

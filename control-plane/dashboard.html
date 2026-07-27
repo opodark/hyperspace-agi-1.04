@@ -76,6 +76,7 @@ main{padding:18px 20px;display:grid}
 .node-status-dot.unknown{background:var(--text-faint)}
 .node-id{font-family:var(--font-mono);font-size:.72rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .tier-badge{display:inline-flex;padding:2px 8px;border-radius:99px;font-size:.6rem;font-weight:700;text-transform:uppercase;flex-shrink:0}
+.engine-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:99px;font-size:.6rem;font-weight:700;flex-shrink:0;background:var(--info-bg);color:var(--info)}
 .tier-root{background:rgba(240,98,146,.15);color:var(--root)}
 .tier-hub{background:rgba(77,208,225,.12);color:var(--hub)}
 .tier-leaf{background:rgba(129,199,132,.12);color:var(--leaf)}
@@ -497,7 +498,7 @@ setInterval(refreshHbBar,5000); refreshHbBar();
 // dashboard riflette davvero cosa decide il routing invece di una formula
 // hardcoded lato client che potrebbe disallinearsi silenziosamente se i
 // pesi vengono cambiati via .env (ROUTING_WEIGHT_*).
-var ROUTING_WEIGHTS={vram:0.55,load:0.25,tier:0.10,uptime:0.10,max_candidates:3};
+var ROUTING_WEIGHTS={vram:0.55,load:0.25,tier:0.10,uptime:0.10,engine:0.15,engine_scores:{},max_candidates:3};
 async function loadRoutingWeights(){
   try{
     var d=await(await fetch('/config/routing-weights')).json();
@@ -512,11 +513,15 @@ function computeScore(n){
   var ts=(tierS[n.tier||'leaf']||1)/3;
   var vs=Math.min(parseFloat(n.vram_gb||0),24)/24;
   var us=Math.min(parseInt(n.uptime_s||0),604800)/604800;
-  var maxC=Math.max(parseInt(n.max_concurrent||1),1);
-  var loadRatio=Math.min(((parseInt(n.active_requests||0))+(parseInt(n.queued_requests||0)))/maxC,1.5);
+  var maxC=Math.max(parseFloat(n.max_load_units!=null?n.max_load_units:n.max_concurrent||1),0.01);
+  var activeL=parseFloat(n.active_load!=null?n.active_load:n.active_requests||0);
+  var queuedL=parseFloat(n.queued_load!=null?n.queued_load:n.queued_requests||0);
+  var loadRatio=Math.min((activeL+queuedL)/maxC,1.5);
   var ls=Math.max(0,1-loadRatio);
+  var es=(ROUTING_WEIGHTS.engine_scores||{})[(n.engine||'').toLowerCase()];
+  if(es===undefined)es=0.5;
   var w=ROUTING_WEIGHTS;
-  return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime;
+  return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime+es*w.engine;
 }
 
 // Score badge helper
@@ -529,12 +534,18 @@ function scoreBadge(score){
 
 // Load badge helper — mostra active/max e, se presente, la coda in attesa
 function loadBadge(n){
-  var maxC=Math.max(parseInt(n.max_concurrent||1),1);
-  var act=parseInt(n.active_requests||0);
-  var q=parseInt(n.queued_requests||0);
+  // Legge i campi nuovi (unità di carico, possono essere frazionarie: 0.5,
+  // 2.25...) con fallback sui vecchi per i nodi non ancora aggiornati —
+  // stesso pattern già usato in computeScore(). parseFloat invece di
+  // parseInt: troncare a intero un carico frazionario (es. 0.5 -> 0)
+  // nascondeva carico reale mostrando sempre "0" per richieste leggere.
+  var maxC=Math.max(parseFloat(n.max_load_units!=null?n.max_load_units:n.max_concurrent||1),0.01);
+  var act=parseFloat(n.active_load!=null?n.active_load:n.active_requests||0);
+  var q=parseFloat(n.queued_load!=null?n.queued_load:n.queued_requests||0);
   var ratio=act/maxC;
   var cls=ratio>=1?'score-low':ratio>=0.5?'score-mid':'score-high';
-  var label=act+'/'+maxC+(q?' (+'+q+' coda)':'');
+  var r2=function(x){return Math.round(x*100)/100;};  // 2 decimali, senza zeri finali inutili
+  var label=r2(act)+'/'+r2(maxC)+(q?' (+'+r2(q)+' coda)':'');
   return '<span class="score-badge '+cls+'">'+label+'</span>';
 }
 
@@ -548,6 +559,7 @@ async function refreshNodes(){
     grid.innerHTML=nodes.map(function(n){
       var nid=n.node_id?n.node_id.slice(0,16)+'...':n.endpoint||'?';
       var tier=n.tier||'leaf';
+      var engine=n.engine||'';
       var uptime=n.uptime_s?formatUptime(n.uptime_s):'?';
       var caps=(n.capabilities||[]).join(', ')||'?';
       var ver=n.version||'?';
@@ -558,6 +570,7 @@ async function refreshNodes(){
         +'<span class="node-id" title="'+escH(n.node_id||'')+'">&#128187; '+escH(nid)+'</span>'
         +'<span class="tier-badge '+tierClass(tier)+'">'+tier+'</span>'
 	+(n.alias?'<span class="tier-badge" style="background:var(--primary-bg);color:var(--primary)">@'+escH(n.alias)+'</span>':'')
+	+(engine?'<span class="engine-badge" title="Motore d\'inferenza">&#9881; '+escH(engine)+'</span>':'')
         +scoreBadge(score)
 	+'<button class="btn btn-ghost btn-sm" style="padding:1px 7px;font-size:.6rem;margin-left:auto" '
         +'onclick="setAlias(\''+escH(n.node_id||'')+'\',\''+escH(n.alias||'')+'\')" title="Imposta/rimuovi alias">&#9998;</button>'

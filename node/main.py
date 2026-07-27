@@ -22,6 +22,7 @@ import asyncio
 import httpx
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -34,6 +35,7 @@ from shared.identity import (
     make_request_headers,
     verify_request_headers,
 )
+from shared.engine_profiles import estimate_default_load_units
 
 app = FastAPI()
 
@@ -68,53 +70,128 @@ NODE_AVATAR          = os.getenv("NODE_AVATAR", "🤖").strip()
 
 PEER_MAX_AGE_S       = int(os.getenv("PEER_MAX_AGE_S", "120"))
 
-# ── GESTIONE CARICO / CODA ──────────────────────────────────
-# MAX_CONCURRENT_REQUESTS : quante generazioni parallele questo nodo accetta
-#                           prima di mettere in coda le richieste successive.
-# REQUEST_QUEUE_TIMEOUT_S : secondi massimi che una richiesta aspetta in coda
-#                           prima di ricevere un 503 esplicito (invece di
-#                           aspettare indefinitamente dietro il semaforo).
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 1))
+# ── GESTIONE CARICO / CODA — per UNITÀ DI CARICO, non per richiesta ────────
+# Prima: ogni richiesta occupava 1 "slot" a prescindere dal modello, quindi
+# un task su un modello 0.5B e uno su un 70B pesavano uguale sul semaforo —
+# un nodo poteva accettare N richieste "leggere" in parallelo quanto N
+# richieste "pesanti", saturando la VRAM molto prima del limite nominale.
+# Ora ogni richiesta dichiara un peso in "unità di carico" stimato dal nome
+# del modello, e il nodo accetta lavoro finché la somma dei pesi attivi non
+# supera MAX_LOAD_UNITS.
+#
+# MAX_LOAD_UNITS          : capacità totale in unità di carico. Se non
+#                           impostata esplicitamente, viene AUTO-DERIVATA da
+#                           VRAM_GB + INFERENCE_BACKEND (stesso pattern di
+#                           calculate_tier()/NODE_TIER) — vedi la risoluzione
+#                           effettiva più sotto, dopo il rilevamento VRAM,
+#                           e shared/engine_profiles.py per la formula.
+# REQUEST_QUEUE_TIMEOUT_S : secondi massimi che una richiesta aspetta prima
+#                           di ricevere un 503 esplicito.
 REQUEST_QUEUE_TIMEOUT_S = int(os.getenv("REQUEST_QUEUE_TIMEOUT_S", 60))
+
+# ── MOTORE D'INFERENZA ──────────────────────────────────────────────────
+# Usato SOLO dal control-plane per pesare lo scoring di routing (vedi
+# ROUTING_WEIGHT_ENGINE lato CP) — NON influenza calculate_tier(): tier
+# resta legato a topologia/affidabilità del nodo, non alla capacità di
+# serving del motore.
+INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "ollama").strip().lower()
+
+# ── PESO DI CARICO PER MODELLO ──────────────────────────────────────────
+# Override esplicito via NODE_MODEL_WEIGHTS (JSON {"sottostringa": peso},
+# case-insensitive, match per sottostringa sul nome modello) per i casi in
+# cui l'euristica sui parametri non è affidabile (modelli custom, GGUF senza
+# convenzione di naming standard).
+_MODEL_WEIGHT_OVERRIDES: dict = {}
+try:
+    _MODEL_WEIGHT_OVERRIDES = {
+        k.lower(): float(v) for k, v in json.loads(os.getenv("NODE_MODEL_WEIGHTS", "{}")).items()
+    }
+except Exception:
+    _MODEL_WEIGHT_OVERRIDES = {}
+
+DEFAULT_MODEL_WEIGHT = float(os.getenv("DEFAULT_MODEL_WEIGHT", "1.0"))
+_PARAM_SIZE_RE = re.compile(r'(\d+(?:\.\d+)?)\s*b\b', re.IGNORECASE)
+
+def estimate_model_load_units(model_name: str) -> float:
+    """Stima il peso in unità di carico di un modello dal suo nome. 1 unità
+    ~= un modello nella fascia 7B (riferimento comodo, non una misura
+    fisica). Ordine: override esplicito per sottostringa -> parsing del
+    suffisso parametri (es. '14b', '0.5b') -> default."""
+    if not model_name:
+        return DEFAULT_MODEL_WEIGHT
+    name_l = model_name.lower()
+    for substr, weight in _MODEL_WEIGHT_OVERRIDES.items():
+        if substr in name_l:
+            return weight
+    m = _PARAM_SIZE_RE.search(name_l)
+    if m:
+        try:
+            params_b = float(m.group(1))
+            return max(round(params_b / 7.0, 2), 0.25)
+        except Exception:
+            pass
+    return DEFAULT_MODEL_WEIGHT
 
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 _boot_time = time.time()
 
-# Un asyncio.Semaphore limita quante generazioni girano in parallelo su
-# questo nodo. Chi arriva quando è pieno aspetta, ma con un timeout: se la
-# coda non si libera entro REQUEST_QUEUE_TIMEOUT_S, il chiamante riceve un
-# 503 esplicito (type=node_busy_timeout) invece di restare appeso. Il
-# control-plane usa questo segnale per instradare al prossimo nodo migliore
-# invece di aspettare o fallire subito (vedi _rank_candidate_nodes lato CP).
-_inference_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-_load_lock  = threading.Lock()
-_load_state = {"active": 0, "queued": 0}
+class _WeightedLoadLimiter:
+    """Sostituisce asyncio.Semaphore: invece di N slot fissi, gestisce un
+    budget di unità di carico. Una richiesta su un modello piccolo può
+    girare in parallelo con altre; una su un modello grande occupa da sola
+    una fetta più larga del budget. acquire() aspetta (con timeout) finché
+    non c'è abbastanza capacità libera. Una richiesta più pesante della
+    capacità totale non resta bloccata per sempre: parte comunque quando il
+    nodo è idle (_active == 0), altrimenti aspetterebbe un budget che non
+    esisterà mai."""
+    def __init__(self, capacity: float):
+        self.capacity = capacity
+        self._active = 0.0
+        self._queued_units = 0.0
+        self._lock = asyncio.Lock()
+        self._cond = asyncio.Condition(self._lock)
+
+    async def acquire(self, weight: float, timeout_s: float) -> bool:
+        async with self._lock:
+            self._queued_units += weight
+            try:
+                def _capacity_free():
+                    return self._active + weight <= self.capacity or self._active == 0.0
+                try:
+                    await asyncio.wait_for(self._cond.wait_for(_capacity_free), timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    return False
+            finally:
+                self._queued_units -= weight
+            self._active += weight
+            return True
+
+    async def release(self, weight: float):
+        async with self._lock:
+            self._active = max(0.0, self._active - weight)
+            self._cond.notify_all()
+
+    @property
+    def active_units(self) -> float:
+        return round(self._active, 2)
+
+    @property
+    def queued_units(self) -> float:
+        return round(self._queued_units, 2)
 
 
-async def _try_acquire_slot(timeout_s: float = REQUEST_QUEUE_TIMEOUT_S) -> bool:
-    """True se lo slot è stato acquisito (il chiamante DEVE poi chiamare
-    _release_slot()); False se la coda è rimasta satura oltre il timeout —
-    in quel caso nessuno slot è stato preso e non va rilasciato nulla."""
-    with _load_lock:
-        _load_state["queued"] += 1
-    try:
-        await asyncio.wait_for(_inference_semaphore.acquire(), timeout=timeout_s)
-    except asyncio.TimeoutError:
-        return False
-    finally:
-        with _load_lock:
-            _load_state["queued"] -= 1
-    with _load_lock:
-        _load_state["active"] += 1
-    return True
+async def _try_acquire_slot(weight: float = 1.0, timeout_s: float = None) -> bool:
+    """True se le unità sono state acquisite (il chiamante DEVE poi chiamare
+    _release_slot(weight) con lo STESSO peso); False se il timeout è scaduto
+    — in quel caso nessuna unità è stata presa e non va rilasciato nulla."""
+    timeout_s = REQUEST_QUEUE_TIMEOUT_S if timeout_s is None else timeout_s
+    return await _load_limiter.acquire(weight, timeout_s)
 
 
-def _release_slot():
-    with _load_lock:
-        _load_state["active"] -= 1
-    _inference_semaphore.release()
+async def _release_slot(weight: float = 1.0):
+    await _load_limiter.release(weight)
 
 
 def _busy_response():
@@ -149,6 +226,17 @@ def calculate_tier(vram_gb: float, uptime_s: float, reputation: float = 0.5) -> 
 _vram_env      = float(os.getenv("VRAM_GB", "0.0"))
 _vram_detected = detect_vram_gb()
 VRAM_GB        = _vram_env if _vram_env > 0.0 else _vram_detected
+
+# Risoluzione di MAX_LOAD_UNITS: se impostata esplicitamente nel .env vince
+# quella; altrimenti auto-derivata da VRAM_GB + INFERENCE_BACKEND (stesso
+# pattern di calculate_tier()/NODE_TIER — auto salvo override esplicito).
+# Va fatta qui, non più in alto: dipende da VRAM_GB appena rilevata sopra.
+_max_load_units_env = os.getenv("MAX_LOAD_UNITS", "").strip()
+MAX_LOAD_UNITS = (
+    float(_max_load_units_env) if _max_load_units_env
+    else estimate_default_load_units(VRAM_GB, INFERENCE_BACKEND)
+)
+_load_limiter = _WeightedLoadLimiter(MAX_LOAD_UNITS)
 
 NODE_CAPABILITIES = ["execute"]
 if VRAM_GB > 0 or os.getenv("OLLAMA_URL"):
@@ -257,8 +345,7 @@ async def ollama_health() -> dict:
 
 # ── REGISTRAZIONE ─────────────────────────────────────────
 async def register_to_registry():
-    with _load_lock:
-        active_r, queued_r = _load_state["active"], _load_state["queued"]
+    active_u, queued_u = _load_limiter.active_units, _load_limiter.queued_units
     payload = {
         "node_id":        NODE_ID,
         "public_address": NODE_ADVERTISED_ENDPOINT,
@@ -272,12 +359,13 @@ async def register_to_registry():
             "public_key":   NODE_PUBKEY[:32],
             "specialization": NODE_PROFILE["specialization"],
             "avatar":         NODE_PROFILE["avatar"],
-            # Carico corrente — il registry pubblico li espone flat in
-            # /nodes/active così la dashboard e il control-plane possono
-            # leggerli senza chiamate aggiuntive dirette al nodo.
-            "active_requests": str(active_r),
-            "queued_requests": str(queued_r),
-            "max_concurrent":  str(MAX_CONCURRENT_REQUESTS),
+            "engine":         INFERENCE_BACKEND,
+            "active_load":      str(active_u),
+            "queued_load":      str(queued_u),
+            "max_load_units":   str(MAX_LOAD_UNITS),
+            "active_requests":  str(active_u),
+            "queued_requests":  str(queued_u),
+            "max_concurrent":   str(MAX_LOAD_UNITS),
         }
     }
     body = str(payload).encode()
@@ -460,7 +548,7 @@ async def startup_event():
     print(f"[NODE:{NODE_ID[:10]}] vram_gb={VRAM_GB} (env={_vram_env} detected={_vram_detected})")
     print(f"[NODE:{NODE_ID[:10]}] boot_peers={BOOT_PEERS or 'none — will use registry auto-discovery'}")
     print(f"[NODE:{NODE_ID[:10]}] peer_max_age_s={PEER_MAX_AGE_S}")
-    print(f"[NODE:{NODE_ID[:10]}] max_concurrent_requests={MAX_CONCURRENT_REQUESTS} queue_timeout_s={REQUEST_QUEUE_TIMEOUT_S}")
+    print(f"[NODE:{NODE_ID[:10]}] max_load_units={MAX_LOAD_UNITS} ({'esplicito' if _max_load_units_env else 'auto-derivato da vram+engine'}) queue_timeout_s={REQUEST_QUEUE_TIMEOUT_S} engine={INFERENCE_BACKEND}")
     print(f"[NODE:{NODE_ID[:10]}] registry={REGISTRY_URL}")
     print(f"[NODE:{NODE_ID[:10]}] registry_public={REGISTRY_PUBLIC_URL}")
     print(f"[NODE:{NODE_ID[:10]}] ollama -> {OLLAMA_URL}")
@@ -500,8 +588,7 @@ def health():
 @app.get("/status")
 def status():
     prune_stale_peers()
-    with _load_lock:
-        active_r, queued_r = _load_state["active"], _load_state["queued"]
+    active_u, queued_u = _load_limiter.active_units, _load_limiter.queued_units
     return {
         "node_id":        NODE_ID,
         "public_key":     NODE_PUBKEY,
@@ -514,11 +601,13 @@ def status():
         "peers_active":   len([p for p in _peers.values() if p["status"] == "active"]),
         "peers_total":    len(_peers),
         "memory_entries": len(_read_memory(9999)),
-        # Carico corrente — letto dal control-plane a ogni ciclo di
-        # heartbeat (_poll_mesh_nodes) e usato nello scoring di routing.
-        "active_requests": active_r,
-        "queued_requests": queued_r,
-        "max_concurrent":  MAX_CONCURRENT_REQUESTS,
+        "engine":         INFERENCE_BACKEND,
+        "active_load":      active_u,
+        "queued_load":      queued_u,
+        "max_load_units":   MAX_LOAD_UNITS,
+        "active_requests":  active_u,
+        "queued_requests":  queued_u,
+        "max_concurrent":   MAX_LOAD_UNITS,
         "running":        True,
     }
 
@@ -607,12 +696,13 @@ async def execute_task(task: dict):
     )
     model = task.get("model") or task.get("payload", {}).get("model") or DEFAULT_MODEL
 
-    if not await _try_acquire_slot():
+    weight = estimate_model_load_units(model)
+    if not await _try_acquire_slot(weight):
         return _busy_response()
     try:
         response_text = await ollama_generate(prompt, model)
     finally:
-        _release_slot()
+        await _release_slot(weight)
 
     # Salva in memoria locale e propaga al CP, solo se non sono dei task per i
     # titoli (task_id con prefisso "title-"), altrimenti si genera un loop
@@ -665,8 +755,10 @@ async def v1_chat_completions_proxy(request: Request):
         payload = {}
     stream = bool(payload.get("stream", False))
 
+    weight = estimate_model_load_units(payload.get("model", ""))
+
     if stream:
-        if not await _try_acquire_slot():
+        if not await _try_acquire_slot(weight):
             return _busy_response()
 
         async def _stream_gen():
@@ -682,7 +774,28 @@ async def v1_chat_completions_proxy(request: Request):
             except Exception as e:
                 yield f'data: {{"error": "{e}"}}\n\n'.encode()
             finally:
-                _release_slot()
+                await _release_slot(weight)
+        return StreamingResponse(_stream_gen(), media_type="text/event-stream")
+
+    if not await _try_acquire_slot(weight):
+        return _busy_response()
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            r = await client.post(
+                f"{OLLAMA_PROXY_URL}/v1/chat/completions",
+                content=body, headers={"Content-Type": "application/json"},
+            )
+            return Response(
+                content=r.content, status_code=r.status_code,
+                media_type=r.headers.get("content-type", "application/json"),
+            )
+    except Exception as e:
+        return Response(
+            content=json.dumps({"error": {"message": str(e), "type": "server_error"}}),
+            status_code=503, media_type="application/json",
+        )
+    finally:
+        await _release_slot(weight)
         return StreamingResponse(_stream_gen(), media_type="text/event-stream")
 
     if not await _try_acquire_slot():

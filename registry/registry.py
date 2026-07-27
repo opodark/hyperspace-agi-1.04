@@ -42,8 +42,14 @@ def prune_stale_nodes():
 
 
 def _safe_int(v, default=0):
+    """int() puro non accetta stringhe con punto decimale (int("4.0") solleva
+    ValueError) — da quando il nodo riporta il carico in unità (float
+    formattate con str(), es. "4.0"/"2.5"), questo collassava silenziosamente
+    ai default (max_concurrent->1, active/queued_requests->0) per QUALSIASI
+    nodo aggiornato. Si passa prima da float() per tollerare entrambi i
+    formati (interi puri "4" e float-come-stringa "4.0")."""
     try:
-        return int(v)
+        return int(float(v))
     except (TypeError, ValueError):
         return default
 
@@ -71,10 +77,15 @@ def _active_nodes() -> list:
                 "version":        n.metadata.get("version", ""),
                 "specialization": n.metadata.get("specialization", "generalist"),
                 "avatar":         n.metadata.get("avatar", "🤖"),
-                # Carico corrente, inviato dal nodo a ogni /register (vedi
-                # node/main.py:register_to_registry). Assenti su nodi con
-                # versione precedente: default a 0/1 per non rompere il
+                # Carico corrente in unità, inviato dal nodo a ogni /register
+                # (vedi node/main.py:register_to_registry). Assenti su nodi
+                # con versione precedente: default a 0/1 per non rompere il
                 # calcolo dello score lato dashboard/control-plane.
+                "active_load":     _safe_float(n.metadata.get("active_load", n.metadata.get("active_requests", "0"))),
+                "queued_load":     _safe_float(n.metadata.get("queued_load", n.metadata.get("queued_requests", "0"))),
+                "max_load_units":  _safe_float(n.metadata.get("max_load_units", n.metadata.get("max_concurrent", "1")), default=1.0),
+                "engine":          n.metadata.get("engine", "ollama"),
+                # legacy — alcuni consumer leggono ancora questi nomi
                 "active_requests": _safe_int(n.metadata.get("active_requests", "0")),
                 "queued_requests": _safe_int(n.metadata.get("queued_requests", "0")),
                 "max_concurrent":  _safe_int(n.metadata.get("max_concurrent", "1"), default=1),

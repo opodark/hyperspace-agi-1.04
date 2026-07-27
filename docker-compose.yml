@@ -478,6 +478,7 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       INFERENCE_BACKEND: ${INFERENCE_BACKEND:-ollama}
+      MAX_LOAD_UNITS: "${MAX_LOAD_UNITS:-4}"
       VRAM_GB: ${VRAM_GB:-0.0}
       SIGN_REQUESTS: ${SIGN_REQUESTS:-true}
       PYTHONUNBUFFERED: "1"
