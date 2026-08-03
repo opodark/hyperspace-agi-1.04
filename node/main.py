@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shared.identity import (
     generate_or_load_identity,
@@ -36,6 +37,7 @@ from shared.identity import (
     verify_request_headers,
 )
 from shared.engine_profiles import estimate_default_load_units
+from backend_metrics import collect_metrics, capability_profile
 
 app = FastAPI()
 
@@ -602,6 +604,7 @@ def status():
         "peers_total":    len(_peers),
         "memory_entries": len(_read_memory(9999)),
         "engine":         INFERENCE_BACKEND,
+        "capability_profile": capability_profile(INFERENCE_BACKEND),
         "active_load":      active_u,
         "queued_load":      queued_u,
         "max_load_units":   MAX_LOAD_UNITS,
@@ -610,6 +613,26 @@ def status():
         "max_concurrent":   MAX_LOAD_UNITS,
         "running":        True,
     }
+
+@app.get("/metrics")
+async def node_metrics():
+    """Metriche backend normalizzate per il control-plane (prototipo).
+    Il nodo è un semplice exporter: espone capability statiche + stato
+    runtime osservato dal motore (per modello e aggregato). La decisione di
+    routing resta al control-plane, che consumerà questi dati per sostituire
+    i pesi statici ENGINE_SCORES con telemetria osservata."""
+    payload = await collect_metrics(INFERENCE_BACKEND)
+    active_u, queued_u = _load_limiter.active_units, _load_limiter.queued_units
+    payload["node_id"] = NODE_ID
+    payload["engine"]  = INFERENCE_BACKEND
+    payload["load"]    = {
+        "active_units":    active_u,
+        "queued_units":    queued_u,
+        "max_load_units":  MAX_LOAD_UNITS,
+        "active_requests": active_u,
+        "queued_requests": queued_u,
+    }
+    return payload
 
 @app.get("/peers")
 def get_peers():
