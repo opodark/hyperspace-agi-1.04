@@ -5,6 +5,7 @@ COPY node/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shared/ ./shared/
 COPY node/main.py .
+COPY node/backend_metrics.py .
 COPY node/ollama_proxy.py .
 COPY node/__init__.py .
 EXPOSE 8084

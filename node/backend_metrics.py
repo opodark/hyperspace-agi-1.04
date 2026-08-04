@@ -155,8 +155,14 @@ class OllamaMetricsProvider:
         loaded = {m.get("name"): m for m in ps if m.get("name")}
 
         # EWMA per modello dai log della memoria condivisa.
+        # ATTENZIONE: memory.jsonl contiene anche entry PROPAGATE dagli altri
+        # nodi via /memory/push (memory sync inter-nodo). Quelle portano sempre
+        # il marker _received_from, le entry locali mai: senza questo filtro la
+        # telemetria del nodo risulterebbe inquinata dai campioni dei peer.
         agg = {}
         for e in _read_memory(METRICS_EWMA_WINDOW):
+            if e.get("_received_from"):
+                continue
             m = e.get("model")
             if not m:
                 continue

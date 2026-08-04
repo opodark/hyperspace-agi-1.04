@@ -35,6 +35,7 @@
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 import os, threading, time, requests, json, uuid, gzip, hashlib, socket, re
+from collections import deque
 from datetime import datetime, timedelta, timezone
 import sys
 
@@ -95,6 +96,19 @@ ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
 # shared/engine_profiles.py — UNICA fonte di verità, riusata anche dal nodo
 # per stimare il default di MAX_LOAD_UNITS. Non duplicare qui.
 ROUTING_WEIGHT_ENGINE = float(os.getenv("ROUTING_WEIGHT_ENGINE", "0.15"))
+
+# ── TELEMETRIA NODI: pull periodico di /metrics dai nodi ───────────────────
+# Il control-plane interroga ogni nodo attivo sul suo /metrics (payload
+# backend normalizzato, vedi node/backend_metrics.py) a cadenza indipendente
+# dall'heartbeat di /status: lo stato operativo (routing) e la telemetria
+# (diagnosi, score breakdown, futuri termini di scoring osservati) restano
+# separati. I campioni restano in una finestra volatile in-memory
+# (METRICS_WINDOW) per i mini-grafici della dashboard; lo storico persistente
+# è una fase successiva (niente DB qui per ora).
+METRICS_POLL_INTERVAL_S = int(os.getenv("METRICS_POLL_INTERVAL_S", "20"))
+METRICS_POLL_TIMEOUT_S  = int(os.getenv("METRICS_POLL_TIMEOUT_S", "4"))
+METRICS_WINDOW          = int(os.getenv("METRICS_WINDOW", "20"))
+METRICS_MAX_STALE_S     = int(os.getenv("METRICS_MAX_STALE_S", "120"))
 
 def _engine_score(node: dict) -> float:
     return _shared_engine_score(node.get("engine", ""))
@@ -451,8 +465,11 @@ class NodeBusyError(Exception):
         self.node_id = node_id
         super().__init__(message or f"nodo {node_id} occupato (coda satura)")
 
-def _node_score(node: dict) -> float:
-    """Score di routing. La VRAM pesa più di tutto (ROUTING_WEIGHT_VRAM):
+def _node_score_components(node: dict) -> dict:
+    """Sotto-score della formula di routing, esposti uno a uno (es. via
+    /metrics/nodes) per spiegare il ranking. Ogni valore è il TERMINE già
+    pesato, così la somma dei cinque dà esattamente lo score del router.
+    Design (vedi _node_score): la VRAM pesa più di tutto (ROUTING_WEIGHT_VRAM):
     un nodo CPU-only è strutturalmente lento anche da libero. Il carico è
     letto in UNITÀ (active_load+queued_load rispetto a max_load_units, non
     più conteggio di richieste) — un nodo con una richiesta pesante su un
@@ -480,13 +497,19 @@ def _node_score(node: dict) -> float:
     load_ratio = min((active_r + queued_r) / max_c, 1.5)
     load_s     = max(0.0, 1.0 - load_ratio)
 
-    return (
-        vram_s   * ROUTING_WEIGHT_VRAM
-        + load_s   * ROUTING_WEIGHT_LOAD
-        + tier_s   * ROUTING_WEIGHT_TIER
-        + uptime_s * ROUTING_WEIGHT_UPTIME
-        + engine_s * ROUTING_WEIGHT_ENGINE
-    )
+    return {
+        "vram_s":   vram_s   * ROUTING_WEIGHT_VRAM,
+        "load_s":   load_s   * ROUTING_WEIGHT_LOAD,
+        "tier_s":   tier_s   * ROUTING_WEIGHT_TIER,
+        "uptime_s": uptime_s * ROUTING_WEIGHT_UPTIME,
+        "engine_s": engine_s * ROUTING_WEIGHT_ENGINE,
+    }
+
+def _node_score(node: dict) -> float:
+    """Score di routing: somma dei termini pesati di _node_score_components.
+    Mantenuto come somma diretta per non cambiare il comportamento del router."""
+    comp = _node_score_components(node)
+    return comp["vram_s"] + comp["load_s"] + comp["tier_s"] + comp["uptime_s"] + comp["engine_s"]
 
 def _node_ids_with_model(model: str) -> set:
     """Node id di chi ha davvero 'model' installato, secondo l'ultimo giro di
@@ -1682,6 +1705,55 @@ def mesh_announce():
 def get_mesh_nodes():
     return jsonify(_node_list())
 
+@app.route('/metrics/nodes')
+def get_metrics_nodes():
+    """Metriche backend normalizzate dei nodi (vedi node/backend_metrics.py):
+    ultimo campione + finestra storica in-memory (per mini-grafici) +
+    breakdown dello score di routing (per spiegare il ranking). I nodi senza
+    campioni raccolti (mai pollati o irraggiungibili) restano in lista con
+    metrics/history nulli e status coerente con l'ultimo polling."""
+    with _node_metrics_lock:
+        cache_snapshot = {
+            nid: {
+                "samples":  list(entry["samples"]),
+                "endpoint": entry["endpoint"],
+                "status":   entry["status"],
+            }
+            for nid, entry in _node_metrics_cache.items()
+        }
+    nodes = []
+    for n in _node_list():
+        nid    = n.get("node_id", "")
+        entry  = cache_snapshot.get(nid)
+        samples = entry["samples"] if entry else []
+        last    = samples[-1] if samples else None
+        breakdown = None
+        if n.get("status") == "active":
+            comp = _node_score_components(n)
+            breakdown = {k: round(v, 4) for k, v in comp.items()}
+            breakdown["total"] = round(sum(comp.values()), 4)
+        nodes.append({
+            "node_id":    nid,
+            "alias":      _node_aliases.get(nid, ""),
+            "endpoint":   entry["endpoint"] if entry else _best_endpoint(n),
+            "status":     entry["status"] if entry else n.get("status", "unknown"),
+            "metrics":    last,
+            "history":    [
+                {"sampled_at": s.get("sampled_at"),
+                 "server":     s.get("server", {}),
+                 "load":       s.get("load", {}),
+                 "runtime":    s.get("runtime", {})}
+                for s in samples[-METRICS_WINDOW:]
+            ],
+            "score_breakdown": breakdown,
+        })
+    return jsonify({
+        "sampled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "interval_s": METRICS_POLL_INTERVAL_S,
+        "window":     METRICS_WINDOW,
+        "nodes":      nodes,
+    })
+
 @app.route('/nodes/active')
 def get_nodes_active():
     return jsonify([n for n in _node_list() if n.get("status") == "active"])
@@ -2368,6 +2440,62 @@ def _poll_mesh_nodes():
             push_log('mesh_event', f'Local node demoted to hub ({len(remote_active)} remote active)',
                      source=_LOCAL_NODE_ID[:16], status='info')
 
+# ── TELEMETRIA NODI: COLLECTOR (pull periodico di /metrics) ────────────────
+# Cache in-memory: node_id -> {samples: deque(maxlen=METRICS_WINDOW),
+# endpoint, status, last_at}. Ogni campione è il payload normalizzato del
+# nodo (GET /metrics sul nodo). Finestra volatile, niente DB: serve a
+# diagnosi, mini-grafici e ai futuri termini di scoring basati su telemetria
+# osservata. Thread separato da heartbeat_loop (stato operativo) così la
+# cadenza della telemetria non dipende dal ciclo di routing.
+_node_metrics_lock = threading.Lock()
+_node_metrics_cache: dict = {}
+
+def _collect_node_metrics():
+    now = time.time()
+    for n in _node_list():
+        if n.get("status") != "active":
+            continue
+        nid = n.get("node_id", "")
+        if not nid:
+            continue
+        if _LOCAL_NODE_ENABLED and nid == _LOCAL_NODE_ID:
+            continue
+        ep = _best_endpoint(n)
+        if not ep:
+            continue
+        try:
+            r = requests.get(f"{ep}/metrics", timeout=METRICS_POLL_TIMEOUT_S)
+            if r.status_code != 200 or not _is_valid_json_response(r):
+                raise ValueError(f"HTTP {r.status_code}")
+            payload = r.json()
+            with _node_metrics_lock:
+                entry = _node_metrics_cache.setdefault(nid, {
+                    "samples": deque(maxlen=METRICS_WINDOW),
+                    "endpoint": ep, "status": "active", "last_at": 0.0,
+                })
+                entry["samples"].append(payload)
+                entry["endpoint"] = ep
+                entry["status"]   = "active"
+                entry["last_at"]  = now
+        except Exception:
+            with _node_metrics_lock:
+                entry = _node_metrics_cache.get(nid)
+                if entry:
+                    entry["status"] = "unreachable"
+    # Prune nodi scomparsi o stale (nessun campione fresco da METRICS_MAX_STALE_S)
+    with _node_metrics_lock:
+        for nid in [k for k, v in _node_metrics_cache.items()
+                    if now - v["last_at"] > METRICS_MAX_STALE_S]:
+            _node_metrics_cache.pop(nid, None)
+
+def metrics_loop():
+    time.sleep(5)
+    while True:
+        cycle_start = time.time()
+        _collect_node_metrics()
+        elapsed = time.time() - cycle_start
+        time.sleep(max(METRICS_POLL_INTERVAL_S - elapsed, 1))
+
 def heartbeat_loop():
     time.sleep(3)
     push_log('system', 'Control-plane v1.04 started',
@@ -2434,6 +2562,7 @@ if __name__ == '__main__':
     _load_aliases_from_db()
     _register_local_node()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=metrics_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=8085, debug=False)
 else:
     _load_nodes_from_db()
@@ -2441,3 +2570,4 @@ else:
     _load_aliases_from_db()
     _register_local_node()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=metrics_loop, daemon=True).start()
