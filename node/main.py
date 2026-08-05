@@ -152,10 +152,15 @@ class _WeightedLoadLimiter:
         self.capacity = capacity
         self._active = 0.0
         self._queued_units = 0.0
+        # Unità di carico attive PER MODELLO: serve a /metrics per dire quale
+        # modello sta EFFETTIVAMENTE eseguendo una richiesta ora (la scelta
+        # del modello da mostrare non può basarsi su euristiche tipo "il
+        # campione più recente"). Aggiornata dentro lo stesso lock di acquire.
+        self._active_by_model: dict = {}
         self._lock = asyncio.Lock()
         self._cond = asyncio.Condition(self._lock)
 
-    async def acquire(self, weight: float, timeout_s: float) -> bool:
+    async def acquire(self, weight: float, model: str, timeout_s: float) -> bool:
         async with self._lock:
             self._queued_units += weight
             try:
@@ -168,11 +173,19 @@ class _WeightedLoadLimiter:
             finally:
                 self._queued_units -= weight
             self._active += weight
+            if model:
+                self._active_by_model[model] = self._active_by_model.get(model, 0.0) + weight
             return True
 
-    async def release(self, weight: float):
+    async def release(self, weight: float, model: str):
         async with self._lock:
             self._active = max(0.0, self._active - weight)
+            if model:
+                rest = self._active_by_model.get(model, 0.0) - weight
+                if rest > 1e-9:
+                    self._active_by_model[model] = round(rest, 2)
+                else:
+                    self._active_by_model.pop(model, None)
             self._cond.notify_all()
 
     @property
@@ -180,20 +193,25 @@ class _WeightedLoadLimiter:
         return round(self._active, 2)
 
     @property
+    def active_by_model(self) -> dict:
+        return dict(self._active_by_model)
+
+    @property
     def queued_units(self) -> float:
         return round(self._queued_units, 2)
 
 
-async def _try_acquire_slot(weight: float = 1.0, timeout_s: float = None) -> bool:
+async def _try_acquire_slot(model: str = "", weight: float = 1.0, timeout_s: float = None) -> bool:
     """True se le unità sono state acquisite (il chiamante DEVE poi chiamare
-    _release_slot(weight) con lo STESSO peso); False se il timeout è scaduto
-    — in quel caso nessuna unità è stata presa e non va rilasciato nulla."""
+    _release_slot(model, weight) con lo STESSO peso e lo STESSO modello);
+    False se il timeout è scaduto — in quel caso nessuna unità è stata presa
+    e non va rilasciato nulla."""
     timeout_s = REQUEST_QUEUE_TIMEOUT_S if timeout_s is None else timeout_s
-    return await _load_limiter.acquire(weight, timeout_s)
+    return await _load_limiter.acquire(weight, model, timeout_s)
 
 
-async def _release_slot(weight: float = 1.0):
-    await _load_limiter.release(weight)
+async def _release_slot(model: str = "", weight: float = 1.0):
+    await _load_limiter.release(weight, model)
 
 
 def _busy_response():
@@ -634,6 +652,10 @@ async def node_metrics():
         "max_load_units":  MAX_LOAD_UNITS,
         "active_requests": active_u,
         "queued_requests": queued_u,
+        # Quale modello sta EFFETTIVAMENTE eseguendo richieste adesso
+        # (modello -> unità di carico attive). Assente sui nodi non aggiornati:
+        # la dashboard deve ripiegare senza euristiche.
+        "active_by_model": dict(_load_limiter.active_by_model),
     }
     return payload
 
@@ -723,12 +745,12 @@ async def execute_task(task: dict):
     model = task.get("model") or task.get("payload", {}).get("model") or DEFAULT_MODEL
 
     weight = estimate_model_load_units(model)
-    if not await _try_acquire_slot(weight):
+    if not await _try_acquire_slot(model, weight):
         return _busy_response()
     try:
         response_text = await ollama_generate(prompt, model)
     finally:
-        await _release_slot(weight)
+        await _release_slot(model, weight)
 
     # Salva in memoria locale e propaga al CP, solo se non sono dei task per i
     # titoli (task_id con prefisso "title-"), altrimenti si genera un loop
@@ -782,9 +804,10 @@ async def v1_chat_completions_proxy(request: Request):
     stream = bool(payload.get("stream", False))
 
     weight = estimate_model_load_units(payload.get("model", ""))
+    model  = payload.get("model", "") or DEFAULT_MODEL
 
     if stream:
-        if not await _try_acquire_slot(weight):
+        if not await _try_acquire_slot(model, weight):
             return _busy_response()
 
         async def _stream_gen():
@@ -800,10 +823,10 @@ async def v1_chat_completions_proxy(request: Request):
             except Exception as e:
                 yield f'data: {{"error": "{e}"}}\n\n'.encode()
             finally:
-                await _release_slot(weight)
+                await _release_slot(model, weight)
         return StreamingResponse(_stream_gen(), media_type="text/event-stream")
 
-    if not await _try_acquire_slot(weight):
+    if not await _try_acquire_slot(model, weight):
         return _busy_response()
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
@@ -821,28 +844,7 @@ async def v1_chat_completions_proxy(request: Request):
             status_code=503, media_type="application/json",
         )
     finally:
-        await _release_slot(weight)
-        return StreamingResponse(_stream_gen(), media_type="text/event-stream")
-
-    if not await _try_acquire_slot():
-        return _busy_response()
-    try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            r = await client.post(
-                f"{OLLAMA_PROXY_URL}/v1/chat/completions",
-                content=body, headers={"Content-Type": "application/json"},
-            )
-            return Response(
-                content=r.content, status_code=r.status_code,
-                media_type=r.headers.get("content-type", "application/json"),
-            )
-    except Exception as e:
-        return Response(
-            content=json.dumps({"error": {"message": str(e), "type": "server_error"}}),
-            status_code=503, media_type="application/json",
-        )
-    finally:
-        _release_slot()
+        await _release_slot(model, weight)
 
 @app.get("/ollama/health")
 async def check_ollama():

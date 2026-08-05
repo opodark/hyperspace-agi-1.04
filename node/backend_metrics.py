@@ -18,6 +18,10 @@
 #             mean/p50/p95 per TTFT e latenza, health)
 #   runtime : metriche PER MODELLO (loaded, vram, EWMA tok/s e latenza,
 #             campioni visti, data_age_s)
+#   load.active_by_model : modello -> unità di carico attive ADESSO (quale
+#             modello sta eseguendo le richieste correnti). Aggiunto in v2
+#             senza bump: i consumer più datati lo ignorano, i nodi più datati
+#             semplicemente non lo espongono.
 #
 # Affidabilità del dato (come fidarsi):
 #   server.health.up        -> il backend è raggiungibile (false = giù, non

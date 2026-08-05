@@ -647,8 +647,8 @@ function renderNodeCard(n){
   var hist=n.history||[];
   if(hist.length>=2){
     var tpsSeries=hist.map(function(h){
-      // stessa regola del tile: idle -> 0, altrimenti gauge vLLM o EWMA del
-      // modello attivo (Ollama). Niente somma tra modelli.
+      // stessa regola del tile: idle -> 0, altrimenti gauge vLLM o somma
+      // EWMA dei modelli che stanno eseguendo (load.active_by_model).
       return sampleTokPerSec(h);
     });
     var ldSeries=hist.map(function(h){
@@ -728,30 +728,46 @@ function mxNodeTps(m){
   if(s.tokens_per_sec!=null){
     return {val:mxF1(v),src:s.tokens_per_sec_source?mxSource(s.tokens_per_sec_source):''};
   }
-  return {val:mxF1(v),src:'\u2248 stima'};
+  var am=activeModels(m);
+  return {val:mxF1(v),src:am.length?'\u2248 '+am.join(', '):'\u2248 stima'};
+}
+
+// Modelli che stanno eseguendo richieste ADESSO (segnalati dal nodo in
+// load.active_by_model: modello -> unità di carico attive). Ritorna la lista
+// ordinata; vuota se il nodo non segnala nulla (vecchia versione).
+function activeModels(sample){
+  var abm=(sample.load||{}).active_by_model||{};
+  var out=[];
+  Object.keys(abm).forEach(function(k){
+    if(parseFloat(abm[k])>0)out.push(k);
+  });
+  return out.sort();
 }
 
 // Tok/s corrente da un campione (tile e sparkline): stessa regola.
 //   idle (load attivo <= 0)         -> 0 (nessuna throughput)
 //   vLLM (server.tokens_per_sec)    -> gauge reale
-//   Ollama                           -> EWMA del modello CARICATO che sta
-//       eseguendo il task (campione più recente: data_age_s minimo). Niente
-//       somma tra modelli: se il modello attivo non ha EWMA -> null.
+//   Ollama                           -> somma degli EWMA dei modelli che
+//       stanno EFFETTIVAMENTE eseguendo (load.active_by_model). Niente
+//       euristiche sul campione "più recente": se il modello attivo non ha
+//       EWMA o il nodo non segnala il modello attivo -> null.
 function sampleTokPerSec(sample){
   var ld=sample.load||{};
   var active=parseFloat(ld.active_units!=null?ld.active_units:(ld.active_requests||0))||0;
   if(active<=0)return 0;
   var s=sample.server||{};
   if(s.tokens_per_sec!=null)return parseFloat(s.tokens_per_sec);
+  var abm=ld.active_by_model||{};
   var r=sample.runtime||{};
-  var best=null,bestAge=Infinity;
-  Object.keys(r).forEach(function(k){
+  var sum=null;
+  Object.keys(abm).forEach(function(k){
+    if(parseFloat(abm[k])<=0)return;
     var e=r[k];
-    if(!e.loaded||e.tokens_per_sec_ewma==null)return;
-    var age=e.data_age_s!=null?parseFloat(e.data_age_s):Infinity;
-    if(age<bestAge){bestAge=age;best=parseFloat(e.tokens_per_sec_ewma);}
+    if(e&&e.tokens_per_sec_ewma!=null){
+      sum=(sum==null?0:sum)+parseFloat(e.tokens_per_sec_ewma);
+    }
   });
-  return best;
+  return sum;
 }
 
 function sparkline(vals,w,h){
