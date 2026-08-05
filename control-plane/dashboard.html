@@ -180,6 +180,31 @@ main{padding:18px 20px;display:grid}
 .mx-model-row{display:grid;grid-template-columns:1fr 80px 90px 90px;gap:8px;padding:6px 10px;font-size:.72rem;border-bottom:1px solid var(--divider)}
 .mx-model-row.head{color:var(--text-muted);font-size:.62rem;text-transform:uppercase;letter-spacing:.06em}
 .mx-empty{color:var(--text-faint);font-size:.72rem;padding:8px 2px}
+.mx-meta{font-family:var(--font-mono);font-size:.62rem;color:var(--text-faint);margin:2px 0 8px}
+.mx-node-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:10px}
+.mx-node-hdr{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:.72rem;margin-bottom:8px}
+.mx-node-name{font-family:var(--font-mono);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:120px}
+.mx-backend-badge{font-size:.58rem;font-weight:700;padding:2px 7px;border-radius:99px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.04em;flex-shrink:0}
+.mx-bt-inference{background:var(--info-bg);color:var(--info)}
+.mx-bt-manager{background:var(--primary-bg);color:var(--primary)}
+.mx-bt-unknown{background:var(--surface3);color:var(--text-faint)}
+.mx-node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px}
+.mx-node-tile{background:var(--surface2);border:1px solid var(--divider);border-radius:var(--radius);padding:7px 9px}
+.mx-node-tile-key{font-size:.56rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}
+.mx-node-tile-val{font-family:var(--font-mono);font-size:.86rem;color:var(--text);font-weight:600}
+.mx-up{color:var(--success)}
+.mx-down{color:var(--error)}
+.mx-runtime-row{display:grid;grid-template-columns:1fr 40px 60px 60px 64px 46px;gap:6px;padding:4px 8px;font-size:.66rem;border-bottom:1px solid var(--divider);align-items:center}
+.mx-runtime-row.head{color:var(--text-muted);font-size:.56rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--divider)}
+.mx-runtime-row.head span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mx-runtime-row .mono{font-family:var(--font-mono)}
+.mx-spark{display:block;margin-top:6px}
+.mx-scorebar{display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--surface2);margin:6px 0 4px}
+.mx-scorebar span{display:block;height:100%}
+.mx-score-terms{display:flex;flex-wrap:wrap;gap:6px 12px;font-family:var(--font-mono);font-size:.58rem;color:var(--text-muted)}
+.mx-score-terms b{color:var(--text)}
+.mx-node-err{color:var(--error);font-size:.68rem;font-family:var(--font-mono);word-break:break-all}
+.mx-node-sub{font-size:.62rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin:8px 0 4px}
 /* setup */
 .setup-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:680px){.setup-grid{grid-template-columns:1fr}}
@@ -369,6 +394,9 @@ main{padding:18px 20px;display:grid}
   <div id="mxModelList">
     <div class="mx-model-row head"><span>Modello</span><span>Req</span><span>Avg tok/s</span><span>Tok out</span></div>
   </div>
+  <div class="sec-title" style="margin-top:16px">Backend / Nodi &#8212; Telemetria</div>
+  <div class="mx-meta" id="mxNodesMeta">&#8635; caricamento&hellip;</div>
+  <div id="mxNodesList"><div class="mx-empty">Caricamento telemetria nodi&hellip;</div></div>
 </div>
 
 <!-- DIAGNOSTICS -->
@@ -476,6 +504,246 @@ function showPanel(name,btn){
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
   if(name==='setup')loadCfg();
+}
+
+// ── METRICS: live/summary (sessione) + telemetria nodi (/metrics/nodes) ──
+async function refreshMetrics(){
+  var live=null,sum=null,nodes=null;
+  try{live=await(await fetch('/metrics/live')).json();}catch(e){}
+  try{sum=await(await fetch('/metrics/summary')).json();}catch(e){}
+  try{nodes=await(await fetch('/metrics/nodes')).json();}catch(e){}
+  renderMetricsLive(live);
+  renderMetricsSummary(sum);
+  renderMetricsNodes(nodes);
+}
+setInterval(refreshMetrics,15000); refreshMetrics();
+
+function renderMetricsLive(live){
+  var gens=live&&live.generations||[];
+  var tps=0;
+  gens.forEach(function(g){tps+=parseFloat(g.tokens_per_sec||0);});
+  document.getElementById('mxLiveTps').textContent=tps.toFixed(1);
+  var el=document.getElementById('mxLiveList');
+  if(!gens.length){el.innerHTML='<div class="mx-empty">Nessuna generazione attiva.</div>';return;}
+  el.innerHTML=gens.map(function(g){
+    return '<div class="mx-live-item"><span title="'+escH(g.node_id||'')+'">'
+      +(g.model?escH(g.model):'?')+' &#183; '+escH((g.node_id||'').slice(0,12))
+      +'</span><span class="mx-live-tps">'+mxF1(g.tokens_per_sec)+' tok/s</span></div>';
+  }).join('');
+}
+
+function renderMetricsSummary(sum){
+  if(!sum){return;}
+  document.getElementById('mxAvgTps').textContent=sum.avg_tokens_per_sec!=null?mxF1(sum.avg_tokens_per_sec):'\u2014';
+  document.getElementById('mxReq').textContent=mxNum(sum.requests);
+  document.getElementById('mxTokOut').textContent=mxNum(sum.tokens_out);
+  document.getElementById('mxTokIn').textContent=mxNum(sum.tokens_in);
+  var el=document.getElementById('mxModelList');
+  var mods=sum.models||[];
+  var head='<div class="mx-model-row head"><span>Modello</span><span>Req</span><span>Avg tok/s</span><span>Tok out</span></div>';
+  if(!mods.length){
+    el.innerHTML=head+'<div class="mx-empty">Nessuna interazione registrata.</div>';
+    return;
+  }
+  el.innerHTML=head+mods.map(function(m){
+    return '<div class="mx-model-row"><span title="'+escH(m.model||'')+'">'+escH(m.model||'?')+'</span>'
+      +'<span>'+mxNum(m.requests)+'</span>'
+      +'<span>'+(m.avg_tokens_per_sec!=null?mxF1(m.avg_tokens_per_sec):'&#8212;')+'</span>'
+      +'<span>'+mxNum(m.tokens_out)+'</span></div>';
+  }).join('');
+}
+
+function renderMetricsNodes(data){
+  var meta=document.getElementById('mxNodesMeta');
+  var list=document.getElementById('mxNodesList');
+  if(!data||!data.nodes){
+    meta.textContent='\u2014 telemetria nodi non disponibile \u2014';
+    list.innerHTML='<div class="mx-empty">Endpoint /metrics/nodes non disponibile o errore di rete.</div>';
+    return;
+  }
+  meta.textContent='sampled_at='+(data.sampled_at||'\u2014')
+    +'  interval_s='+(data.interval_s!=null?data.interval_s:'\u2014')
+    +'  window='+(data.window!=null?data.window:'\u2014')
+    +'  schema='+(data.schema_version!=null?'v'+data.schema_version:'\u2014');
+  var nodes=data.nodes||[];
+  if(!nodes.length){list.innerHTML='<div class="mx-empty">Nessun nodo nel mesh.</div>';return;}
+  list.innerHTML=nodes.map(renderNodeCard).join('');
+}
+
+function renderNodeCard(n){
+  var m=n.metrics||null;
+  var bd=n.score_breakdown||null;
+  var rt=m&&m.runtime||null;
+  var rtKeys=rt?Object.keys(rt):[];
+  var name=escH(n.node_id?n.node_id.slice(0,16):(n.endpoint||'?'))
+    +(n.alias?' <span class="tier-badge" style="background:var(--primary-bg);color:var(--primary)">@'+escH(n.alias)+'</span>':'');
+  var btCls='mx-bt-unknown';
+  if(m&&m.backend_type==='inference_server')btCls='mx-bt-inference';
+  else if(m&&m.backend_type==='model_manager')btCls='mx-bt-manager';
+  var bt='<span class="mx-backend-badge '+btCls+'" title="backend_type">'+(m&&m.backend_type?escH(m.backend_type):'?')+'</span>';
+  var eng=m&&m.engine?'<span class="engine-badge" title="Motore d\'inferenza">&#9881; '+escH(m.engine)+'</span>':'';
+  var extra=[];
+  if(n.stale)extra.push('<span class="tier-badge" style="background:var(--warning-bg);color:var(--warning)" title="Ultimo campione pi&ugrave; vecchio di 2x intervallo di poll">&#9888; stale</span>');
+  if(n.schema_mismatch)extra.push('<span class="tier-badge" style="background:var(--error-bg);color:var(--error)" title="schema /metrics incompatibile">&#10007; schema</span>');
+  extra.push('<span style="font-family:var(--font-mono);font-size:.62rem;color:var(--text-faint)" title="et&agrave; dell\'ultimo campione">'
+    +(n.sample_age_s!=null?mxF1(n.sample_age_s)+'s':'&#8212;')+'</span>');
+  var hdr='<div class="mx-node-hdr">'
+    +'<span class="node-status-dot '+statusDotClass(n.status)+'"></span>'
+    +'<span class="mx-node-name" title="'+escH(n.node_id||'')+'">'+name+'</span>'
+    +bt+eng+extra.join('')+'</div>';
+
+  // Tile backend (health o stato)
+  var up=m&&m.server&&m.server.health?m.server.health.up:null;
+  var tiles=[];
+  if(up===null){
+    tiles.push(mxTile('Backend','<span class="mx-down">'+escH(n.status==='active'?'no data':(n.status||'offline'))+'</span>',''));
+  }else{
+    tiles.push(mxTile('Backend',up?'<span class="mx-up">UP</span>':'<span class="mx-down">DOWN</span>',''));
+  }
+  var tps=mxNodeTps(m);
+  tiles.push(mxTile('Tok/s',tps.val,tps.src));
+  var ld=m&&m.load||null;
+  if(ld){
+    var act=ld.active_units!=null?ld.active_units:(ld.active_requests||0);
+    var maxL=ld.max_load_units!=null?ld.max_load_units:1;
+    var q=ld.queued_units!=null?ld.queued_units:(ld.queued_requests||0);
+    tiles.push(mxTile('Load',mxF1(act)+'/'+mxF1(maxL),q?'+'+mxF1(q)+' q':''));
+  }else{
+    tiles.push(mxTile('Load','&#8212;',''));
+  }
+  var p50=m&&m.server&&m.server.latency_ms_p50;
+  if(p50!=null)tiles.push(mxTile('Latenza p50',mxF1(p50)+' ms',''));
+  var gpu=m&&m.server&&m.server.gpu_cache_usage_perc;
+  if(gpu!=null)tiles.push(mxTile('Cache GPU',mxF1(gpu)+'%',''));
+  var rr=m&&m.server&&m.server.requests_running;
+  if(rr!=null)tiles.push(mxTile('Rich. attive',mxNum(rr),''));
+
+  // Sparkline da history[]
+  var sparkHtml='';
+  var hist=n.history||[];
+  if(hist.length>=2){
+    var tpsSeries=hist.map(function(h){
+      var s=h.server||{};
+      if(s.tokens_per_sec!=null)return parseFloat(s.tokens_per_sec);
+      var r=h.runtime||{},sum=0,any=false;
+      Object.keys(r).forEach(function(k){var v=r[k].tokens_per_sec_ewma;if(v!=null&&!isNaN(v)){sum+=parseFloat(v);any=true;}});
+      return any?sum:null;
+    });
+    var ldSeries=hist.map(function(h){
+      var l=h.load||{};
+      var v=l.active_units!=null?l.active_units:l.active_requests;
+      return v!=null?parseFloat(v):null;
+    });
+    sparkHtml='<div style="display:flex;gap:20px;flex-wrap:wrap;margin-top:8px">'
+      +'<div><div class="mx-node-sub" style="margin:0 0 2px">tok/s (storico)</div>'+sparkline(tpsSeries,220,34)+'</div>'
+      +'<div><div class="mx-node-sub" style="margin:0 0 2px">load (storico)</div>'+sparkline(ldSeries,220,34)+'</div>'
+      +'</div>';
+  }
+
+  // Righe per modello
+  var rowsHtml='';
+  if(rtKeys.length){
+    rowsHtml+='<div class="mx-node-sub">Modelli ('+rtKeys.length+')</div>'
+      +'<div class="mx-runtime-row head"><span>Modello</span><span>VRAM</span><span>tok/s</span><span>lat ms</span><span>sorgente</span><span>et&agrave;</span></div>';
+    rtKeys.sort().forEach(function(k){
+      var e=rt[k];
+      var dot=e.loaded?'<span style="color:var(--success)">&#9679;</span>':'<span style="color:var(--text-faint)">&#9675;</span>';
+      var short=k.length>34?k.slice(0,34)+'&hellip;':k;
+      rowsHtml+='<div class="mx-runtime-row"><span title="'+escH(k)+'">'+dot+' '+escH(short)+'</span>'
+        +'<span class="mono">'+(e.vram_gb!=null?mxF1(e.vram_gb)+'G':'&#8212;')+'</span>'
+        +'<span class="mono">'+(e.tokens_per_sec_ewma!=null?mxF1(e.tokens_per_sec_ewma):'&#8212;')+'</span>'
+        +'<span class="mono">'+(e.latency_ms_ewma!=null?mxF1(e.latency_ms_ewma):'&#8212;')+'</span>'
+        +'<span class="mono">'+mxSource(e.sample_source)+'</span>'
+        +'<span class="mono" style="color:var(--text-faint)">'+(e.data_age_s!=null?mxF1(e.data_age_s)+'s':'&#8212;')+'</span>'
+        +'</div>';
+    });
+  }
+
+  // Score routing (breakdown)
+  var scoreHtml='';
+  if(bd){
+    var terms=[['vram_s','--primary','VRAM'],['load_s','--success','Load'],['tier_s','--info','Tier'],['uptime_s','--warning','Uptime'],['engine_s','--dream','Engine']];
+    var total=parseFloat(bd.total);
+    if(isNaN(total))total=0;
+    var segs='',leg='';
+    terms.forEach(function(t){
+      var v=parseFloat(bd[t[0]]||0);
+      var pct=total>0?Math.max(0,(v/total)*100):0;
+      segs+='<span style="background:var('+t[1]+');width:'+pct.toFixed(1)+'%" title="'+t[2]+' '+mxF2(v)+'"></span>';
+      leg+='<span><span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:var('+t[1]+');margin-right:4px"></span>'+t[2]+' <b>'+mxF2(v)+'</b></span>';
+    });
+    scoreHtml='<div class="mx-node-sub">Score routing '+(total>0?'&#183; totale '+mxF2(total):'')+'</div>'
+      +'<div class="mx-scorebar">'+segs+'</div>'
+      +'<div class="mx-score-terms">'+leg+'</div>';
+  }
+
+  var errHtml='';
+  if(n.last_error)errHtml='<div class="mx-node-err">&#10007; '+escH(n.last_error)+'</div>';
+  else if(!m&&n.status!=='active')errHtml='<div class="mx-node-err">nessuna telemetria raccolta</div>';
+
+  return '<div class="mx-node-card">'+hdr+'<div class="mx-node-grid">'+tiles.join('')+'</div>'
+    +sparkHtml+rowsHtml+scoreHtml+errHtml+'</div>';
+}
+
+function mxTile(k,v,sub){
+  return '<div class="mx-node-tile"><div class="mx-node-tile-key">'+k+'</div>'
+    +'<div class="mx-node-tile-val">'+v+'</div>'
+    +(sub?'<div style="font-family:var(--font-mono);font-size:.56rem;color:var(--text-faint)">'+sub+'</div>':'')
+    +'</div>';
+}
+
+function mxNodeTps(m){
+  if(!m)return {val:'\u2014',src:''};
+  var s=m.server||{};
+  if(s.tokens_per_sec!=null){
+    return {val:mxF1(s.tokens_per_sec),src:s.tokens_per_sec_source?mxSource(s.tokens_per_sec_source):''};
+  }
+  var rt=m.runtime||{},sum=0,any=false;
+  Object.keys(rt).forEach(function(k){
+    var v=rt[k].tokens_per_sec_ewma;
+    if(v!=null&&!isNaN(v)){sum+=parseFloat(v);any=true;}
+  });
+  if(any)return {val:mxF1(sum),src:'ewma \u03a3'};
+  return {val:'\u2014',src:''};
+}
+
+function sparkline(vals,w,h){
+  var min=null,max=null,pts=0;
+  for(var i=0;i<vals.length;i++){var v=vals[i];if(v==null||isNaN(v))continue;if(min==null||v<min)min=v;if(max==null||v>max)max=v;pts++;}
+  if(!pts)return '<div style="font-size:.6rem;color:var(--text-faint)">nessun dato</div>';
+  if(max===min)max=min+1;
+  var coords=[];
+  var span=vals.length>1?vals.length-1:1;
+  for(i=0;i<vals.length;i++){
+    var v2=vals[i];
+    if(v2==null||isNaN(v2))continue;
+    var x=span>0?(i/span*(w-2)+1):1;
+    var y=h-1-((v2-min)/(max-min))*(h-2);
+    coords.push(x.toFixed(1)+','+y.toFixed(1));
+  }
+  var inner;
+  if(coords.length===1){
+    var p=coords[0].split(',');
+    inner='<circle cx="'+p[0]+'" cy="'+p[1]+'" r="1.8" fill="var(--primary)"/>';
+  }else{
+    inner='<polyline fill="none" stroke="var(--primary)" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round" points="'+coords.join(' ')+'"/>';
+  }
+  return '<svg class="mx-spark" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'">'+inner+'</svg>';
+}
+
+// Helpers formattazione metrics
+function mxNum(v){
+  if(v==null||isNaN(v))return '\u2014';
+  var n=parseFloat(v);
+  if(Math.abs(n)>=1e6)return (n/1e6).toFixed(1)+'M';
+  if(Math.abs(n)>=1e3)return (n/1e3).toFixed(1)+'k';
+  return String(Math.round(n));
+}
+function mxF1(v){if(v==null||isNaN(v))return '\u2014';return (+parseFloat(v).toFixed(1)).toString();}
+function mxF2(v){if(v==null||isNaN(v))return '\u2014';return (+parseFloat(v).toFixed(2)).toString();}
+function mxSource(s){
+  if(!s)return '\u2014';
+  return ({ewma:'EWMA',gauge:'gauge',gauge_aggregate:'gauge+',counter_rate:'rate'})[s]||String(s);
 }
 
 // HB Bar
