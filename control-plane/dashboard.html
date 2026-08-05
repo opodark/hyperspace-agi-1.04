@@ -516,7 +516,12 @@ async function refreshMetrics(){
   renderMetricsSummary(sum);
   renderMetricsNodes(nodes);
 }
-setInterval(refreshMetrics,15000); refreshMetrics();
+// Poll periodico SOLO a tab attivo: il refresh all'apertura è già gestito da
+// showPanel('metrics'); evitiamo fetch inutili quando il pannello è nascosto.
+setInterval(function(){
+  var p=document.getElementById('panel-metrics');
+  if(p&&p.classList.contains('active'))refreshMetrics();
+},15000);
 
 function renderMetricsLive(live){
   var gens=live&&live.generations||[];
@@ -567,7 +572,21 @@ function renderMetricsNodes(data){
     +'  schema='+(data.schema_version!=null?'v'+data.schema_version:'\u2014');
   var nodes=data.nodes||[];
   if(!nodes.length){list.innerHTML='<div class="mx-empty">Nessun nodo nel mesh.</div>';return;}
+  // Ordina: prima i nodi attivi con health UP, poi attivi non-stale, poi
+  // attivi stale, poi unreachable, infine stato sconosciuto.
+  nodes.sort(function(a,b){return mxNodeRank(a)-mxNodeRank(b);});
   list.innerHTML=nodes.map(renderNodeCard).join('');
+}
+
+// Rank per ordinare le card: health reale pesa più dello stato dichiarato.
+function mxNodeRank(n){
+  var m=n.metrics||{};
+  var up=!!(m.server&&m.server.health&&m.server.health.up===true);
+  if(n.status==='active'&&up)return 0;
+  if(n.status==='active'&&!n.stale)return 1;
+  if(n.status==='active')return 2;
+  if(n.status==='unreachable')return 3;
+  return 4;
 }
 
 function renderNodeCard(n){
@@ -585,7 +604,9 @@ function renderNodeCard(n){
   var extra=[];
   if(n.stale)extra.push('<span class="tier-badge" style="background:var(--warning-bg);color:var(--warning)" title="Ultimo campione pi&ugrave; vecchio di 2x intervallo di poll">&#9888; stale</span>');
   if(n.schema_mismatch)extra.push('<span class="tier-badge" style="background:var(--error-bg);color:var(--error)" title="schema /metrics incompatibile">&#10007; schema</span>');
-  extra.push('<span style="font-family:var(--font-mono);font-size:.62rem;color:var(--text-faint)" title="et&agrave; dell\'ultimo campione">'
+  extra.push('<span style="font-family:var(--font-mono);font-size:.62rem;color:var(--text-faint)" title="et&agrave; ultimo campione: '
+    +(n.sample_age_s!=null?mxF1(n.sample_age_s)+'s':'&#8212;')
+    +' &mdash; raccolto: '+(n.last_collected_at?escH(n.last_collected_at):'mai')+'">'
     +(n.sample_age_s!=null?mxF1(n.sample_age_s)+'s':'&#8212;')+'</span>');
   var hdr='<div class="mx-node-hdr">'
     +'<span class="node-status-dot '+statusDotClass(n.status)+'"></span>'
@@ -593,7 +614,10 @@ function renderNodeCard(n){
     +bt+eng+extra.join('')+'</div>';
 
   // Tile backend (health o stato)
-  var up=m&&m.server&&m.server.health?m.server.health.up:null;
+  // up === true / false esplicito: un health presente ma senza chiave "up"
+  // (payload malformato) non deve essere interpretato come DOWN.
+  var hasHealth=!!(m&&m.server&&m.server.health);
+  var up=hasHealth?m.server.health.up===true:null;
   var tiles=[];
   if(up===null){
     tiles.push(mxTile('Backend','<span class="mx-down">'+escH(n.status==='active'?'no data':(n.status||'offline'))+'</span>',''));
@@ -678,7 +702,8 @@ function renderNodeCard(n){
   }
 
   var errHtml='';
-  if(n.last_error)errHtml='<div class="mx-node-err">&#10007; '+escH(n.last_error)+'</div>';
+  if(n.last_error)errHtml='<div class="mx-node-err">&#10007; '+escH(n.last_error)
+    +(n.last_collected_at?' &mdash; ultimo ok: '+escH(n.last_collected_at):'')+'</div>';
   else if(!m&&n.status!=='active')errHtml='<div class="mx-node-err">nessuna telemetria raccolta</div>';
 
   return '<div class="mx-node-card">'+hdr+'<div class="mx-node-grid">'+tiles.join('')+'</div>'
