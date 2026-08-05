@@ -1739,7 +1739,8 @@ def get_metrics_nodes():
             "status":     entry["status"] if entry else n.get("status", "unknown"),
             "metrics":    last,
             "history":    [
-                {"sampled_at": s.get("sampled_at"),
+                {"sampled_at":  s.get("sampled_at"),
+                 "collected_at": s.get("collected_at"),
                  "server":     s.get("server", {}),
                  "load":       s.get("load", {}),
                  "runtime":    s.get("runtime", {})}
@@ -2468,6 +2469,12 @@ def _collect_node_metrics():
             if r.status_code != 200 or not _is_valid_json_response(r):
                 raise ValueError(f"HTTP {r.status_code}")
             payload = r.json()
+            # Timbro l'istante di raccolta lato CP: il sampled_at del nodo può
+            # restare identico tra poll (cache TTL lato nodo), quindi senza un
+            # collected_at locale lo storico apparirebbe con campioni duplicati.
+            # Microsecondi: a cadenza breve secondi non basterebbero a rendere
+            # distinti due campioni ravvicinati.
+            payload["collected_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             with _node_metrics_lock:
                 entry = _node_metrics_cache.setdefault(nid, {
                     "samples": deque(maxlen=METRICS_WINDOW),

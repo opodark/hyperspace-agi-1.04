@@ -621,8 +621,11 @@ async def node_metrics():
     runtime osservato dal motore (per modello e aggregato). La decisione di
     routing resta al control-plane, che consumerà questi dati per sostituire
     i pesi statici ENGINE_SCORES con telemetria osservata."""
-    payload = await collect_metrics(INFERENCE_BACKEND)
+    payload = dict(await collect_metrics(INFERENCE_BACKEND))
     active_u, queued_u = _load_limiter.active_units, _load_limiter.queued_units
+    # dict(...) sopra: collect_metrics restituisce l'oggetto CACHATO condiviso
+    # (TTL); senza la copia, mutare qui payload["load"] corromperebbe la cache
+    # e i successivi poll restituirebbero lo stesso oggetto già alterato.
     payload["node_id"] = NODE_ID
     payload["engine"]  = INFERENCE_BACKEND
     payload["load"]    = {
