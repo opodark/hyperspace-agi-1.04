@@ -36,6 +36,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response, stream
 from flask_cors import CORS
 import os, threading, time, requests, json, uuid, gzip, hashlib, socket, re
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import sys
 
@@ -108,7 +109,19 @@ ROUTING_WEIGHT_ENGINE = float(os.getenv("ROUTING_WEIGHT_ENGINE", "0.15"))
 METRICS_POLL_INTERVAL_S = int(os.getenv("METRICS_POLL_INTERVAL_S", "20"))
 METRICS_POLL_TIMEOUT_S  = int(os.getenv("METRICS_POLL_TIMEOUT_S", "4"))
 METRICS_WINDOW          = int(os.getenv("METRICS_WINDOW", "20"))
-METRICS_MAX_STALE_S     = int(os.getenv("METRICS_MAX_STALE_S", "120"))
+# Fetch dei nodi in PARALLELO: la raccolta seriale (timeout l'uno) sforerebbe
+# l'intervallo con molti nodi. METRICS_MAX_WORKERS limita la concorrenza.
+METRICS_MAX_WORKERS = int(os.getenv("METRICS_MAX_WORKERS", "8"))
+# Backoff sui nodi irraggiungibili: un nodo giù NON va martellato a ogni ciclo.
+# next_try_at = now + min(BASE * 2^fail_streak, MAX). Lo stale sample resta
+# servito (stale=true) finché il nodo non torna raggiungibile.
+METRICS_BACKOFF_BASE_S = float(os.getenv("METRICS_BACKOFF_BASE_S", "10"))
+METRICS_MAX_BACKOFF_S  = float(os.getenv("METRICS_MAX_BACKOFF_S", "120"))
+# Versione dello schema /metrics attesa. Deve combaciare con
+# NODE_METRICS_SCHEMA_VERSION in node/backend_metrics.py: i payload con
+# versione diversa (deployment eterogeneo) restano esposti ma marcati
+# schema_mismatch, così il consumatore non li interpreta alla cieca.
+NODE_METRICS_SCHEMA_VERSION = 2
 
 def _engine_score(node: dict) -> float:
     return _shared_engine_score(node.get("engine", ""))
@@ -1715,18 +1728,23 @@ def get_metrics_nodes():
     with _node_metrics_lock:
         cache_snapshot = {
             nid: {
-                "samples":  list(entry["samples"]),
-                "endpoint": entry["endpoint"],
-                "status":   entry["status"],
+                "samples":         list(entry["samples"]),
+                "endpoint":        entry["endpoint"],
+                "status":          entry["status"],
+                "last_at":         entry.get("last_at", 0.0),
+                "last_error":      entry.get("last_error"),
+                "schema_mismatch": entry.get("schema_mismatch", False),
             }
             for nid, entry in _node_metrics_cache.items()
         }
+    now = time.time()
     nodes = []
     for n in _node_list():
         nid    = n.get("node_id", "")
         entry  = cache_snapshot.get(nid)
         samples = entry["samples"] if entry else []
         last    = samples[-1] if samples else None
+        sample_age_s = round(max(now - entry["last_at"], 0.0), 1) if entry and entry["last_at"] else None
         breakdown = None
         if n.get("status") == "active":
             comp = _node_score_components(n)
@@ -1737,6 +1755,16 @@ def get_metrics_nodes():
             "alias":      _node_aliases.get(nid, ""),
             "endpoint":   entry["endpoint"] if entry else _best_endpoint(n),
             "status":     entry["status"] if entry else n.get("status", "unknown"),
+            # Freschezza: età dell'ultimo campione raccolto e flag stale
+            # (età > 2x intervallo di poll = un ciclo saltato o nodo giù).
+            "sample_age_s":  sample_age_s,
+            "stale":         sample_age_s is not None and sample_age_s > 2 * METRICS_POLL_INTERVAL_S,
+            "last_collected_at": (
+                datetime.fromtimestamp(entry["last_at"], timezone.utc).isoformat(timespec="seconds")
+                if entry and entry["last_at"] else None),
+            "last_error":      entry["last_error"] if entry else None,
+            "schema_version":  (last or {}).get("schema_version"),
+            "schema_mismatch": entry["schema_mismatch"] if entry else None,
             "metrics":    last,
             "history":    [
                 {"sampled_at":  s.get("sampled_at"),
@@ -1752,6 +1780,7 @@ def get_metrics_nodes():
         "sampled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "interval_s": METRICS_POLL_INTERVAL_S,
         "window":     METRICS_WINDOW,
+        "schema_version": NODE_METRICS_SCHEMA_VERSION,
         "nodes":      nodes,
     })
 
@@ -2443,16 +2472,21 @@ def _poll_mesh_nodes():
 
 # ── TELEMETRIA NODI: COLLECTOR (pull periodico di /metrics) ────────────────
 # Cache in-memory: node_id -> {samples: deque(maxlen=METRICS_WINDOW),
-# endpoint, status, last_at}. Ogni campione è il payload normalizzato del
-# nodo (GET /metrics sul nodo). Finestra volatile, niente DB: serve a
-# diagnosi, mini-grafici e ai futuri termini di scoring basati su telemetria
-# osservata. Thread separato da heartbeat_loop (stato operativo) così la
-# cadenza della telemetria non dipende dal ciclo di routing.
+# endpoint, status, last_at, last_error, error_ts, fail_streak, next_try_at,
+# schema_mismatch}. Ogni campione è il payload normalizzato del nodo
+# (GET /metrics sul nodo). Finestra volatile, niente DB: serve a diagnosi,
+# mini-grafici e ai futuri termini di scoring basati su telemetria osservata.
+# Thread separato da heartbeat_loop (stato operativo) così la cadenza della
+# telemetria non dipende dal ciclo di routing.
 _node_metrics_lock = threading.Lock()
 _node_metrics_cache: dict = {}
 
 def _collect_node_metrics():
     now = time.time()
+    # Nodi candidati: attivi, con id ed endpoint eseguibile, non locali, e
+    # FUORI dal backoff — un nodo irraggiungibile non va martellato a ogni
+    # ciclo (vedi METRICS_BACKOFF_BASE_S / METRICS_MAX_BACKOFF_S).
+    candidates = []
     for n in _node_list():
         if n.get("status") != "active":
             continue
@@ -2464,6 +2498,13 @@ def _collect_node_metrics():
         ep = _best_endpoint(n)
         if not ep:
             continue
+        with _node_metrics_lock:
+            existing = _node_metrics_cache.get(nid)
+            if existing and now < existing.get("next_try_at", 0.0):
+                continue
+        candidates.append((nid, ep))
+
+    def _fetch(nid, ep):
         try:
             r = requests.get(f"{ep}/metrics", timeout=METRICS_POLL_TIMEOUT_S)
             if r.status_code != 200 or not _is_valid_json_response(r):
@@ -2475,24 +2516,53 @@ def _collect_node_metrics():
             # Microsecondi: a cadenza breve secondi non basterebbero a rendere
             # distinti due campioni ravvicinati.
             payload["collected_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-            with _node_metrics_lock:
-                entry = _node_metrics_cache.setdefault(nid, {
-                    "samples": deque(maxlen=METRICS_WINDOW),
-                    "endpoint": ep, "status": "active", "last_at": 0.0,
-                })
+            return nid, ep, payload, None
+        except Exception as e:
+            return nid, ep, None, str(e)[:120]
+
+    # Fetch in PARALLELO: con N nodi e timeout l'uno, la versione seriale
+    # sforerebbe l'intervallo di poll (requests è thread-safe; l'aggiornamento
+    # della cache avviene sotto lock subito dopo).
+    results = []
+    if candidates:
+        with ThreadPoolExecutor(max_workers=METRICS_MAX_WORKERS) as ex:
+            results = list(ex.map(lambda c: _fetch(*c), candidates))
+
+    for nid, ep, payload, err in results:
+        with _node_metrics_lock:
+            entry = _node_metrics_cache.setdefault(nid, {
+                "samples": deque(maxlen=METRICS_WINDOW),
+                "endpoint": "", "status": "unknown", "last_at": 0.0,
+                "last_error": None, "error_ts": None,
+                "fail_streak": 0, "next_try_at": 0.0, "schema_mismatch": False,
+            })
+            if err is not None:
+                entry["status"]     = "unreachable"
+                entry["last_error"] = err
+                entry["error_ts"]   = now
+                entry["fail_streak"] = entry.get("fail_streak", 0) + 1
+                entry["next_try_at"] = now + min(
+                    METRICS_BACKOFF_BASE_S * (2 ** max(entry["fail_streak"] - 1, 0)),
+                    METRICS_MAX_BACKOFF_S,
+                )
+            else:
                 entry["samples"].append(payload)
-                entry["endpoint"] = ep
-                entry["status"]   = "active"
-                entry["last_at"]  = now
-        except Exception:
-            with _node_metrics_lock:
-                entry = _node_metrics_cache.get(nid)
-                if entry:
-                    entry["status"] = "unreachable"
-    # Prune nodi scomparsi o stale (nessun campione fresco da METRICS_MAX_STALE_S)
+                entry["endpoint"]      = ep
+                entry["status"]        = "active"
+                entry["last_at"]       = now
+                entry["last_error"]    = None
+                entry["error_ts"]      = None
+                entry["fail_streak"]   = 0
+                entry["next_try_at"]   = 0.0
+                # Deployment eterogeneo: uno schema diverso resta esposto ma
+                # marcato, così il consumatore non lo interpreta alla cieca.
+                entry["schema_mismatch"] = payload.get("schema_version") != NODE_METRICS_SCHEMA_VERSION
+    # Prune SOLO dei nodi scomparsi dalla mesh. Un nodo temporaneamente giù
+    # (in backoff, nessun campione fresco) MANTIENE cache e storico: sono
+    # proprio i dati da tenere per capire cosa è successo.
     with _node_metrics_lock:
-        for nid in [k for k, v in _node_metrics_cache.items()
-                    if now - v["last_at"] > METRICS_MAX_STALE_S]:
+        live_ids = {n.get("node_id") for n in _node_list() if n.get("node_id")}
+        for nid in [k for k in _node_metrics_cache if k not in live_ids]:
             _node_metrics_cache.pop(nid, None)
 
 def metrics_loop():

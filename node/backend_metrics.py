@@ -13,9 +13,18 @@
 #
 # Schema della risposta (GET /metrics sul nodo):
 #   node_id / engine / backend_type / capability_profile / load / sampled_at
-#   server  : metriche aggregate a livello di backend (code, util, throughput)
+#   schema_version : versione dello schema (v2), per gestire deployment eterogenei
+#   server  : metriche aggregate a livello di backend (code, util, throughput,
+#             mean/p50/p95 per TTFT e latenza, health)
 #   runtime : metriche PER MODELLO (loaded, vram, EWMA tok/s e latenza,
-#             campioni visti)
+#             campioni visti, data_age_s)
+#
+# Affidabilità del dato (come fidarsi):
+#   server.health.up        -> il backend è raggiungibile (false = giù, non
+#                              "senza dati")
+#   runtime.<m>.data_age_s  -> età dell'ultima misurazione del modello (valori
+#                              vecchi restano visibili ma depotenziate dal
+#                              decay EWMA; il consumatore vede la vetustà)
 #
 # sample_source (runtime.<model>) / tokens_per_sec_source (server) chiarisce
 # COME è stato ottenuto il tok/s, così il consumatore sa quanto fidarsi:
@@ -28,6 +37,7 @@
 import asyncio
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -43,8 +53,20 @@ MEMORY_FILE = Path(DATA_DIR) / "memory.jsonl"
 # cache ogni poll ricontatterebbe il backend (Ollama /api/ps, vLLM /metrics)
 # anche per payload identici al secondo precedente.
 METRICS_CACHE_TTL_S = float(os.getenv("METRICS_CACHE_TTL_S", "8"))
-METRICS_EWMA_WINDOW = int(os.getenv("METRICS_EWMA_WINDOW", "200"))
-METRICS_EWMA_ALPHA  = float(os.getenv("METRICS_EWMA_ALPHA", "0.25"))
+# EWMA tok/s e latenza per modello. Finestra PER MODELLO (non globale): ogni
+# modello tiene le ultime METRICS_EWMA_MODEL_WINDOW interazioni osservate,
+# così un modello molto usato non "ruba" la finestra a quelli usati raramente.
+# I campioni vengono letti dalle ultime METRICS_EWMA_READ_MAX righe di
+# memory.jsonl (limite di I/O; METRICS_EWMA_WINDOW resta come alias
+# retrocompatibile di READ_MAX).
+# Il DECAY temporale pesa i campioni per età (0.5^(age/half_life)): i dati
+# recenti contano di più, ma quelli vecchi NON vengono scartati (restano
+# visibili, depotenziati) — l'indicazione di una metrica rimane anche quando
+# mancano misurazioni fresche, e data_age_s per modello ne dichiara la vetustà.
+METRICS_EWMA_READ_MAX      = int(os.getenv("METRICS_EWMA_READ_MAX", os.getenv("METRICS_EWMA_WINDOW", "2000")))
+METRICS_EWMA_MODEL_WINDOW  = int(os.getenv("METRICS_EWMA_MODEL_WINDOW", "50"))
+METRICS_EWMA_HALF_LIFE_S   = float(os.getenv("METRICS_EWMA_HALF_LIFE_S", "1800"))
+METRICS_EWMA_ALPHA         = float(os.getenv("METRICS_EWMA_ALPHA", "0.25"))
 
 VLLM_METRICS_URL = os.getenv("VLLM_METRICS_URL", "").strip().rstrip("/")
 VLLM_URL         = os.getenv("VLLM_URL", "").strip().rstrip("/")
@@ -106,6 +128,48 @@ def _ewma(values: list, alpha: float = METRICS_EWMA_ALPHA) -> float:
     return round(e, 2) if e is not None else None
 
 
+def _parse_ts(ts) -> float:
+    """Timestamp di una interazione -> epoch float. Accetta ISO (con o senza
+    'Z', con o senza offset) o epoch numerico. Se non parsabile -> None."""
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if not isinstance(ts, str):
+        return None
+    try:
+        s = ts.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def _ewma_decayed(samples: list, alpha: float, half_life_s: float, now: float) -> float:
+    """Media pesata con decay temporale per età, in ordine di arrivo.
+    Ogni campione (value, ts) pesa w = 0.5^(age/half_life): i dati recenti
+    contano di più, quelli vecchi contribuiscono meno ma NON vengono scartati
+    (l'indicazione resta presente anche senza misurazioni fresche). Campioni
+    con ts non parsabile sono trattati come se fossero freschi (age=0)."""
+    e = None
+    total_w = 0.0
+    for v, ts in samples:
+        if v is None:
+            continue
+        ts_e = _parse_ts(ts)
+        age = max(now - ts_e, 0.0) if ts_e is not None else 0.0
+        w = 0.5 ** (age / max(half_life_s, 1.0))
+        if w <= 0:
+            continue
+        if e is None:
+            e, total_w = v, w
+        else:
+            e = (e * total_w + v * w) / (total_w + w)
+            total_w += w
+    return round(e, 2) if e is not None else None
+
+
 def _bytes_to_gb(value) -> float:
     try:
         b = float(value or 0)
@@ -148,9 +212,7 @@ class OllamaMetricsProvider:
         self.base = ollama_url.rstrip("/")
 
     async def collect(self) -> dict:
-        ps, tags = await asyncio.gather(self._ps(), self._tags(), return_exceptions=True)
-        ps   = ps if isinstance(ps, list) else []
-        tags = tags if isinstance(tags, list) else []
+        (ps, ps_err), (tags, tags_err) = await asyncio.gather(self._ps(), self._tags())
 
         loaded = {m.get("name"): m for m in ps if m.get("name")}
 
@@ -159,8 +221,13 @@ class OllamaMetricsProvider:
         # nodi via /memory/push (memory sync inter-nodo). Quelle portano sempre
         # il marker _received_from, le entry locali mai: senza questo filtro la
         # telemetria del nodo risulterebbe inquinata dai campioni dei peer.
+        # Finestra PER MODELLO: ogni modello tiene le ultime
+        # METRICS_EWMA_MODEL_WINDOW interazioni (un modello molto usato non
+        # ruba la finestra agli altri). Il peso di ogni campione decade con
+        # l'età (METRICS_EWMA_HALF_LIFE_S) ma i vecchi non vengono scartati:
+        # data_age_s dichiara la vetustà del dato più recente.
         agg = {}
-        for e in _read_memory(METRICS_EWMA_WINDOW):
+        for e in _read_memory(METRICS_EWMA_READ_MAX):
             if e.get("_received_from"):
                 continue
             m = e.get("model")
@@ -171,58 +238,80 @@ class OllamaMetricsProvider:
             if not tps and e.get("tokens_out") and e.get("duration_ms"):
                 tps = round(e["tokens_out"] / max(e["duration_ms"] / 1000.0, 0.001), 2)
             if tps:
-                d["tps"].append(float(tps))
+                d["tps"].append((float(tps), e.get("ts")))
             if e.get("duration_ms"):
-                d["lat"].append(float(e["duration_ms"]))
-            d["count"] += 1
+                d["lat"].append((float(e["duration_ms"]), e.get("ts")))
+            # requests_seen è il numero di campioni EFFETTIVAMENTE usati dalla
+            # stima (cappato alla finestra per-modello), coerente con l'EWMA:
+            # non il totale di interazioni viste nel file.
+            d["count"] = min(d["count"] + 1, METRICS_EWMA_MODEL_WINDOW)
             d["last_ts"] = e.get("ts") or d["last_ts"]
+            d["tps"] = d["tps"][-METRICS_EWMA_MODEL_WINDOW:]
+            d["lat"] = d["lat"][-METRICS_EWMA_MODEL_WINDOW:]
 
+        now = time.time()
         runtime = {}
         for name, d in agg.items():
             entry = loaded.get(name, {})
+            last_ts_e = _parse_ts(d["last_ts"])
             runtime[name] = {
-                "loaded":             name in loaded,
-                "vram_gb":            _bytes_to_gb(entry.get("size_vram")),
-                "tokens_per_sec_ewma": _ewma(d["tps"]),
-                "latency_ms_ewma":    _ewma(d["lat"]),
-                "requests_seen":      d["count"],
-                "last_sample_ts":     d["last_ts"] or None,
-                "sample_source":      "ewma" if d["count"] > 0 else None,
+                "loaded":              name in loaded,
+                "vram_gb":             _bytes_to_gb(entry.get("size_vram")),
+                "tokens_per_sec_ewma": _ewma_decayed(d["tps"], METRICS_EWMA_ALPHA, METRICS_EWMA_HALF_LIFE_S, now),
+                "latency_ms_ewma":     _ewma_decayed(d["lat"], METRICS_EWMA_ALPHA, METRICS_EWMA_HALF_LIFE_S, now),
+                "requests_seen":       d["count"],
+                "last_sample_ts":      d["last_ts"] or None,
+                "data_age_s":          round(max(now - last_ts_e, 0.0), 1) if last_ts_e is not None else None,
+                "sample_source":       "ewma" if d["count"] > 0 else None,
             }
         # Caricati ma mai visti nei log: stato dal vivo, telemetria assente.
         for name in sorted(loaded):
             if name not in runtime:
                 runtime[name] = {
-                    "loaded":             True,
-                    "vram_gb":            _bytes_to_gb(loaded[name].get("size_vram")),
+                    "loaded":              True,
+                    "vram_gb":             _bytes_to_gb(loaded[name].get("size_vram")),
                     "tokens_per_sec_ewma": None,
-                    "latency_ms_ewma":    None,
-                    "requests_seen":      0,
-                    "last_sample_ts":     None,
-                    "sample_source":      None,
+                    "latency_ms_ewma":     None,
+                    "requests_seen":       0,
+                    "last_sample_ts":      None,
+                    "data_age_s":          None,
+                    "sample_source":       None,
                 }
 
+        # Health: distingue "backend raggiungibile" da "giù o senza dati".
+        # up = almeno un endpoint risponde (ps e tags sono sullo stesso server).
         server = {
             "models_available": sorted({m.get("name") for m in tags if m.get("name")}),
             "models_loaded":    sorted(loaded.keys()),
+            "health": {
+                "up":          (ps_err is None) or (tags_err is None),
+                "last_error":  ps_err or tags_err,
+                "ps_ok":       ps_err is None,
+                "tags_ok":     tags_err is None,
+                "checked_at":  _iso_now(),
+            },
         }
         return {"server": server, "runtime": runtime}
 
-    async def _ps(self) -> list:
+    async def _ps(self) -> tuple:
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
                 r = await client.get(f"{self.base}/api/ps")
-                return r.json().get("models", []) if r.status_code == 200 else []
-        except Exception:
-            return []
+                if r.status_code == 200:
+                    return r.json().get("models", []), None
+                return [], f"HTTP {r.status_code}"
+        except Exception as e:
+            return [], str(e)[:120]
 
-    async def _tags(self) -> list:
+    async def _tags(self) -> tuple:
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
                 r = await client.get(f"{self.base}/api/tags")
-                return r.json().get("models", []) if r.status_code == 200 else []
-        except Exception:
-            return []
+                if r.status_code == 200:
+                    return r.json().get("models", []), None
+                return [], f"HTTP {r.status_code}"
+        except Exception as e:
+            return [], str(e)[:120]
 
 # ── PROVIDER: VLLM ───────────────────────────────────────
 class VLLMMetricsProvider:
@@ -256,7 +345,7 @@ class VLLMMetricsProvider:
     }
 
     async def collect(self) -> dict:
-        raw = await self._fetch_metrics()
+        raw, raw_err = await self._fetch_metrics()
         metrics = self._parse_prom(raw)
         per_model = self._parse_prom_per_model(raw)
 
@@ -277,12 +366,32 @@ class VLLMMetricsProvider:
                     if name == "vllm:avg_generation_throughput_toks_per_s":
                         server["tokens_per_sec_source"] = "gauge_aggregate"
 
-        ttft = self._hist_mean(metrics, "vllm:time_to_first_token_seconds")
-        if ttft is not None:
-            server["ttft_ms_mean"] = round(ttft * 1000, 1)
-        lat = self._hist_mean(metrics, "vllm:request_latency_seconds")
-        if lat is not None:
-            server["latency_ms_mean"] = round(lat * 1000, 1)
+        # Latenza/TTFT: media + p50/p95 dai bucket dell'histogram. Il parser
+        # histogram aggrega su TUTTI i set di label (le vLLM esportano a volte
+        # _sum/_count con label model_name, che il parser flat scarterebbe
+        # facendo sparire la media silenziosamente). La media resta come
+        # riferimento; i quantili sono robusti agli outlier.
+        for base, pname in (
+            ("vllm:time_to_first_token_seconds", "ttft"),
+            ("vllm:request_latency_seconds",     "latency"),
+        ):
+            buckets, bsum, bcount = self._parse_prom_histogram(raw, base)
+            if bcount:
+                server[f"{pname}_ms_mean"] = round(bsum / bcount * 1000, 1)
+            p50 = self._hist_quantile(buckets, bcount, 0.50)
+            p95 = self._hist_quantile(buckets, bcount, 0.95)
+            if p50 is not None:
+                server[f"{pname}_ms_p50"] = round(p50 * 1000, 1)
+            if p95 is not None:
+                server[f"{pname}_ms_p95"] = round(p95 * 1000, 1)
+
+        # Health: distingue "endpoint Prometheus raggiungibile" da "giù".
+        server["health"] = {
+            "up":          (raw_err is None) and (raw != ""),
+            "last_error":  raw_err,
+            "metrics_ok":  (raw_err is None) and (raw != ""),
+            "checked_at":  _iso_now(),
+        }
 
         models = list(self.models)
         if not models:
@@ -303,6 +412,7 @@ class VLLMMetricsProvider:
                 "latency_ms_ewma":     None,
                 "requests_seen":       0,
                 "last_sample_ts":      None,
+                "data_age_s":          None,
                 "sample_source":       None,
             }
             # tok/s per modello: gauge dedicata (se label model_name presente),
@@ -337,23 +447,87 @@ class VLLMMetricsProvider:
 
         return {"server": server, "runtime": runtime}
 
-    async def _fetch_metrics(self) -> str:
+    async def _fetch_metrics(self) -> tuple:
+        """Restituisce (text, error). error è None se l'endpoint Prometheus è
+        stato letto (HTTP 200 o file leggibile): così il consumatore distingue
+        'giù/irraggiungibile' da 'raggiungibile ma senza metriche'."""
         if not self.metrics_url:
-            return ""
+            return "", "VLLM_METRICS_URL non configurato"
         path = self.metrics_url
         if path.startswith("file://"):
             path = path[len("file://"):]
         if path.startswith("/") or path.startswith("./") or path.startswith("~"):
             try:
-                return Path(os.path.expanduser(path)).read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                return ""
+                return Path(os.path.expanduser(path)).read_text(encoding="utf-8", errors="ignore"), None
+            except Exception as e:
+                return "", str(e)[:120]
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
                 r = await client.get(path)
-                return r.text if r.status_code == 200 else ""
-        except Exception:
-            return ""
+                if r.status_code == 200:
+                    return r.text, None
+                return "", f"HTTP {r.status_code}"
+        except Exception as e:
+            return "", str(e)[:120]
+
+    @staticmethod
+    def _parse_prom_histogram(text: str, base_name: str) -> tuple:
+        """Aggrega le serie di un histogram Prometheus (`_bucket{le=...}`,
+        `_sum`, `_count`) SOMMANDO su tutti i set di label (es. model_name).
+        Restituisce (buckets: dict le_float->count, total_sum, total_count)."""
+        buckets = {}
+        total_sum = 0.0
+        total_count = 0.0
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                head, _, rest = line.partition(" ")
+                name = head.split("{", 1)[0]
+                value = float(rest.split(" ", 1)[0])
+            except Exception:
+                continue
+            if name == f"{base_name}_bucket":
+                m = re.search(r'le="([^"]+)"', head)
+                le = m.group(1) if m else "+Inf"
+                if le == "+Inf":
+                    buckets.setdefault("+Inf", 0.0)
+                else:
+                    try:
+                        key = float(le)
+                    except ValueError:
+                        continue
+                    buckets[key] = buckets.get(key, 0.0) + value
+            elif name == f"{base_name}_sum":
+                total_sum += value
+            elif name == f"{base_name}_count":
+                total_count += value
+        return buckets, total_sum, total_count
+
+    @staticmethod
+    def _hist_quantile(buckets: dict, total_count: float, q: float) -> float:
+        """Quantile (0..1) da bucket di histogram, con interpolazione lineare
+        dentro il bucket che contiene il quantile (stima stile Prometheus).
+        None se non ci sono dati."""
+        if total_count <= 0:
+            return None
+        keys = sorted(k for k in buckets if isinstance(k, float))
+        if not keys:
+            return None
+        target = q * total_count
+        cum = 0.0
+        prev_le = None
+        for le in keys:
+            prev_cum = cum
+            cum += buckets[le]
+            if cum >= target:
+                if prev_le is None:
+                    return le
+                frac = (target - prev_cum) / max(buckets[le], 1e-9)
+                return prev_le + (le - prev_le) * frac
+            prev_le = le
+        return keys[-1]
 
     @staticmethod
     def _parse_prom(text: str) -> dict:
@@ -405,13 +579,6 @@ class VLLMMetricsProvider:
         return out
 
     @staticmethod
-    def _hist_mean(metrics: dict, base: str) -> float:
-        s = metrics.get(f"{base}_sum")
-        c = metrics.get(f"{base}_count")
-        if s is None or not c:
-            return None
-        return s / c
-
     async def _fetch_models(self) -> list:
         if not self.base_url:
             return []
@@ -449,6 +616,13 @@ def _write_cache(engine: str, payload: dict):
         _cache[engine] = {"at": time.time(), "payload": payload}
 
 
+# Versione dello schema del payload /metrics. Il control-plane la confronta
+# con la propria (NODE_METRICS_SCHEMA_VERSION) per gestire deployment
+# eterogenei: un nodo con schema diverso non deve essere interpretato alla
+# cieca. Vedi control-plane/main.py.
+NODE_METRICS_SCHEMA_VERSION = 2
+
+
 async def collect_metrics(engine: str = "ollama") -> dict:
     """Payload normalizzato per il control-plane (senza node_id/load, aggiunti
     dalla route in node/main.py). Cache TTL breve per non picchiare il backend
@@ -462,6 +636,7 @@ async def collect_metrics(engine: str = "ollama") -> dict:
     except Exception:
         data = {"server": {}, "runtime": {}}
     payload = {
+        "schema_version":     NODE_METRICS_SCHEMA_VERSION,
         "backend_type":       profile["backend_type"],
         "capability_profile": profile,
         "server":             data.get("server", {}),
