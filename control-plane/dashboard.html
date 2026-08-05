@@ -647,11 +647,9 @@ function renderNodeCard(n){
   var hist=n.history||[];
   if(hist.length>=2){
     var tpsSeries=hist.map(function(h){
-      var s=h.server||{};
-      if(s.tokens_per_sec!=null)return parseFloat(s.tokens_per_sec);
-      var r=h.runtime||{},sum=0,any=false;
-      Object.keys(r).forEach(function(k){var v=r[k].tokens_per_sec_ewma;if(v!=null&&!isNaN(v)){sum+=parseFloat(v);any=true;}});
-      return any?sum:null;
+      // stessa regola del tile: idle -> 0, altrimenti gauge vLLM o EWMA del
+      // modello attivo (Ollama). Niente somma tra modelli.
+      return sampleTokPerSec(h);
     });
     var ldSeries=hist.map(function(h){
       var l=h.load||{};
@@ -719,17 +717,41 @@ function mxTile(k,v,sub){
 
 function mxNodeTps(m){
   if(!m)return {val:'\u2014',src:''};
+  // Tok/s = throughput CORRENTE: con load attivo si mostra il valore, da idle
+  // non c'è attività quindi il tile non deve restare "valorizzato".
+  var ld=m.load||{};
+  var active=parseFloat(ld.active_units!=null?ld.active_units:(ld.active_requests||0))||0;
+  if(active<=0)return {val:'\u2014',src:'idle'};
+  var v=sampleTokPerSec(m);
+  if(v==null)return {val:'\u2014',src:'stima'};
   var s=m.server||{};
   if(s.tokens_per_sec!=null){
-    return {val:mxF1(s.tokens_per_sec),src:s.tokens_per_sec_source?mxSource(s.tokens_per_sec_source):''};
+    return {val:mxF1(v),src:s.tokens_per_sec_source?mxSource(s.tokens_per_sec_source):''};
   }
-  var rt=m.runtime||{},sum=0,any=false;
-  Object.keys(rt).forEach(function(k){
-    var v=rt[k].tokens_per_sec_ewma;
-    if(v!=null&&!isNaN(v)){sum+=parseFloat(v);any=true;}
+  return {val:mxF1(v),src:'\u2248 stima'};
+}
+
+// Tok/s corrente da un campione (tile e sparkline): stessa regola.
+//   idle (load attivo <= 0)         -> 0 (nessuna throughput)
+//   vLLM (server.tokens_per_sec)    -> gauge reale
+//   Ollama                           -> EWMA del modello CARICATO che sta
+//       eseguendo il task (campione più recente: data_age_s minimo). Niente
+//       somma tra modelli: se il modello attivo non ha EWMA -> null.
+function sampleTokPerSec(sample){
+  var ld=sample.load||{};
+  var active=parseFloat(ld.active_units!=null?ld.active_units:(ld.active_requests||0))||0;
+  if(active<=0)return 0;
+  var s=sample.server||{};
+  if(s.tokens_per_sec!=null)return parseFloat(s.tokens_per_sec);
+  var r=sample.runtime||{};
+  var best=null,bestAge=Infinity;
+  Object.keys(r).forEach(function(k){
+    var e=r[k];
+    if(!e.loaded||e.tokens_per_sec_ewma==null)return;
+    var age=e.data_age_s!=null?parseFloat(e.data_age_s):Infinity;
+    if(age<bestAge){bestAge=age;best=parseFloat(e.tokens_per_sec_ewma);}
   });
-  if(any)return {val:mxF1(sum),src:'ewma \u03a3'};
-  return {val:'\u2014',src:''};
+  return best;
 }
 
 function sparkline(vals,w,h){
