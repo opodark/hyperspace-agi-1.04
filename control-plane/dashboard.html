@@ -899,12 +899,20 @@ function computeScore(n){
   return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime+bs*w.backend;
 }
 
-// Score badge helper
+// Score badge helper — colorazione coerente con lo score v1.05 (relativo
+// alla flotta dei candidati, normalizzazione min-max lato CP):
+//   ALTO   >= 0.65  (nodo che domina i candidati su qualità/struttura)
+//   MEDIO  0.35..0.65
+//   BASSO  < 0.35   (debole, degraded, stale o senza telemetria)
+// Un nodo leaf/model_manager/VRAM=0 "iniziale" ora si assesta sul MEDIO,
+// non più su ALTO come con la vecchia normalizzazione degenere (_norm_high
+// restituiva 1.0 anche senza confronto).
 function scoreBadge(score){
   var s=parseFloat(score)||0;
+  var lbl=s>=0.65?'ALTO':s>=0.35?'MEDIO':'BASSO';
   var cls=s>=0.65?'score-high':s>=0.35?'score-mid':'score-low';
   var icon=s>=0.65?'&#9650;':s>=0.35?'&#9644;':'&#9660;';
-  return '<span class="score-badge '+cls+'">'+icon+' '+s.toFixed(2)+'</span>';
+  return '<span class="score-badge '+cls+'" title="Score routing v1.05 (relativo alla flotta dei candidati): ALTO &ge;0.65 &middot; MEDIO &ge;0.35 &middot; BASSO &lt;0.35">'+icon+' '+lbl+' '+s.toFixed(2)+'</span>';
 }
 
 // Load badge helper — mostra active/capacity (schema v3) con fallback v2

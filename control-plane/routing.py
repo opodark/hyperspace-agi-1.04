@@ -33,11 +33,16 @@ def _minmax(values):
 
 
 def _norm_high(x, lo, hi):
-    """Normalizza 0..1 (più alto meglio); 1.0 se singolo valore o invariato."""
+    """Normalizza 0..1 (più alto meglio). 0.5 NEUTRO se non c'è confronto
+    (un solo valore o tutti uguali: min==max non dà informazione relativa).
+    Restituire 1.0 in quel caso gonfiava lo score di nodi deboli in flotte
+    degenerate (es. un solo nodo leaf/model_manager con VRAM=0 -> vram_s=1.0,
+    score strutturale 0.79 colorato ALTO). In routing la selezione è relativa:
+    un pareggio resta un pareggio (0.5 ovunque), l'ordine non cambia."""
     if x is None:
         return 0.5
     if hi is None or hi == lo:
-        return 1.0
+        return 0.5
     return _clamp((x - lo) / (hi - lo))
 
 
