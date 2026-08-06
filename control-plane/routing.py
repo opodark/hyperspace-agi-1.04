@@ -195,13 +195,13 @@ def _structural_score(s: dict, weights: dict) -> tuple:
          "load": float(weights.get("load", 0.25)),
          "tier": float(weights.get("tier", 0.10)),
          "uptime": float(weights.get("uptime", 0.10)),
-         "engine": float(weights.get("engine", 0.15))}
+         "backend": float(weights.get("backend", weights.get("engine", 0.15)))}
     wsum = sum(w.values()) or 1.0
     terms = [("vram_s", w["vram"] / wsum * s["vram_s"]),
              ("load_s", w["load"] / wsum * s["load_s"]),
              ("tier_s", w["tier"] / wsum * s["tier_s"]),
              ("uptime_s", w["uptime"] / wsum * s["uptime_s"]),
-             ("backend_s", w["engine"] / wsum * s["backend_s"])]
+             ("backend_s", w["backend"] / wsum * s["backend_s"])]
     score = sum(v for _, v in terms)
     return score, terms
 

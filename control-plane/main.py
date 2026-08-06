@@ -113,7 +113,7 @@ _ROUTING_WEIGHTS = {
     "load": ROUTING_WEIGHT_LOAD,
     "tier": ROUTING_WEIGHT_TIER,
     "uptime": ROUTING_WEIGHT_UPTIME,
-    "engine": ROUTING_WEIGHT_ENGINE,
+    "backend": ROUTING_WEIGHT_ENGINE,
     "latency": ROUTING_WEIGHT_LATENCY,
     "tput": ROUTING_WEIGHT_TPUT,
     "gpu": ROUTING_WEIGHT_GPU,
@@ -557,22 +557,57 @@ def _score_terms_breakdown(breakdown: dict) -> float:
              "lat_s", "tps_s", "gpu_s", "recent_s")
     return sum(float(breakdown.get(k, 0.0)) for k in terms)
 
+
+# ── fonte unica degli score di routing (display) ──────────────────────────
+# Sia /mesh/nodes che /metrics/nodes leggono da qui: lo score della flotta
+# viene calcolato UNA volta (contesto: candidati attivi eseguibili) e
+# messo in cache per un breve TTL. Prima c'erano due calcoli indipendenti
+# (e per i nodi non eseguibili /metrics/nodes normalizzava su un contesto
+# degenere di un solo nodo, dove _norm_high vale 1.0: score più alto del
+# badge). Con la cache i due punti di visualizzazione non possono divergere.
+_SCORE_CACHE = {}
+_SCORE_CACHE_AT = 0.0
+_SCORE_CACHE_TTL = max(5.0, 0.75 * METRICS_POLL_INTERVAL_S)
+_score_cache_lock = threading.Lock()
+
+def _fleet_scores(force: bool = False) -> dict:
+    """{node_id: {"score": float, "total": float, "breakdown": dict}} per la
+    flotta attiva eseguibile. Ricalcola solo se la cache è scaduta (o force)."""
+    global _SCORE_CACHE, _SCORE_CACHE_AT
+    now = time.time()
+    with _score_cache_lock:
+        if not force and _SCORE_CACHE and now - _SCORE_CACHE_AT < _SCORE_CACHE_TTL:
+            return _SCORE_CACHE
+        out = {}
+        for n, score, breakdown in _routing_scores(_active_executable()):
+            nid = n.get("node_id", "")
+            if not nid:
+                continue
+            out[nid] = {
+                "score": round(score, 4),
+                "total": round(_score_terms_breakdown(breakdown), 4),
+                "breakdown": {k: round(v, 4) for k, v in breakdown.items()},
+            }
+        _SCORE_CACHE = out
+        _SCORE_CACHE_AT = now
+        return out
+
 def _node_score_components(node: dict, model: str = "") -> dict:
-    """Breakdown dello score di routing, nel contesto della flotta attiva
-    corrente (la normalizzazione è relativa ai candidati, non assoluta).
-    Ogni termine è già pesato; _score_terms_breakdown() ne dà la somma esatta
-    (= score effettivo, penalità inclusa). health_s/q sono gate informativi."""
-    ctx = _active_executable()
-    if not any(n.get("node_id") == node.get("node_id") for n in ctx):
-        ctx = ctx + [node]
-    for _n, _score, breakdown in _routing_scores(ctx, model=model):
-        if _n.get("node_id") == node.get("node_id"):
-            return breakdown
-    return {}
+    """Breakdown dello score di routing del nodo (fonte unica: _fleet_scores).
+    Ritorna il dict con i termini pesati più 'total'. Vuoto se il nodo non è
+    un candidato routabile (nessuno score da mostrare, coerente col badge)."""
+    e = _fleet_scores().get(node.get("node_id", ""))
+    if not e:
+        return {}
+    return dict(e["breakdown"], total=e["total"])
 
 def _node_score(node: dict, model: str = "") -> float:
-    """Score di routing effettivo del nodo nel contesto della flotta attiva
-    corrente (normalizzazione sui candidati + penalità ultimo scelto)."""
+    """Score di routing effettivo del nodo. Cerca nella fonte unica
+    (_fleet_scores); per contesti fuori flotta (es. topologia che include un
+    nodo non eseguibile) ricalcola su contesto ampliato come prima."""
+    e = _fleet_scores().get(node.get("node_id", ""))
+    if e is not None:
+        return e["score"]
     ctx = _active_executable()
     if not any(n.get("node_id") == node.get("node_id") for n in ctx):
         ctx = ctx + [node]
@@ -1781,7 +1816,19 @@ def mesh_announce():
 
 @app.route('/mesh/nodes')
 def get_mesh_nodes():
-    return jsonify(_node_list())
+    nodes = _node_list()
+    # Score reale v1.05 (ibrido qualità+strutturale, normalizzato sul set di
+    # candidati + penalità "ultimo scelto") dalla FONTE UNICA _fleet_scores():
+    # la stessa usata da /metrics/nodes, così badge e breakdown coincidono.
+    # La dashboard non deve ricostruire la formula lato client con i vecchi
+    # pesi statici. Nodi non candidati (inattivi, senza endpoint eseguibile)
+    # restano senza routing_score: il client usa il fallback strutturale.
+    scores = _fleet_scores()
+    for n in nodes:
+        e = scores.get(n.get("node_id", ""))
+        if e:
+            n["routing_score"] = e["score"]
+    return jsonify(nodes)
 
 @app.route('/metrics/nodes')
 def get_metrics_nodes():
@@ -1812,9 +1859,11 @@ def get_metrics_nodes():
         sample_age_s = round(max(now - entry["last_at"], 0.0), 1) if entry and entry["last_at"] else None
         breakdown = None
         if n.get("status") == "active":
+            # Fonte unica _fleet_scores(): stesso valore di /mesh/nodes
+            # (routing_score). Nessun ricalcolo con contesto degenere.
             comp = _node_score_components(n)
-            breakdown = {k: round(v, 4) for k, v in comp.items()}
-            breakdown["total"] = round(_score_terms_breakdown(comp), 4)
+            if comp:
+                breakdown = comp
         nodes.append({
             "node_id":    nid,
             "alias":      _node_aliases.get(nid, ""),
@@ -2113,7 +2162,7 @@ def get_routing_weights():
         "load":   ROUTING_WEIGHT_LOAD,
         "tier":   ROUTING_WEIGHT_TIER,
         "uptime": ROUTING_WEIGHT_UPTIME,
-        "engine": ROUTING_WEIGHT_ENGINE,
+        "backend": ROUTING_WEIGHT_ENGINE,
         "latency": ROUTING_WEIGHT_LATENCY,
         "tput":   ROUTING_WEIGHT_TPUT,
         "gpu":    ROUTING_WEIGHT_GPU,

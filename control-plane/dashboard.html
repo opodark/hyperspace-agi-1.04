@@ -203,6 +203,7 @@ main{padding:18px 20px;display:grid}
 .mx-scorebar span{display:block;height:100%}
 .mx-score-terms{display:flex;flex-wrap:wrap;gap:6px 12px;font-family:var(--font-mono);font-size:.58rem;color:var(--text-muted)}
 .mx-score-terms b{color:var(--text)}
+.mx-score-check{font-family:var(--font-mono);font-size:.54rem;color:var(--text-faint);margin-top:2px}
 .mx-node-err{color:var(--error);font-size:.68rem;font-family:var(--font-mono);word-break:break-all}
 .mx-node-sub{font-size:.62rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin:8px 0 4px}
 /* setup */
@@ -688,30 +689,44 @@ function renderNodeCard(n){
   }
 
   // Score routing (breakdown) — v1.05: blocchi STRUTTURALE (VRAM/Load/Tier/
-  // Uptime/Backend) e QUALITÀ osservata (Lat/Tput/GPU); health_s e q sono
-  // gate informativi mostrati come testo, recent_s (penalità ultimo scelto)
-  // è l'eventuale contributo negativo.
+  // Uptime/Backend) e QUALITÀ osservata (Lat/Tput/GPU). bd.total è lo STESSO
+  // valore del badge "mesh nodes" (fonte unica _fleet_scores lato CP). I
+  // termini in legenda sono già pesati E scalati da health_s, quindi vale
+  // sempre l'invariante: Σ termini + recent_s = totale (verificata; lo scarto
+  // è solo l'arrotondamento dei termini a 4 decimali). recent_s (penalità
+  // "ultimo scelto") è un contributo negativo esplicito, non nascosto nel
+  // totale, così la somma visibile torna.
   var scoreHtml='';
-  if(bd){
+  if(!bd){
+    scoreHtml='<div class="mx-node-sub">Score routing '
+      +'<span style="color:var(--text-faint);text-transform:none;font-weight:400">non routabile: nessuno score</span></div>';
+  }else{
     var terms=[['vram_s','--primary','VRAM'],['load_s','--success','Load'],['tier_s','--info','Tier'],['uptime_s','--warning','Uptime'],['backend_s','--dream','Backend'],['lat_s','--primary','Lat'],['tps_s','--success','Tput'],['gpu_s','--info','GPU']];
-    var total=parseFloat(bd.total);
-    if(isNaN(total))total=0;
-    var segs='',leg='';
+    var total=parseFloat(bd.total);if(isNaN(total))total=0;
+    var rows=[];
     terms.forEach(function(t){
       var v=parseFloat(bd[t[0]]||0);
       if(v<=0)return; // termini assenti (es. qualità non disponibile) non vanno in barra/legenda
-      var pct=total>0?Math.max(0,(v/total)*100):0;
-      segs+='<span style="background:var('+t[1]+');width:'+pct.toFixed(1)+'%" title="'+t[2]+' '+mxF2(v)+'"></span>';
-      leg+='<span><span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:var('+t[1]+');margin-right:4px"></span>'+t[2]+' <b>'+mxF2(v)+'</b></span>';
+      rows.push({k:t[2],v:v,c:t[1]});
     });
-    var gate='';
-    if(bd.health_s!=null)gate+='health '+mxF1(bd.health_s)+' ';
-    if(bd.q!=null)gate+='q '+mxF2(bd.q);
-    if(bd.recent_s!=null&&parseFloat(bd.recent_s)<0)gate+=' recent '+mxF2(bd.recent_s);
-    scoreHtml='<div class="mx-node-sub">Score routing '+(total>0?'&#183; totale '+mxF2(total):'')
-      +(gate?' &#183; <span style="color:var(--text-faint)">'+gate+'</span>':'')+'</div>'
+    var pos=0;rows.forEach(function(r){pos+=r.v;});
+    var segs='',leg='';
+    rows.forEach(function(r){
+      var pct=pos>0?(r.v/pos)*100:0;
+      segs+='<span style="background:var('+r.c+');width:'+pct.toFixed(1)+'%" title="'+r.k+' '+mxF2(r.v)+'"></span>';
+      leg+='<span><span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:var('+r.c+');margin-right:4px"></span>'+r.k+' <b>'+mxF2(r.v)+'</b></span>';
+    });
+    var rec=parseFloat(bd.recent_s)||0;
+    var gate=[];
+    if(bd.health_s!=null)gate.push('health \u00d7'+mxF2(bd.health_s));
+    if(bd.q!=null)gate.push('q '+mxF2(bd.q));
+    scoreHtml='<div class="mx-node-sub">Score routing '+scoreBadge(total)
+      +(gate.length?' &#183; <span style="color:var(--text-faint)">'+gate.join(' &#183; ')+'</span>':'')+'</div>'
       +'<div class="mx-scorebar">'+segs+'</div>'
-      +'<div class="mx-score-terms">'+leg+'</div>';
+      +'<div class="mx-score-terms">'+leg
+      +(rec<0?'<span><span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:var(--error);margin-right:4px"></span>recent <b style="color:var(--error)">'+mxF2(rec)+'</b></span>':'')
+      +'</div>'
+      +'<div class="mx-score-check">\u03a3 termini + recent = totale &#183; termini gi\u00e0 scalati da health_s</div>';
   }
 
   var errHtml='';
@@ -844,7 +859,7 @@ setInterval(refreshHbBar,5000); refreshHbBar();
 // dashboard riflette davvero cosa decide il routing invece di una formula
 // hardcoded lato client che potrebbe disallinearsi silenziosamente se i
 // pesi vengono cambiati via .env (ROUTING_WEIGHT_*).
-var ROUTING_WEIGHTS={vram:0.55,load:0.25,tier:0.10,uptime:0.10,engine:0.15,latency:0.45,tput:0.35,gpu:0.20,recent_penalty:0.10,recent_window:45,backend_scores:{},max_candidates:3};
+var ROUTING_WEIGHTS={vram:0.55,load:0.25,tier:0.10,uptime:0.10,backend:0.15,latency:0.45,tput:0.35,gpu:0.20,recent_penalty:0.10,recent_window:45,backend_scores:{},max_candidates:3};
 async function loadRoutingWeights(){
   try{
     var d=await(await fetch('/config/routing-weights')).json();
@@ -855,10 +870,15 @@ loadRoutingWeights();
 setInterval(loadRoutingWeights,60000);
 
 function computeScore(n){
-  // Badge visivo: approssimazione del blocco STRUTTURALE dello score v1.05
+  // Score REALE v1.05 se il control-plane lo espone (routing_score su
+  // /mesh/nodes, ibrido qualità+strutturale normalizzato sui candidati).
+  // Solo per nodi senza di esso (es. tabella registry, nodi inattivi)
+  // ricade su un'approssimazione del blocco STRUTTURALE dello score v1.05
   // (la normalizzazione qualità avviene lato control-plane sul set di
   // candidati, vedi control-plane/routing.py). Schema v3 (conteggi/capacity/
   // saturation/degraded) con fallback v2 per nodi non aggiornati.
+  var rs=parseFloat(n.routing_score);
+  if(!isNaN(rs))return rs;
   var tierS={'root':3,'hub':2,'leaf':1};
   var ts=(tierS[n.tier||'leaf']||1)/3;
   var vs=Math.min(parseFloat(n.vram_gb||0),24)/24;
@@ -876,7 +896,7 @@ function computeScore(n){
   var bs=(ROUTING_WEIGHTS.backend_scores||{})[bt];
   if(bs===undefined)bs=0.5;
   var w=ROUTING_WEIGHTS;
-  return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime+bs*w.engine;
+  return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime+bs*w.backend;
 }
 
 // Score badge helper
@@ -1054,6 +1074,14 @@ function reLayout(){
 
 // Registry
 async function refreshRegistry(){
+  // Mappa node_id -> score reale v1.05 (esposto da /mesh/nodes): la tabella
+  // registry legge /registry/nodes (payload del servizio registry, senza
+  // score) ma deve mostrare lo stesso score del resto della dashboard.
+  var scoreMap={};
+  try{
+    var mn=await(await fetch('/mesh/nodes')).json();
+    mn.forEach(function(x){if(x.node_id&&x.routing_score!=null)scoreMap[x.node_id]=x.routing_score;});
+  }catch(e){}
   try{
     var rh=await(await fetch('/registry/health')).json();
     var dot=document.getElementById('regDot'),lbl=document.getElementById('regStatusLabel');
@@ -1083,7 +1111,7 @@ async function refreshRegistry(){
     	  :String(n.last_seen).replace('T',' ').slice(0,19);
       }
       var ep=n.endpoint||n.public_address||'';
-      var score=computeScore(n);
+      var score=(scoreMap[n.node_id]!=null)?scoreMap[n.node_id]:computeScore(n);
       return '<tr>'
         +'<td><span class="reg-id" title="'+escH(n.node_id||'')+'">'+(n.node_id||'?').slice(0,20)+'&hellip;</span></td>'
         +'<td><span class="reg-ep">'+escH(ep)+'</span></td>'
