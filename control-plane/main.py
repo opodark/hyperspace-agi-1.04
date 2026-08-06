@@ -2226,6 +2226,446 @@ def rotate_secret():
     return jsonify({"ok": True, "secret": new_secret,
                     "rotatedAt": advanced_config['security']['secretRotatedAt']})
 
+# ── ENV DEL CONTROL-PLANE (modifica a runtime + persistenza su .env) ───────
+# Il control-plane legge la configurazione dalle env var a ogni avvio (vedi
+# sezione CONFIG). Questa sezione espone alla dashboard (tab Setup) le
+# variabili rilevanti del CP: le modifiche vengono applicate SUBITO al
+# runtime (globals del processo, senza ricreare il container) E scritte sul
+# .env della repo (montato in /repo dal docker-compose), così restano valide
+# anche al prossimo `docker compose up`. Le chiavi non esposte qui non sono
+# modificabili da remoto, di proposito. Se il .env non è scrivibile (es. CP
+# avviato fuori Docker), la modifica runtime viene comunque applicata.
+_ENV_FILE_PATH    = os.getenv("ENV_FILE_PATH",    os.path.join(BASE_DIR, "..", ".env"))
+_ENV_EXAMPLE_PATH = os.getenv("ENV_EXAMPLE_PATH", os.path.join(BASE_DIR, "..", ".env.example"))
+_env_lock = threading.Lock()
+
+_ENV_META = [
+    # Inferenza e modelli
+    {"section": "Inferenza e modelli", "key": "OLLAMA_URL", "type": "str",
+     "label": "Ollama / LM Studio URL",
+     "hint": "URL del backend di inferenza locale. In Docker usa http://host.docker.internal:11434 (Ollama) o http://host.docker.internal:1234 (LM Studio).",
+     "default": "http://host.docker.internal:11434"},
+    {"section": "Inferenza e modelli", "key": "OLLAMA_MODEL", "type": "str",
+     "label": "Modello di default",
+     "hint": "Modello usato quando una richiesta non ne specifica uno esplicitamente (es. qwen3:8b)."},
+    {"section": "Inferenza e modelli", "key": "INFERENCE_BACKEND", "type": "str",
+     "label": "Backend di inferenza",
+     "options": ["ollama", "lmstudio", "vllm"],
+     "hint": "Motore che serve l'inferenza su questa installazione. Letto sia dal nodo sia dal CP (per il fallback ollama-direct).",
+     "default": "ollama"},
+    # Routing e scoring
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_VRAM", "type": "float",
+     "label": "Peso VRAM",
+     "hint": "La VRAM domina lo scoring: un nodo CPU-only, anche libero, è strutturalmente lento e va preferito solo come ultima risorsa.",
+     "default": "0.55"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_LOAD", "type": "float",
+     "label": "Peso carico",
+     "hint": "Peso del carico reale del nodo (active/queued requests da /status), non dei semplici peer attivi.",
+     "default": "0.25"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_TIER", "type": "float",
+     "label": "Peso tier",
+     "hint": "Peso del tier del nodo (root/hub/leaf): i nodi gerarchicamente superiori vengono preferiti a parità di altre condizioni.",
+     "default": "0.10"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_UPTIME", "type": "float",
+     "label": "Peso uptime",
+     "hint": "Peso dell'affidabilità nel tempo: quanto a lungo il nodo è rimasto attivo e raggiungibile.",
+     "default": "0.10"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_ENGINE", "type": "float",
+     "label": "Peso backend_type",
+     "hint": "Peso del paradigma di serving (inference_server vs model_manager), NON del singolo prodotto (vllm/ollama/...). I punteggi per tipo vivono in shared/engine_profiles.py.",
+     "default": "0.15"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_LATENCY", "type": "float",
+     "label": "Peso latenza (qualità)",
+     "hint": "Peso della latenza osservata per modello. Blocco 'qualità': attivo solo quando i campioni /metrics sono freschi, altrimenti decide il blocco strutturale.",
+     "default": "0.45"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_TPUT", "type": "float",
+     "label": "Peso throughput (qualità)",
+     "hint": "Peso del throughput (tok/s) osservato per modello — blocco 'qualità', valido quando le metriche sono fresche.",
+     "default": "0.35"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_GPU", "type": "float",
+     "label": "Peso pressione VRAM (qualità)",
+     "hint": "Peso della pressione VRAM del motore del nodo (quanto è sotto sforzo) — blocco 'qualità'.",
+     "default": "0.20"},
+    {"section": "Routing e scoring", "key": "ROUTING_RECENT_PENALTY", "type": "float",
+     "label": "Penalità 'ultimo scelto'",
+     "hint": "Depenalizza lievemente il nodo appena usato, con decadimento esponenziale nella finestra, per rompere i pareggi tra nodi di pari valore senza far perdere un nodo migliore.",
+     "default": "0.10"},
+    {"section": "Routing e scoring", "key": "ROUTING_RECENT_WINDOW_S", "type": "float",
+     "label": "Finestra penalità (s)",
+     "hint": "Secondi in cui la penalità 'ultimo scelto' resta attiva e decade esponenzialmente.",
+     "default": "45"},
+    {"section": "Routing e scoring", "key": "ROUTING_MAX_CANDIDATES", "type": "int",
+     "label": "Candidati provati in sequenza",
+     "hint": "Quando un nodo risponde 'occupato' (503 node_busy_timeout) o non ha il modello, il CP prova i migliori N candidati per score PRIMA di ricadere su ollama-direct/federazione.",
+     "default": "3"},
+    # Memoria a lungo termine
+    {"section": "Memoria a lungo termine", "key": "MEMORY_TTL_DAYS", "type": "int",
+     "label": "TTL memoria (giorni)",
+     "hint": "Le voci di memoria più vecchie di questo numero di giorni vengono rimosse alla prossima potatura (memoria a lungo termine / tool omega).",
+     "default": "7"},
+    {"section": "Memoria a lungo termine", "key": "MEMORY_MAX_ENTRIES", "type": "int",
+     "label": "Max voci in memoria",
+     "hint": "Numero massimo di voci conservate: oltre questo tetto vengono potate le più vecchie.",
+     "default": "200"},
+    # Telemetria nodi
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_POLL_INTERVAL_S", "type": "int",
+     "label": "Poll /metrics (s)",
+     "hint": "Cadenza con cui il CP interroga il /metrics di ogni nodo attivo (serve allo scoring metric-driven e ai mini-grafici della dashboard).",
+     "default": "20"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_POLL_TIMEOUT_S", "type": "int",
+     "label": "Timeout poll (s)",
+     "hint": "Timeout per ogni singolo fetch di /metrics verso un nodo.",
+     "default": "4"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_WINDOW", "type": "int",
+     "label": "Finestra campioni",
+     "hint": "Quanti campioni /metrics restano in memoria per nodo (storico per i mini-grafici).",
+     "default": "20"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_MAX_WORKERS", "type": "int",
+     "label": "Fetch paralleli",
+     "hint": "Max fetch /metrics eseguiti in parallelo: con molti nodi la raccolta seriale sforerebbe l'intervallo di poll.",
+     "default": "8"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_BACKOFF_BASE_S", "type": "float",
+     "label": "Backoff base (s)",
+     "hint": "Base dell'escalation esponenziale per i nodi irraggiungibili: prossimo tentativo a BASE × 2^fallimenti (non vengono martellati a ogni ciclo).",
+     "default": "10"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_MAX_BACKOFF_S", "type": "float",
+     "label": "Backoff massimo (s)",
+     "hint": "Tetto massimo del backoff sui nodi irraggiungibili: oltre questo non si sale mai.",
+     "default": "120"},
+    # Web search
+    {"section": "Web search", "key": "SEARXNG_URL", "type": "str",
+     "label": "URL SearXNG",
+     "hint": "URL del motore di ricerca self-hosted (container searxng) usato dal tool web_search. Se irraggiungibile c'è un fallback automatico su DuckDuckGo lite.",
+     "default": "http://searxng:8080"},
+    # OmniRoute
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_ENABLED", "type": "bool",
+     "label": "OmniRoute abilitato",
+     "hint": "Attiva l'ultimo livello di fallback quando NESSUN nodo della mesh (locale o federato) può rispondere. false lo disattiva del tutto.",
+     "default": "true"},
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_URL", "type": "str",
+     "label": "URL OmniRoute",
+     "hint": "URL del gateway OmniRoute (container nella rete Docker). Normalmente non va modificato.",
+     "default": "http://omniroute:20128"},
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_API_KEY", "type": "password",
+     "label": "API key OmniRoute",
+     "hint": "Opzionale: per collegare provider propri dalla dashboard OmniRoute (http://<host>:20128). Vuota = usa i provider free-tier di default. Lascia *** per non cambiarla.",
+     "default": ""},
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_MODEL", "type": "str",
+     "label": "Modello OmniRoute",
+     "hint": "Modello richiesto a OmniRoute. 'auto' = selezione automatica del provider disponibile.",
+     "default": "auto"},
+    # Compressione prompt
+    {"section": "Compressione prompt", "key": "PROMPT_COMPRESSION_ENABLED", "type": "bool",
+     "label": "Compressione prompt",
+     "hint": "Comprime i prompt lunghi via Caveman (engine reale di OmniRoute) prima dell'inferenza sulla mesh locale. Attivala solo dopo averla testata: comprime il fraseggio e può confondere modelli piccoli/quantizzati.",
+     "default": "false"},
+    {"section": "Compressione prompt", "key": "PROMPT_COMPRESSION_MODE", "type": "str",
+     "label": "Modalità compressione",
+     "options": ["lite", "standard", "aggressive", "ultra", "rtk", "stacked"],
+     "hint": "Quanto aggressivamente comprimere il fraseggio: lite → standard → aggressive → ultra (più aggressivo = più perde sostanza).",
+     "default": "standard"},
+    {"section": "Compressione prompt", "key": "PROMPT_COMPRESSION_MIN_CHARS", "type": "int",
+     "label": "Soglia minima (chars)",
+     "hint": "Solo i prompt con più di questo numero di caratteri vengono compressi.",
+     "default": "200"},
+    # Federazione
+    {"section": "Federazione CP-to-CP", "key": "FEDERATION_ENABLED", "type": "bool",
+     "label": "Federazione abilitata",
+     "hint": "false isola completamente questo CP dagli altri siti: niente pairing, niente esecuzione di task remoti via /federate/execute.",
+     "default": "true"},
+    {"section": "Federazione CP-to-CP", "key": "FEDERATION_PUBLIC_URL", "type": "str",
+     "label": "URL pubblico del federation-gateway",
+     "hint": "URL pubblico del TUO federation-gateway (non del CP!): quello da condividere con l'admin di un altro sito per il pairing. Vuoto finché non hai un gateway pubblico attivo.",
+     "default": ""},
+    # Mesh
+    {"section": "Mesh", "key": "NODE_ENDPOINTS", "type": "str",
+     "label": "Endpoint nodi (virgola)",
+     "hint": "Lista separata da virgole degli endpoint dei nodi noti, es. node-1:8084,node-2:8084. I nodi si registrano comunque da soli al registry.",
+     "default": "node-1:8084"},
+    {"section": "Mesh", "key": "TOOL_CAPABLE_MODELS", "type": "str",
+     "label": "Modelli tool-capable (override)",
+     "hint": "'*' abilita le tool call su TUTTI i modelli; vuoto = usa i pattern automatici (qwen3, llama3.x, mistral, phi4...). Utile per modelli che supportano il function calling ma non sono nei pattern.",
+     "default": ""},
+]
+
+_ENV_ROUTING_WEIGHT_KEYS = {
+    "ROUTING_WEIGHT_VRAM", "ROUTING_WEIGHT_LOAD", "ROUTING_WEIGHT_TIER",
+    "ROUTING_WEIGHT_UPTIME", "ROUTING_WEIGHT_ENGINE", "ROUTING_WEIGHT_LATENCY",
+    "ROUTING_WEIGHT_TPUT", "ROUTING_WEIGHT_GPU",
+    "ROUTING_RECENT_PENALTY", "ROUTING_RECENT_WINDOW_S",
+}
+
+# Getter del valore CORRENTE a runtime (fonte di verità per la dashboard).
+_ENV_RUNTIME_GET = {
+    "OLLAMA_URL": lambda: OLLAMA_URL,
+    "OLLAMA_MODEL": lambda: DEFAULT_MODEL,
+    "INFERENCE_BACKEND": lambda: INFERENCE_BACKEND,
+    "ROUTING_WEIGHT_VRAM": lambda: ROUTING_WEIGHT_VRAM,
+    "ROUTING_WEIGHT_LOAD": lambda: ROUTING_WEIGHT_LOAD,
+    "ROUTING_WEIGHT_TIER": lambda: ROUTING_WEIGHT_TIER,
+    "ROUTING_WEIGHT_UPTIME": lambda: ROUTING_WEIGHT_UPTIME,
+    "ROUTING_WEIGHT_ENGINE": lambda: ROUTING_WEIGHT_ENGINE,
+    "ROUTING_WEIGHT_LATENCY": lambda: ROUTING_WEIGHT_LATENCY,
+    "ROUTING_WEIGHT_TPUT": lambda: ROUTING_WEIGHT_TPUT,
+    "ROUTING_WEIGHT_GPU": lambda: ROUTING_WEIGHT_GPU,
+    "ROUTING_RECENT_PENALTY": lambda: ROUTING_RECENT_PENALTY,
+    "ROUTING_RECENT_WINDOW_S": lambda: ROUTING_RECENT_WINDOW_S,
+    "ROUTING_MAX_CANDIDATES": lambda: ROUTING_MAX_CANDIDATES,
+    "MEMORY_TTL_DAYS": lambda: MEMORY_TTL_DAYS,
+    "MEMORY_MAX_ENTRIES": lambda: MEMORY_MAX_ENTRIES,
+    "SEARXNG_URL": lambda: SEARXNG_URL,
+    "METRICS_POLL_INTERVAL_S": lambda: METRICS_POLL_INTERVAL_S,
+    "METRICS_POLL_TIMEOUT_S": lambda: METRICS_POLL_TIMEOUT_S,
+    "METRICS_WINDOW": lambda: METRICS_WINDOW,
+    "METRICS_MAX_WORKERS": lambda: METRICS_MAX_WORKERS,
+    "METRICS_BACKOFF_BASE_S": lambda: METRICS_BACKOFF_BASE_S,
+    "METRICS_MAX_BACKOFF_S": lambda: METRICS_MAX_BACKOFF_S,
+    "OMNIROUTE_URL": lambda: OMNIROUTE_URL,
+    "OMNIROUTE_API_KEY": lambda: OMNIROUTE_API_KEY,
+    "OMNIROUTE_MODEL": lambda: OMNIROUTE_MODEL,
+    "OMNIROUTE_ENABLED": lambda: OMNIROUTE_ENABLED,
+    "PROMPT_COMPRESSION_ENABLED": lambda: PROMPT_COMPRESSION_ENABLED,
+    "PROMPT_COMPRESSION_MODE": lambda: PROMPT_COMPRESSION_MODE,
+    "PROMPT_COMPRESSION_MIN_CHARS": lambda: PROMPT_COMPRESSION_MIN_CHARS,
+    "FEDERATION_ENABLED": lambda: FEDERATION_ENABLED,
+    "FEDERATION_PUBLIC_URL": lambda: FEDERATION_PUBLIC_URL,
+    "NODE_ENDPOINTS": lambda: ",".join(NODE_ENDPOINTS),
+    "TOOL_CAPABLE_MODELS": lambda: _TOOL_CAPABLE_OVERRIDE,
+}
+
+def _coerce_env_val(meta: dict, raw):
+    t = meta["type"]
+    if t == "bool":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    if t == "int":
+        return int(str(raw).strip())
+    if t == "float":
+        return float(str(raw).strip())
+    return str(raw).strip()
+
+def _env_str(meta: dict, cv) -> str:
+    if meta["type"] == "bool":
+        return "true" if cv else "false"
+    return str(cv)
+
+def _apply_env_runtime(meta: dict, cv) -> None:
+    """Applica la modifica SUBITO al runtime (globals del processo) e ad
+    os.environ. Il file .env viene scritto separatamente da _persist_env."""
+    global OLLAMA_URL, DEFAULT_MODEL, INFERENCE_BACKEND
+    global MEMORY_TTL_DAYS, MEMORY_MAX_ENTRIES, SEARXNG_URL
+    global ROUTING_MAX_CANDIDATES
+    global METRICS_POLL_INTERVAL_S, METRICS_POLL_TIMEOUT_S, METRICS_WINDOW
+    global METRICS_MAX_WORKERS, METRICS_BACKOFF_BASE_S, METRICS_MAX_BACKOFF_S
+    global OMNIROUTE_URL, OMNIROUTE_API_KEY, OMNIROUTE_MODEL, OMNIROUTE_ENABLED
+    global PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MODE, PROMPT_COMPRESSION_MIN_CHARS
+    global FEDERATION_ENABLED, FEDERATION_PUBLIC_URL
+    global NODE_ENDPOINTS, _TOOL_CAPABLE_OVERRIDE, _ROUTING_WEIGHTS, _SCORE_CACHE_TTL
+
+    key = meta["key"]
+    os.environ[key] = str(cv)
+
+    changed_weights = False
+    if key == "OLLAMA_URL":
+        OLLAMA_URL = str(cv).rstrip("/")
+        advanced_config["ollama"]["url"] = OLLAMA_URL
+    elif key == "OLLAMA_MODEL":
+        DEFAULT_MODEL = str(cv)
+        advanced_config["ollama"]["defaultModel"] = DEFAULT_MODEL
+    elif key == "INFERENCE_BACKEND":
+        INFERENCE_BACKEND = str(cv)
+    elif key == "MEMORY_TTL_DAYS":
+        MEMORY_TTL_DAYS = int(cv)
+    elif key == "MEMORY_MAX_ENTRIES":
+        MEMORY_MAX_ENTRIES = int(cv)
+    elif key == "SEARXNG_URL":
+        SEARXNG_URL = str(cv).rstrip("/")
+    elif key in _ENV_ROUTING_WEIGHT_KEYS:
+        globals()[key] = float(cv)
+        changed_weights = True
+    elif key == "ROUTING_MAX_CANDIDATES":
+        ROUTING_MAX_CANDIDATES = max(1, int(cv))
+    elif key == "METRICS_POLL_INTERVAL_S":
+        METRICS_POLL_INTERVAL_S = max(2, int(cv))
+        _SCORE_CACHE_TTL = max(5.0, 0.75 * METRICS_POLL_INTERVAL_S)
+    elif key == "METRICS_POLL_TIMEOUT_S":
+        METRICS_POLL_TIMEOUT_S = max(1, int(cv))
+    elif key == "METRICS_WINDOW":
+        METRICS_WINDOW = max(2, int(cv))
+        with _node_metrics_lock:
+            for entry in _node_metrics_cache.values():
+                entry["samples"] = deque(entry["samples"], maxlen=METRICS_WINDOW)
+    elif key == "METRICS_MAX_WORKERS":
+        METRICS_MAX_WORKERS = max(1, int(cv))
+    elif key == "METRICS_BACKOFF_BASE_S":
+        METRICS_BACKOFF_BASE_S = max(0.5, float(cv))
+    elif key == "METRICS_MAX_BACKOFF_S":
+        METRICS_MAX_BACKOFF_S = max(METRICS_BACKOFF_BASE_S, float(cv))
+    elif key == "OMNIROUTE_URL":
+        OMNIROUTE_URL = str(cv).rstrip("/")
+    elif key == "OMNIROUTE_API_KEY":
+        OMNIROUTE_API_KEY = str(cv).strip()
+    elif key == "OMNIROUTE_MODEL":
+        OMNIROUTE_MODEL = str(cv)
+    elif key == "OMNIROUTE_ENABLED":
+        OMNIROUTE_ENABLED = bool(cv)
+    elif key == "PROMPT_COMPRESSION_ENABLED":
+        PROMPT_COMPRESSION_ENABLED = bool(cv)
+    elif key == "PROMPT_COMPRESSION_MODE":
+        PROMPT_COMPRESSION_MODE = str(cv)
+    elif key == "PROMPT_COMPRESSION_MIN_CHARS":
+        PROMPT_COMPRESSION_MIN_CHARS = max(0, int(cv))
+    elif key == "FEDERATION_ENABLED":
+        FEDERATION_ENABLED = bool(cv)
+    elif key == "FEDERATION_PUBLIC_URL":
+        FEDERATION_PUBLIC_URL = str(cv).rstrip("/")
+    elif key == "NODE_ENDPOINTS":
+        NODE_ENDPOINTS = [e.strip() for e in str(cv).split(",") if e.strip()]
+        for ep in NODE_ENDPOINTS:
+            _known_endpoints.add(_normalize_endpoint(ep))
+    elif key == "TOOL_CAPABLE_MODELS":
+        _TOOL_CAPABLE_OVERRIDE = str(cv)
+
+    if changed_weights:
+        _ROUTING_WEIGHTS.update({
+            "vram":            ROUTING_WEIGHT_VRAM,
+            "load":            ROUTING_WEIGHT_LOAD,
+            "tier":            ROUTING_WEIGHT_TIER,
+            "uptime":          ROUTING_WEIGHT_UPTIME,
+            "backend":         ROUTING_WEIGHT_ENGINE,
+            "latency":         ROUTING_WEIGHT_LATENCY,
+            "tput":            ROUTING_WEIGHT_TPUT,
+            "gpu":             ROUTING_WEIGHT_GPU,
+            "recent_penalty":  ROUTING_RECENT_PENALTY,
+            "recent_window":   ROUTING_RECENT_WINDOW_S,
+        })
+        _invalidate_fleet_scores()
+
+def _read_env_text() -> str:
+    path = _ENV_FILE_PATH if os.path.isfile(_ENV_FILE_PATH) else _ENV_EXAMPLE_PATH
+    if not os.path.isfile(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def _setvar(text: str, key: str, val: str) -> str:
+    """Replace-or-append di una riga KEY=VALUE. Mirror della logica usata dal
+    wizard di onboarding (onboarding/server.py) e dall'installer."""
+    pattern = rf"^{re.escape(key)}=.*$"
+    replacement = f"{key}={val}"
+    new_text, n = re.subn(pattern, replacement, text, flags=re.MULTILINE)
+    if n == 0:
+        if new_text and not new_text.endswith("\n"):
+            new_text += "\n"
+        new_text += replacement + "\n"
+    return new_text
+
+def _env_file_writable() -> bool:
+    try:
+        if not os.path.isdir(os.path.dirname(_ENV_FILE_PATH) or "."):
+            return False
+        if os.path.isfile(_ENV_FILE_PATH):
+            return os.access(_ENV_FILE_PATH, os.W_OK)
+        return os.access(os.path.dirname(_ENV_FILE_PATH) or ".", os.W_OK)
+    except Exception:
+        return False
+
+def _persist_env(updates: dict) -> str:
+    """Scrive le chiavi sul .env della repo (replace-or-append). Ritorna il
+    path usato. Lancia RuntimeError se non scrivibile."""
+    with _env_lock:
+        text = _read_env_text()
+        for key, val in updates.items():
+            text = _setvar(text, key, str(val))
+        with open(_ENV_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(text)
+        return _ENV_FILE_PATH
+
+@app.route('/config/env')
+def get_config_env():
+    persisted = {}
+    if os.path.isfile(_ENV_FILE_PATH):
+        try:
+            with open(_ENV_FILE_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    persisted[k.strip()] = v.strip()
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"lettura {_ENV_FILE_PATH}: {e}",
+                            "vars": [], "file_path": _ENV_FILE_PATH})
+    out = []
+    for meta in _ENV_META:
+        key = meta["key"]
+        getter = _ENV_RUNTIME_GET.get(key)
+        if getter is not None:
+            try:
+                value = getter()
+            except Exception:
+                value = persisted.get(key, meta.get("default", ""))
+        elif key in persisted:
+            value = persisted[key]
+        else:
+            value = os.environ.get(key, meta.get("default", ""))
+        value = "" if value is None else str(value)
+        if meta.get("type") == "password" and value:
+            value = "***"
+        item = {"key": key, "section": meta["section"], "label": meta["label"],
+                "type": meta["type"], "value": value,
+                "default": str(meta.get("default", "")), "hint": meta.get("hint", "")}
+        if meta.get("options"):
+            item["options"] = meta["options"]
+        out.append(item)
+    return jsonify({"ok": True, "file_path": _ENV_FILE_PATH,
+                    "writable": _env_file_writable(), "vars": out})
+
+@app.route('/config/env', methods=['POST'])
+def set_config_env():
+    data = request.get_json(force=True, silent=True) or {}
+    updates = data.get("updates") or data
+    if not isinstance(updates, dict) or not updates:
+        return jsonify({"ok": False, "error": "payload non valido"}), 400
+    by_key = {m["key"]: m for m in _ENV_META}
+    applied = {}
+    errors = []
+    with _env_lock:
+        for key, raw in updates.items():
+            meta = by_key.get(key)
+            if not meta:
+                errors.append(f"chiave sconosciuta: {key}")
+                continue
+            # Password: vuoto o '***' = lascia invariata
+            if meta.get("type") == "password" and raw in (None, "", "***"):
+                continue
+            try:
+                cv = _coerce_env_val(meta, raw)
+            except (ValueError, TypeError):
+                errors.append(f"{key}: valore non valido per tipo {meta['type']}")
+                continue
+            _apply_env_runtime(meta, cv)
+            applied[key] = _env_str(meta, cv)
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors),
+                        "applied": list(applied.keys())}), 400
+    if not applied:
+        return jsonify({"ok": True, "applied": []})
+    try:
+        path = _persist_env(applied)
+    except Exception as e:
+        # Il runtime è già aggiornato; il .env no. Non facciamo fallire la
+        # richiesta: le modifiche restano attive finché il container non viene
+        # ricreato (e a quel punto andrebbero riapplicate).
+        push_log('system', 'Env CP: persistenza su .env fallita', str(e), status='warn')
+        return jsonify({"ok": True, "applied": list(applied.keys()),
+                        "persisted": False,
+                        "error": f"runtime ok, ma .env non scritto: {e}"})
+    push_log('system', 'Env CP aggiornato', ', '.join(applied.keys()), status='success')
+    return jsonify({"ok": True, "applied": list(applied.keys()),
+                    "persisted": True, "path": path})
+
 @app.route('/models')
 def list_models():
     return jsonify(_fetch_models())

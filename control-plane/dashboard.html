@@ -215,6 +215,17 @@ main{padding:18px 20px;display:grid}
 .legacy-body{display:none;padding-top:10px;border-top:1px solid var(--divider);margin-top:4px}
 .legacy-body.open{display:block}
 .legacy-warn{background:var(--warning-bg);border:1px solid var(--warning);border-radius:var(--radius);padding:7px 11px;font-size:.7rem;color:var(--warning);margin-bottom:10px}
+.env-banner{font-size:.68rem;color:var(--text-muted);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:7px 11px;margin-bottom:10px}
+.env-banner.err{color:var(--warning);border-color:var(--warning);background:var(--warning-bg)}
+.env-note{font-size:.64rem;color:var(--text-faint);background:var(--surface2);border-left:2px solid var(--border);border-radius:4px;padding:6px 10px;margin:4px 0 10px;line-height:1.45}
+.env-sec{font-size:.62rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin:12px 0 6px;padding-bottom:3px;border-bottom:1px solid var(--divider)}
+.env-row{display:grid;grid-template-columns:260px 1fr;gap:10px;align-items:start;padding:5px 0}
+@media(max-width:680px){.env-row{grid-template-columns:1fr}}
+.env-row .label{font-size:.7rem}
+.env-row .env-key{display:block;font-family:var(--font-mono);font-size:.56rem;color:var(--text-faint);margin-top:2px}
+.env-row .hint{font-size:.64rem;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4}
+.env-ctl{display:flex;gap:8px}
+.env-ctl .inp{flex:1;min-width:0}
 /* modal */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:300;align-items:center;justify-content:center}
 .modal-overlay.open{display:flex}
@@ -448,6 +459,15 @@ main{padding:18px 20px;display:grid}
       <span class="hint" id="rsAt"></span>
     </div>
   </div>
+  <div class="card"><div class="card-title">&#129513;&#65039; Control-Plane Env</div>
+    <div class="env-banner" id="envBanner">Caricamento variabili...</div>
+    <div class="env-note">I pesi di routing sono <b>relativi</b> (non devono sommare a 1). Il blocco "qualità" (latenza/throughput/GPU) decide quando i campioni /metrics dei nodi sono freschi; altrimenti vale il blocco strutturale (VRAM/carico/tier/uptime).</div>
+    <div id="cpEnvList"></div>
+    <div class="setup-footer">
+      <button class="btn btn-ghost" onclick="loadEnv()">&#8634; Ricarica</button>
+      <button class="btn btn-primary" onclick="saveEnv()">&#128190; Applica e salva .env</button>
+    </div>
+  </div>
   <div class="card">
     <div class="legacy-toggle" onclick="toggleLegacy()">
       <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,1 9,5 2,9"/></svg>
@@ -504,7 +524,7 @@ function showPanel(name,btn){
   if(name==='tasks')refreshTaskHistory();
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
-  if(name==='setup')loadCfg();
+  if(name==='setup'){loadCfg();loadEnv();}
 }
 
 // ── METRICS: live/summary (sessione) + telemetria nodi (/metrics/nodes) ──
@@ -1322,6 +1342,50 @@ async function saveCfg(){
   };
   var d=await(await fetch('/config/advanced',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
   showMsg(d.ok?'Salvato':'Errore');
+}
+// Control-Plane Env: modifica a runtime + persistenza su .env
+var CP_ENV=null;
+function envField(v){
+  var id='env_'+v.key;
+  if(v.type==='bool')return '<label class="cb" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="'+id+'"'+(v.value==='true'?' checked':'')+'/><span>attivo</span></label>';
+  if(v.options)return '<select id="'+id+'" class="inp">'+v.options.map(function(o){return '<option'+(o===v.value?' selected':'')+'>'+escH(o)+'</option>';}).join('')+'</select>';
+  if(v.type==='int'||v.type==='float')return '<input id="'+id+'" type="number" step="'+(v.type==='float'?'any':'1')+'" class="inp inp-mono" value="'+escH(v.value)+'"/>';
+  return '<input id="'+id+'" type="'+(v.type==='password'?'password':'text')+'" class="inp inp-mono" value="'+escH(v.value)+'" autocomplete="off"/>';
+}
+async function loadEnv(){
+  var banner=document.getElementById('envBanner');
+  var el=document.getElementById('cpEnvList');
+  var d=await(await fetch('/config/env')).json();
+  if(!d.ok){banner.textContent='Errore: '+(d.error||'unreachable');banner.className='env-banner err';el.innerHTML='';return;}
+  CP_ENV=d;
+  banner.textContent=d.writable
+    ?'File .env: '+d.file_path+' — le modifiche sono applicate SUBITO al runtime e salvate qui (sopravvivono al riavvio).'
+    :'File .env non scrivibile ('+d.file_path+'). Le modifiche saranno applicate SOLO al runtime corrente (persi al riavvio del container).';
+  banner.className=d.writable?'env-banner':'env-banner err';
+  var html='',lastSec='';
+  d.vars.forEach(function(v){
+    if(v.section!==lastSec){html+='<div class="env-sec">'+escH(v.section)+'</div>';lastSec=v.section;}
+    html+='<div class="env-row"><div><label class="label" for="env_'+v.key+'">'+escH(v.label)+'</label><span class="env-key">'+escH(v.key)+'</span></div>'
+       +'<div><div class="env-ctl">'+envField(v)+'</div>'+(v.hint?'<span class="hint">'+escH(v.hint)+'</span>':'')+'</div></div>';
+  });
+  el.innerHTML=html;
+}
+async function saveEnv(){
+  if(!CP_ENV){loadEnv();return;}
+  var updates={};
+  CP_ENV.vars.forEach(function(v){
+    var inp=document.getElementById('env_'+v.key);
+    if(!inp)return;
+    if(v.type==='bool')updates[v.key]=inp.checked?'true':'false';
+    else updates[v.key]=inp.value;
+  });
+  var d=await(await fetch('/config/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:updates})})).json();
+  if(d.ok){
+    showMsg('Env aggiornato ('+d.applied.length+' variabili)'+(d.persisted===false?' — .env NON scritto, valido solo fino a riavvio':''));
+    loadEnv();
+  }else{
+    showMsg('Errore: '+(d.error||'unknown'));
+  }
 }
 async function rotateSecret(){
   var d=await(await fetch('/config/secret/rotate',{method:'POST'})).json();

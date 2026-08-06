@@ -376,8 +376,15 @@ services:
         condition: service_started
     ports:
       - "8085:8085"
+    volumes:
+      # Il CP monta la repo (come onboarding) SOLO per leggere/scrivere il .env
+      # dalla tab Setup: le modifiche alle env var vengono applicate a runtime
+      # e persistite qui, così sopravvivono al riavvio del container.
+      - .:/repo
     environment:
       PYTHONUNBUFFERED: "1"
+      ENV_FILE_PATH:    /repo/.env
+      ENV_EXAMPLE_PATH: /repo/.env.example
       NODE_ENDPOINTS: "${NODE_ENDPOINTS:-node-1:8084}"
       REGISTRY_URL: "http://registry:${REGISTRY_PORT:-8086}"
       REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
