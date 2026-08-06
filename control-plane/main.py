@@ -1,5 +1,13 @@
 # control-plane/main.py
-# HyperSpace AGI v1.04 — Control Plane
+# HyperSpace AGI v1.05 — Control Plane
+# v1.05: routing metric-driven — scoring IBRIDO (qualità osservata
+#        latenza/throughput per modello + pressione VRAM motore) normalizzato
+#        sul set di candidati, con fallback strutturale (vram/tier/uptime/
+#        backend_type) quando i campioni /metrics mancano o sono stale;
+#        saturazione del nodo da schema /metrics v3 (saturation/degraded),
+#        fallback v2 per nodi non aggiornati; penalità "ultimo scelto" per
+#        bilanciare il carico tra nodi di pari valore. Backend: punteggio per
+#        backend_type (inference_server vs model_manager), non più per prodotto.
 # feat: /v1/chat/completions OpenAI-compatible endpoint
 # feat: tool calling loop — web_search, omega_query, omega_store, get_mesh_status
 # feat: memory sync inter-nodo nell'heartbeat + smart task routing (carico + tier/vram/uptime)
@@ -49,7 +57,8 @@ from shared.identity import (
     make_request_headers,
     verify_request_headers,
 )
-from shared.engine_profiles import engine_score as _shared_engine_score, all_engine_scores as _all_engine_scores
+from shared.engine_profiles import all_backend_type_scores as _all_backend_scores
+import routing as _routing
 from connectors.manager import ConnectorManager
 
 app = Flask(__name__)
@@ -74,29 +83,48 @@ MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080").rstrip("/")
 
 # ── ROUTING: PESI DELLO SCORING ─────────────────────────────────────────────
-# La VRAM pesa più di tutto il resto messo insieme: un nodo CPU-only
-# (vram_gb=0) va nettamente sfavorito anche quando è libero, perché è
-# strutturalmente lento — il carico serve solo a evitare di accodare
-# richieste su un nodo GPU già saturo, non a preferire la CPU rispetto a una
-# GPU semplicemente occupata. Non serve che sommino esattamente a 1.0, sono
-# pesi relativi. Esposti in sola lettura via /config/routing-weights così la
-# dashboard può allineare il badge visivo senza duplicare i default a mano.
+# v1.05: scoring IBRIDO metric-driven (vedi control-plane/routing.py). Il
+# blocco QUALITÀ (latenza/throughput per modello, pressione VRAM motore)
+# domina quando i campioni /metrics sono freschi; il blocco STRUTTURALE
+# (vram/tier/uptime/backend) è il fallback quando i dati mancano. I pesi
+# strutturali restano configurabili via ROUTING_WEIGHT_* (sono relativi, non
+# devono sommare a 1); quelli di qualità via ROUTING_WEIGHT_LATENCY/TPUT/GPU.
+# Esposti in sola lettura via /config/routing-weights.
 ROUTING_WEIGHT_VRAM   = float(os.getenv("ROUTING_WEIGHT_VRAM", "0.55"))
 ROUTING_WEIGHT_LOAD   = float(os.getenv("ROUTING_WEIGHT_LOAD", "0.25"))
 ROUTING_WEIGHT_TIER   = float(os.getenv("ROUTING_WEIGHT_TIER", "0.10"))
 ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
-ROUTING_WEIGHT_VRAM   = float(os.getenv("ROUTING_WEIGHT_VRAM", "0.55"))
-ROUTING_WEIGHT_LOAD   = float(os.getenv("ROUTING_WEIGHT_LOAD", "0.25"))
-ROUTING_WEIGHT_TIER   = float(os.getenv("ROUTING_WEIGHT_TIER", "0.10"))
-ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
-# Peso dedicato al motore d'inferenza (vllm/tgi con batching continuo reggono
-# meglio il carico concorrente rispetto a Ollama, che serializza le
-# generazioni) — NON entra in calculate_tier(): quello resta un giudizio
-# sulla topologia/affidabilità del nodo, non sulla sua capacità di serving.
-# Il punteggio per motore (_ENGINE_SCORES/ENGINE_SCORE_DEFAULT) vive in
-# shared/engine_profiles.py — UNICA fonte di verità, riusata anche dal nodo
-# per stimare il default di MAX_LOAD_UNITS. Non duplicare qui.
+# Peso del paradigma di serving (backend_type: inference_server vs
+# model_manager) nel blocco strutturale. Il punteggio per backend_type vive
+# in shared/engine_profiles.py — unica fonte di verità.
 ROUTING_WEIGHT_ENGINE = float(os.getenv("ROUTING_WEIGHT_ENGINE", "0.15"))
+# Blocco qualità (in funzione delle metriche osservate).
+ROUTING_WEIGHT_LATENCY = float(os.getenv("ROUTING_WEIGHT_LATENCY", "0.45"))
+ROUTING_WEIGHT_TPUT    = float(os.getenv("ROUTING_WEIGHT_TPUT", "0.35"))
+ROUTING_WEIGHT_GPU     = float(os.getenv("ROUTING_WEIGHT_GPU", "0.20"))
+# Bilanciamento: penalità "ultimo scelto" — il nodo appena usato viene
+# lievemente depenalizzato, con decadimento esponenziale nella finestra.
+# Piccola a default: rompe i pareggi senza far perdere un nodo migliore.
+ROUTING_RECENT_PENALTY  = float(os.getenv("ROUTING_RECENT_PENALTY", "0.10"))
+ROUTING_RECENT_WINDOW_S = float(os.getenv("ROUTING_RECENT_WINDOW_S", "45"))
+
+_ROUTING_WEIGHTS = {
+    "vram": ROUTING_WEIGHT_VRAM,
+    "load": ROUTING_WEIGHT_LOAD,
+    "tier": ROUTING_WEIGHT_TIER,
+    "uptime": ROUTING_WEIGHT_UPTIME,
+    "engine": ROUTING_WEIGHT_ENGINE,
+    "latency": ROUTING_WEIGHT_LATENCY,
+    "tput": ROUTING_WEIGHT_TPUT,
+    "gpu": ROUTING_WEIGHT_GPU,
+    "recent_penalty": ROUTING_RECENT_PENALTY,
+    "recent_window": ROUTING_RECENT_WINDOW_S,
+}
+
+# Nodi appena scelti dal router (node_id -> istante), per il termine
+# recent_s. Protetto da lock: la selezione gira su più thread di request.
+_recent_routing_lock = threading.Lock()
+_recent_routing_picks: dict = {}
 
 # ── TELEMETRIA NODI: pull periodico di /metrics dai nodi ───────────────────
 # Il control-plane interroga ogni nodo attivo sul suo /metrics (payload
@@ -121,10 +149,7 @@ METRICS_MAX_BACKOFF_S  = float(os.getenv("METRICS_MAX_BACKOFF_S", "120"))
 # NODE_METRICS_SCHEMA_VERSION in node/backend_metrics.py: i payload con
 # versione diversa (deployment eterogeneo) restano esposti ma marcati
 # schema_mismatch, così il consumatore non li interpreta alla cieca.
-NODE_METRICS_SCHEMA_VERSION = 2
-
-def _engine_score(node: dict) -> float:
-    return _shared_engine_score(node.get("engine", ""))
+NODE_METRICS_SCHEMA_VERSION = 3
 # Quanti nodi candidati (per score decrescente) il control-plane prova in
 # sequenza prima di ricadere su federazione/ollama-direct, quando un nodo
 # risponde "occupato" (503 node_busy_timeout).
@@ -222,13 +247,16 @@ def _register_local_node():
         "endpoint":     ep,
         "tier":         tier,
         "status":       "active",
-        "version":      "1.04.0",
+        "version":      "1.05.0",
         "vram_gb":      vram_gb,
         "peers_active": len(active_others),
         "uptime_s":     0,
         "active_requests": 0,
         "queued_requests": 0,
-        "max_concurrent":  1,
+        "capacity":        1,
+        "saturation":      0.0,
+        "degraded":        False,
+        "backend_type":    "model_manager",
         "last_seen":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "capabilities": ["ollama", "control-plane"],
         "is_local":     True,
@@ -468,8 +496,6 @@ def _memory_append(entry: dict):
         _save_memory(entries)
 
 # ── SMART TASK ROUTING ────────────────────────────────────────────────────────
-_TIER_SCORE = {"root": 3, "hub": 2, "leaf": 1}
-
 class NodeBusyError(Exception):
     """Il nodo ha risposto 503 node_busy_timeout: la sua coda interna è
     rimasta satura oltre il timeout configurato lato nodo. Il chiamante
@@ -478,51 +504,82 @@ class NodeBusyError(Exception):
         self.node_id = node_id
         super().__init__(message or f"nodo {node_id} occupato (coda satura)")
 
-def _node_score_components(node: dict) -> dict:
-    """Sotto-score della formula di routing, esposti uno a uno (es. via
-    /metrics/nodes) per spiegare il ranking. Ogni valore è il TERMINE già
-    pesato, così la somma dei cinque dà esattamente lo score del router.
-    Design (vedi _node_score): la VRAM pesa più di tutto (ROUTING_WEIGHT_VRAM):
-    un nodo CPU-only è strutturalmente lento anche da libero. Il carico è
-    letto in UNITÀ (active_load+queued_load rispetto a max_load_units, non
-    più conteggio di richieste) — un nodo con una richiesta pesante su un
-    modello 70B pesa quanto più richieste leggere insieme, non quanto una
-    singola richiesta qualsiasi. Fallback sui vecchi nomi
-    (active_requests/max_concurrent) per i nodi non ancora aggiornati al
-    nuovo formato — vedi node/main.py. Il motore d'inferenza (engine_s) è un
-    termine separato: riflette quanto il motore regge carico concorrente
-    reale (es. batching continuo), cosa che load_s da sola non cattura
-    perché guarda solo l'occupazione attuale, non la capacità strutturale.
-    peers_active NON entra nel punteggio: è una metrica di connettività
-    P2P, non un proxy di capacità di calcolo."""
-    tier_s   = _TIER_SCORE.get(node.get("tier", "leaf"), 1) / 3.0
-    vram_s   = min(float(node.get("vram_gb", 0)), 24.0) / 24.0
-    uptime_s = min(int(node.get("uptime_s", 0)), 604800) / 604800.0
-    engine_s = _engine_score(node)
+def _latest_metrics(nid: str) -> dict:
+    """Ultimo campione /metrics del nodo, senza mutare la cache. None se
+    mai raccolto (nodo non ancora pollato o irraggiungibile)."""
+    with _node_metrics_lock:
+        entry = _node_metrics_cache.get(nid)
+        if not entry:
+            return None
+        samples = entry["samples"]
+        return samples[-1] if samples else None
 
-    max_c    = max(float(node.get("max_load_units", node.get("max_concurrent", 1)) or 1), 0.01)
-    active_r = float(node.get("active_load", node.get("active_requests", 0)))
-    queued_r = float(node.get("queued_load", node.get("queued_requests", 0)))
-    # >1.0 quando il nodo ha già più carico (attivo+in coda) della sua
-    # capacità dichiarata; il clamp a 1.5 evita che un nodo con una coda
-    # mostruosa faccia collassare load_s in modo indistinguibile da uno
-    # solo leggermente sovraccarico.
-    load_ratio = min((active_r + queued_r) / max_c, 1.5)
-    load_s     = max(0.0, 1.0 - load_ratio)
+def _recent_ts(node_id: str):
+    with _recent_routing_lock:
+        return _recent_routing_picks.get(node_id)
 
-    return {
-        "vram_s":   vram_s   * ROUTING_WEIGHT_VRAM,
-        "load_s":   load_s   * ROUTING_WEIGHT_LOAD,
-        "tier_s":   tier_s   * ROUTING_WEIGHT_TIER,
-        "uptime_s": uptime_s * ROUTING_WEIGHT_UPTIME,
-        "engine_s": engine_s * ROUTING_WEIGHT_ENGINE,
-    }
+def _record_routing_pick(node_id: str):
+    """Registra un tentativo di routing verso il nodo (per il termine
+    recent_s). Pruning dei riferimenti scaduti per non far crescere la mappa."""
+    now = time.time()
+    with _recent_routing_lock:
+        _recent_routing_picks[node_id] = now
+        cutoff = now - 3 * ROUTING_RECENT_WINDOW_S
+        for k in [k for k, v in _recent_routing_picks.items() if v < cutoff]:
+            _recent_routing_picks.pop(k, None)
 
-def _node_score(node: dict) -> float:
-    """Score di routing: somma dei termini pesati di _node_score_components.
-    Mantenuto come somma diretta per non cambiare il comportamento del router."""
-    comp = _node_score_components(node)
-    return comp["vram_s"] + comp["load_s"] + comp["tier_s"] + comp["uptime_s"] + comp["engine_s"]
+def _active_executable() -> list:
+    return [n for n in _node_list() if n.get("status") == "active" and _best_endpoint(n)]
+
+def _routing_scores(active_nodes: list, model: str = "") -> list:
+    """[(node, score, breakdown)] ordinati per score decrescente. Fonde ogni
+    nodo col suo ultimo campione /metrics, normalizza i segnali sul set di
+    candidati (control-plane/routing.py, min-max dinamico) e applica la
+    penalità "ultimo scelto". E' la funzione centrale del routing v1.05:
+    lo score è una funzione delle metriche osservate, non solo di pesi."""
+    metrics_map = {n.get("node_id", ""): _latest_metrics(n.get("node_id", "")) for n in active_nodes}
+    sigs = [_routing.extract_signal(n, metrics_map.get(n.get("node_id", "")), model)
+            for n in active_nodes]
+    _routing.rank_signals(sigs, _ROUTING_WEIGHTS, metrics_interval_s=METRICS_POLL_INTERVAL_S)
+    now = time.time()
+    out = []
+    for n, sig in zip(active_nodes, sigs):
+        score, breakdown = _routing.compute_score(
+            sig, _ROUTING_WEIGHTS, _recent_ts(n.get("node_id", "")), now)
+        out.append((n, score, breakdown))
+    out.sort(key=lambda t: t[1], reverse=True)
+    return out
+
+def _score_terms_breakdown(breakdown: dict) -> float:
+    """Somma dei soli termini pesati (esclusi health_s/q, che sono gate
+    informativi non additivi). Coincide con lo score effettivo."""
+    terms = ("vram_s", "load_s", "tier_s", "uptime_s", "backend_s",
+             "lat_s", "tps_s", "gpu_s", "recent_s")
+    return sum(float(breakdown.get(k, 0.0)) for k in terms)
+
+def _node_score_components(node: dict, model: str = "") -> dict:
+    """Breakdown dello score di routing, nel contesto della flotta attiva
+    corrente (la normalizzazione è relativa ai candidati, non assoluta).
+    Ogni termine è già pesato; _score_terms_breakdown() ne dà la somma esatta
+    (= score effettivo, penalità inclusa). health_s/q sono gate informativi."""
+    ctx = _active_executable()
+    if not any(n.get("node_id") == node.get("node_id") for n in ctx):
+        ctx = ctx + [node]
+    for _n, _score, breakdown in _routing_scores(ctx, model=model):
+        if _n.get("node_id") == node.get("node_id"):
+            return breakdown
+    return {}
+
+def _node_score(node: dict, model: str = "") -> float:
+    """Score di routing effettivo del nodo nel contesto della flotta attiva
+    corrente (normalizzazione sui candidati + penalità ultimo scelto)."""
+    ctx = _active_executable()
+    if not any(n.get("node_id") == node.get("node_id") for n in ctx):
+        ctx = ctx + [node]
+    for _n, score, _b in _routing_scores(ctx, model=model):
+        if _n.get("node_id") == node.get("node_id"):
+            return score
+    return 0.0
 
 def _node_ids_with_model(model: str) -> set:
     """Node id di chi ha davvero 'model' installato, secondo l'ultimo giro di
@@ -578,7 +635,12 @@ def _select_best_node(active_nodes: list, model: str = "") -> dict:
             _last_discarded_warn_ids = discarded_ids
     if not executable:
         return None
-    return max(executable, key=_node_score)
+    ranked = _routing_scores(executable, model=model)
+    if not ranked:
+        return None
+    best = ranked[0][0]
+    _record_routing_pick(best.get("node_id", ""))
+    return best
 
 def _rank_candidate_nodes(active_nodes: list, pinned_node_id: str = None, max_candidates: int = None, model: str = "") -> list:
     """Nodi eseguibili ordinati per score decrescente, col nodo pinnato (se
@@ -595,7 +657,7 @@ def _rank_candidate_nodes(active_nodes: list, pinned_node_id: str = None, max_ca
     executable = [n for n in candidates if _best_endpoint(n)]
     if not executable:
         return []
-    ranked = sorted(executable, key=_node_score, reverse=True)
+    ranked = [n for n, _s, _b in _routing_scores(executable, model=model)]
     if pinned_node_id:
         pinned = next((n for n in ranked if n.get("node_id") == pinned_node_id), None)
         if pinned:
@@ -916,9 +978,10 @@ def _tool_get_mesh_status(args: dict) -> str:
         f"Ultimo tick: {hb_state.get('last_tick', 'N/A')}",
     ]
     for n in active:
+        cap = n.get("capacity", n.get("max_concurrent", 1))
         lines.append(
             f"  - {n.get('node_id','?')[:16]} | tier={n.get('tier','?')} vram={n.get('vram_gb','?')}GB "
-            f"load={n.get('active_requests',0)}/{n.get('max_concurrent',1)}"
+            f"load={n.get('active_requests',0)}/{cap}"
         )
     return "\n".join(lines)
 
@@ -1358,6 +1421,7 @@ def v1_chat_completions():
             for candidate in candidates:
                 node_id_c  = candidate.get("node_id", "cp")
                 endpoint_c = _best_endpoint(candidate)
+                _record_routing_pick(node_id_c)
                 try:
                     body = json.dumps(stream_data, sort_keys=True).encode()
                     headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
@@ -1439,6 +1503,7 @@ def v1_chat_completions():
     for candidate in candidates:
         node_id  = candidate.get("node_id", "cp")
         endpoint = _best_endpoint(candidate)
+        _record_routing_pick(node_id)
         task["node"] = node_id
         db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
         push_log('inter_node_message', f'task {task_id} -> {node_id[:12]}',
@@ -1749,7 +1814,7 @@ def get_metrics_nodes():
         if n.get("status") == "active":
             comp = _node_score_components(n)
             breakdown = {k: round(v, 4) for k, v in comp.items()}
-            breakdown["total"] = round(sum(comp.values()), 4)
+            breakdown["total"] = round(_score_terms_breakdown(comp), 4)
         nodes.append({
             "node_id":    nid,
             "alias":      _node_aliases.get(nid, ""),
@@ -2049,7 +2114,12 @@ def get_routing_weights():
         "tier":   ROUTING_WEIGHT_TIER,
         "uptime": ROUTING_WEIGHT_UPTIME,
         "engine": ROUTING_WEIGHT_ENGINE,
-        "engine_scores": _all_engine_scores(),
+        "latency": ROUTING_WEIGHT_LATENCY,
+        "tput":   ROUTING_WEIGHT_TPUT,
+        "gpu":    ROUTING_WEIGHT_GPU,
+        "recent_penalty": ROUTING_RECENT_PENALTY,
+        "recent_window":  ROUTING_RECENT_WINDOW_S,
+        "backend_scores": _all_backend_scores(),
         "max_candidates": ROUTING_MAX_CANDIDATES,
     })
 
@@ -2149,7 +2219,8 @@ def assign_task():
     for selected in candidates:
         endpoint = _best_endpoint(selected)
         node_id  = selected["node_id"]
-        score    = round(_node_score(selected), 3)
+        _record_routing_pick(node_id)
+        score    = round(_node_score(selected, model=requested_model), 3)
         task.update({"status": "assigned", "node": node_id, "endpoint": endpoint, "routing_score": score})
         db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
         tid = str(uuid.uuid4())[:8]

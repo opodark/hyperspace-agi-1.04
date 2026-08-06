@@ -1,5 +1,13 @@
 # node/main.py
-# HyperSpace AGI v1.03 — Unified Node
+# HyperSpace AGI v1.05 — Unified Node
+# v1.05: concurrency ADATTATIVA QoS — niente più "unità di carico"/capacità
+#        (MAX_LOAD_UNITS, estimate_model_load_units). Ogni richiesta = 1 slot.
+#        model_manager -> concorrenza fissa a 1 (sequenziale); inference_server
+#        -> capacità AIMD (cresce se la QoS è sana, collassa e RIFIUTA nuovi
+#        task quando la latenza/throughput osservati degradano oltre soglia).
+#        Coda breve configurabile (REQUEST_QUEUE_TIMEOUT_S). /status e /metrics
+#        espongono lo stato QoS (schema v3): active_requests/queued_requests/
+#        capacity/saturation/degraded/degradation_pct/active_by_model.
 # v1.02: middleware firma inter-nodo, /ollama/pull SSE, ollama-proxy, /memory
 # v1.03: aggiunto /v1/chat/completions — il control-plane instrada qui i
 #        chat completions quando sceglie questo nodo (invece di ollama-direct
@@ -36,8 +44,8 @@ from shared.identity import (
     make_request_headers,
     verify_request_headers,
 )
-from shared.engine_profiles import estimate_default_load_units
 from backend_metrics import collect_metrics, capability_profile
+from qos_monitor import QoSMonitor
 
 app = FastAPI()
 
@@ -72,146 +80,141 @@ NODE_AVATAR          = os.getenv("NODE_AVATAR", "🤖").strip()
 
 PEER_MAX_AGE_S       = int(os.getenv("PEER_MAX_AGE_S", "120"))
 
-# ── GESTIONE CARICO / CODA — per UNITÀ DI CARICO, non per richiesta ────────
-# Prima: ogni richiesta occupava 1 "slot" a prescindere dal modello, quindi
-# un task su un modello 0.5B e uno su un 70B pesavano uguale sul semaforo —
-# un nodo poteva accettare N richieste "leggere" in parallelo quanto N
-# richieste "pesanti", saturando la VRAM molto prima del limite nominale.
-# Ora ogni richiesta dichiara un peso in "unità di carico" stimato dal nome
-# del modello, e il nodo accetta lavoro finché la somma dei pesi attivi non
-# supera MAX_LOAD_UNITS.
-#
-# MAX_LOAD_UNITS          : capacità totale in unità di carico. Se non
-#                           impostata esplicitamente, viene AUTO-DERIVATA da
-#                           VRAM_GB + INFERENCE_BACKEND (stesso pattern di
-#                           calculate_tier()/NODE_TIER) — vedi la risoluzione
-#                           effettiva più sotto, dopo il rilevamento VRAM,
-#                           e shared/engine_profiles.py per la formula.
-# REQUEST_QUEUE_TIMEOUT_S : secondi massimi che una richiesta aspetta prima
-#                           di ricevere un 503 esplicito.
-REQUEST_QUEUE_TIMEOUT_S = int(os.getenv("REQUEST_QUEUE_TIMEOUT_S", 60))
+# ── CONCURRENZA ADATTATIVA (QoS) ─────────────────────────────────────────────
+# v1.05: niente più "unità di carico"/capacità configurata (MAX_LOAD_UNITS,
+# estimate_model_load_units). Ogni richiesta = 1 SLOT. Il nodo misura da solo
+# quanto sta degradando (QoS monitor: latenza vs baseline, throughput vs picco)
+# e:
+#   - model_manager (Ollama): concorrenza FISSA a 1 (sequenziale).
+#   - inference_server (vLLM): concorrenza ADATTATIVA (AIMD) — se i segnali
+#     sono sani la capacità cresce sopra il seed, se degrada collassa e il
+#     nodo RIFIUTA nuovi task per far recuperare il sistema.
+# La coda resta ma è BREVE: REQUEST_QUEUE_TIMEOUT_S assorbe i burst transitori
+# (utile nei deployment a nodo singolo) senza nascondere la degradazione.
+REQUEST_QUEUE_TIMEOUT_S = int(os.getenv("REQUEST_QUEUE_TIMEOUT_S", "10"))
+# Valori standard (sovrascrivibili) per l'adaptive inference_server.
+LOAD_SEED_CONCURRENCY   = float(os.getenv("LOAD_SEED_CONCURRENCY", "4"))
+LOAD_MIN_CONCURRENCY    = float(os.getenv("LOAD_MIN_CONCURRENCY", "1"))
+LOAD_MAX_CONCURRENCY    = float(os.getenv("LOAD_MAX_CONCURRENCY", "16"))
+# Soglie QoS in percentuale: HEALTHY = sotto questa il nodo può accettare
+# (e la capacità cresce), DEGRADED = "caduta drastica delle prestazioni" oltre
+# cui si rifiuta nuovo lavoro. DEGRADED=100 ~ latenza raddoppiata vs baseline.
+LOAD_HEALTHY_PCT        = float(os.getenv("LOAD_HEALTHY_PCT", "25"))
+LOAD_DEGRADED_PCT       = float(os.getenv("LOAD_DEGRADED_PCT", "100"))
+# Collasso throughput: sotto il X% del riferimento il nodo è degradato a
+# prescindere dalla latenza.
+LOAD_TPS_COLLAPSE_PCT   = float(os.getenv("LOAD_TPS_COLLAPSE_PCT", "40"))
+# AIMD: passo additivo quando sano, fattore moltiplicativo quando degradato.
+LOAD_INCREASE_STEP      = float(os.getenv("LOAD_INCREASE_STEP", "1"))
+LOAD_SHRINK_FACTOR      = float(os.getenv("LOAD_SHRINK_FACTOR", "0.5"))
+# Intervallo di rivalutazione QoS (il nodo polla le metriche dal backend).
+LOAD_QOS_POLL_S         = float(os.getenv("LOAD_QOS_POLL_S", "8"))
 
 # ── MOTORE D'INFERENZA ──────────────────────────────────────────────────
-# Usato SOLO dal control-plane per pesare lo scoring di routing (vedi
-# ROUTING_WEIGHT_ENGINE lato CP) — NON influenza calculate_tier(): tier
-# resta legato a topologia/affidabilità del nodo, non alla capacità di
-# serving del motore.
+# INFERENCE_BACKEND identifica il motore; il backend_type (inference_server/
+# model_manager) deriva da capability_profile() in backend_metrics.py ed è la
+# fonte di verità sia per il limiter (adaptive vs sequenziale) sia per lo
+# scoring del control-plane. Il nome del motore resta per display/fallback.
 INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "ollama").strip().lower()
-
-# ── PESO DI CARICO PER MODELLO ──────────────────────────────────────────
-# Override esplicito via NODE_MODEL_WEIGHTS (JSON {"sottostringa": peso},
-# case-insensitive, match per sottostringa sul nome modello) per i casi in
-# cui l'euristica sui parametri non è affidabile (modelli custom, GGUF senza
-# convenzione di naming standard).
-_MODEL_WEIGHT_OVERRIDES: dict = {}
-try:
-    _MODEL_WEIGHT_OVERRIDES = {
-        k.lower(): float(v) for k, v in json.loads(os.getenv("NODE_MODEL_WEIGHTS", "{}")).items()
-    }
-except Exception:
-    _MODEL_WEIGHT_OVERRIDES = {}
-
-DEFAULT_MODEL_WEIGHT = float(os.getenv("DEFAULT_MODEL_WEIGHT", "1.0"))
-_PARAM_SIZE_RE = re.compile(r'(\d+(?:\.\d+)?)\s*b\b', re.IGNORECASE)
-
-def estimate_model_load_units(model_name: str) -> float:
-    """Stima il peso in unità di carico di un modello dal suo nome. 1 unità
-    ~= un modello nella fascia 7B (riferimento comodo, non una misura
-    fisica). Ordine: override esplicito per sottostringa -> parsing del
-    suffisso parametri (es. '14b', '0.5b') -> default."""
-    if not model_name:
-        return DEFAULT_MODEL_WEIGHT
-    name_l = model_name.lower()
-    for substr, weight in _MODEL_WEIGHT_OVERRIDES.items():
-        if substr in name_l:
-            return weight
-    m = _PARAM_SIZE_RE.search(name_l)
-    if m:
-        try:
-            params_b = float(m.group(1))
-            return max(round(params_b / 7.0, 2), 0.25)
-        except Exception:
-            pass
-    return DEFAULT_MODEL_WEIGHT
 
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 _boot_time = time.time()
 
-class _WeightedLoadLimiter:
-    """Sostituisce asyncio.Semaphore: invece di N slot fissi, gestisce un
-    budget di unità di carico. Una richiesta su un modello piccolo può
-    girare in parallelo con altre; una su un modello grande occupa da sola
-    una fetta più larga del budget. acquire() aspetta (con timeout) finché
-    non c'è abbastanza capacità libera. Una richiesta più pesante della
-    capacità totale non resta bloccata per sempre: parte comunque quando il
-    nodo è idle (_active == 0), altrimenti aspetterebbe un budget che non
-    esisterà mai."""
-    def __init__(self, capacity: float):
-        self.capacity = capacity
-        self._active = 0.0
-        self._queued_units = 0.0
-        # Unità di carico attive PER MODELLO: serve a /metrics per dire quale
-        # modello sta EFFETTIVAMENTE eseguendo una richiesta ora (la scelta
-        # del modello da mostrare non può basarsi su euristiche tipo "il
-        # campione più recente"). Aggiornata dentro lo stesso lock di acquire.
+class _AdaptiveLoadLimiter:
+    """Sostituisce asyncio.Semaphore e il vecchio budget "unità di carico":
+    ogni richiesta = 1 SLOT (nessun peso per modello). La capacità è
+    ADATTATIVA per inference_server (AIMD: cresce di un passo quando la QoS
+    è sana, collassa per un fattore quando degrada, entro [min, max]) e
+    FISSA a 1 per model_manager (sequenziale). Quando il nodo è degradato
+    acquire() rifiuta subito, per far recuperare il sistema invece di
+    accumulare coda. La coda breve (REQUEST_QUEUE_TIMEOUT_S) assorbe solo i
+    burst transitori."""
+    def __init__(self, backend_type: str):
+        self.adaptive = backend_type == "inference_server"
+        self.capacity = LOAD_SEED_CONCURRENCY if self.adaptive else 1.0
+        self.min_capacity  = LOAD_MIN_CONCURRENCY if self.adaptive else 1.0
+        self.max_capacity  = LOAD_MAX_CONCURRENCY if self.adaptive else 1.0
+        self.increase_step = LOAD_INCREASE_STEP if self.adaptive else 0.0
+        self.shrink_factor = LOAD_SHRINK_FACTOR if self.adaptive else 1.0
+        self.degraded = False
+        self._in_flight = 0
+        self._queued = 0
+        # Contatori per modello: quale modello sta EFFETTIVAMENTE eseguendo
+        # richieste ora (per /metrics e per il QoS monitor model-aware).
         self._active_by_model: dict = {}
         self._lock = asyncio.Lock()
         self._cond = asyncio.Condition(self._lock)
 
-    async def acquire(self, weight: float, model: str, timeout_s: float) -> bool:
+    async def acquire(self, model: str, timeout_s: float) -> bool:
         async with self._lock:
-            self._queued_units += weight
+            if self.degraded:
+                return False
+            self._queued += 1
             try:
                 def _capacity_free():
-                    return self._active + weight <= self.capacity or self._active == 0.0
+                    return self._in_flight < self.capacity
                 try:
                     await asyncio.wait_for(self._cond.wait_for(_capacity_free), timeout=timeout_s)
                 except asyncio.TimeoutError:
                     return False
             finally:
-                self._queued_units -= weight
-            self._active += weight
+                self._queued -= 1
+            self._in_flight += 1
             if model:
-                self._active_by_model[model] = self._active_by_model.get(model, 0.0) + weight
+                self._active_by_model[model] = self._active_by_model.get(model, 0) + 1
             return True
 
-    async def release(self, weight: float, model: str):
+    async def release(self, model: str):
         async with self._lock:
-            self._active = max(0.0, self._active - weight)
+            self._in_flight = max(0, self._in_flight - 1)
             if model:
-                rest = self._active_by_model.get(model, 0.0) - weight
-                if rest > 1e-9:
-                    self._active_by_model[model] = round(rest, 2)
+                rest = self._active_by_model.get(model, 0) - 1
+                if rest > 0:
+                    self._active_by_model[model] = rest
                 else:
                     self._active_by_model.pop(model, None)
             self._cond.notify_all()
 
+    async def apply_qos(self, degraded: bool, calibrated: bool = True):
+        """Aggiorna lo stato QoS e applica un passo AIMD. Chiamato dal loop
+        QoS: sano -> +step (può superare il seed), degradato -> *shrink.
+        Senza riferimenti calibrati (calibrated=False) la capacità resta
+        invariata al seed: non si ragiona su dati che non ci sono ancora."""
+        async with self._lock:
+            self.degraded = bool(degraded)
+            if not self.adaptive or not calibrated:
+                return
+            if degraded:
+                self.capacity = max(self.capacity * self.shrink_factor, self.min_capacity)
+            else:
+                self.capacity = min(self.capacity + self.increase_step, self.max_capacity)
+
     @property
-    def active_units(self) -> float:
-        return round(self._active, 2)
+    def active_requests(self) -> int:
+        return self._in_flight
+
+    @property
+    def queued_requests(self) -> int:
+        return self._queued
 
     @property
     def active_by_model(self) -> dict:
         return dict(self._active_by_model)
 
-    @property
-    def queued_units(self) -> float:
-        return round(self._queued_units, 2)
 
-
-async def _try_acquire_slot(model: str = "", weight: float = 1.0, timeout_s: float = None) -> bool:
-    """True se le unità sono state acquisite (il chiamante DEVE poi chiamare
-    _release_slot(model, weight) con lo STESSO peso e lo STESSO modello);
-    False se il timeout è scaduto — in quel caso nessuna unità è stata presa
+async def _try_acquire_slot(model: str = "", timeout_s: float = None) -> bool:
+    """True se lo slot è stato acquisito (il chiamante DEVE poi chiamare
+    _release_slot(model) con lo STESSO modello); False se il nodo è degradato
+    o il timeout di coda è scaduto — in quel caso nessuno slot è stato preso
     e non va rilasciato nulla."""
     timeout_s = REQUEST_QUEUE_TIMEOUT_S if timeout_s is None else timeout_s
-    return await _load_limiter.acquire(weight, model, timeout_s)
+    return await _load_limiter.acquire(model, timeout_s)
 
 
-async def _release_slot(model: str = "", weight: float = 1.0):
-    await _load_limiter.release(weight, model)
+async def _release_slot(model: str = ""):
+    await _load_limiter.release(model)
 
 
 def _busy_response():
@@ -247,16 +250,17 @@ _vram_env      = float(os.getenv("VRAM_GB", "0.0"))
 _vram_detected = detect_vram_gb()
 VRAM_GB        = _vram_env if _vram_env > 0.0 else _vram_detected
 
-# Risoluzione di MAX_LOAD_UNITS: se impostata esplicitamente nel .env vince
-# quella; altrimenti auto-derivata da VRAM_GB + INFERENCE_BACKEND (stesso
-# pattern di calculate_tier()/NODE_TIER — auto salvo override esplicito).
-# Va fatta qui, non più in alto: dipende da VRAM_GB appena rilevata sopra.
-_max_load_units_env = os.getenv("MAX_LOAD_UNITS", "").strip()
-MAX_LOAD_UNITS = (
-    float(_max_load_units_env) if _max_load_units_env
-    else estimate_default_load_units(VRAM_GB, INFERENCE_BACKEND)
+# backend_type (inference_server/model_manager) — unica fonte di verità per
+# limiter (adaptive vs sequenziale) e scoring del CP. Derivato dal motore.
+BACKEND_TYPE = capability_profile(INFERENCE_BACKEND)["backend_type"]
+
+# Limiter adattativo + QoS monitor: niente MAX_LOAD_UNITS configurabile.
+_load_limiter = _AdaptiveLoadLimiter(BACKEND_TYPE)
+_qos_monitor  = QoSMonitor(
+    BACKEND_TYPE,
+    degraded_pct=LOAD_DEGRADED_PCT,
+    tps_collapse_pct=LOAD_TPS_COLLAPSE_PCT,
 )
-_load_limiter = _WeightedLoadLimiter(MAX_LOAD_UNITS)
 
 NODE_CAPABILITIES = ["execute"]
 if VRAM_GB > 0 or os.getenv("OLLAMA_URL"):
@@ -285,7 +289,7 @@ NODE_PROFILE = {
     "endpoint":     NODE_ADVERTISED_ENDPOINT,
     "capabilities": NODE_CAPABILITIES,
     "vram_gb":      VRAM_GB,
-    "version":      "1.04.0",
+    "version":      "1.05.0",
     "specialization": NODE_SPECIALIZATION,
     "avatar":         NODE_AVATAR,
 }
@@ -365,27 +369,28 @@ async def ollama_health() -> dict:
 
 # ── REGISTRAZIONE ─────────────────────────────────────────
 async def register_to_registry():
-    active_u, queued_u = _load_limiter.active_units, _load_limiter.queued_units
+    active_u, queued_u = _load_limiter.active_requests, _load_limiter.queued_requests
     payload = {
         "node_id":        NODE_ID,
         "public_address": NODE_ADVERTISED_ENDPOINT,
         "role":           NODE_PROFILE["tier"],
         "metadata": {
-            "version":      NODE_PROFILE["version"],
-            "tier":         NODE_PROFILE["tier"],
-            "capabilities": ",".join(NODE_CAPABILITIES),
-            "vram_gb":      str(VRAM_GB),
-            "uptime_s":     str(int(time.time() - _boot_time)),
-            "public_key":   NODE_PUBKEY[:32],
+            "version":        NODE_PROFILE["version"],
+            "tier":           NODE_PROFILE["tier"],
+            "capabilities":   ",".join(NODE_CAPABILITIES),
+            "vram_gb":        str(VRAM_GB),
+            "uptime_s":       str(int(time.time() - _boot_time)),
+            "public_key":     NODE_PUBKEY[:32],
             "specialization": NODE_PROFILE["specialization"],
             "avatar":         NODE_PROFILE["avatar"],
             "engine":         INFERENCE_BACKEND,
-            "active_load":      str(active_u),
-            "queued_load":      str(queued_u),
-            "max_load_units":   str(MAX_LOAD_UNITS),
-            "active_requests":  str(active_u),
-            "queued_requests":  str(queued_u),
-            "max_concurrent":   str(MAX_LOAD_UNITS),
+            "backend_type":   BACKEND_TYPE,
+            "active_requests": str(active_u),
+            "queued_requests": str(queued_u),
+            "capacity":        str(_load_limiter.capacity),
+            "saturation":      str(_qos_monitor.saturation),
+            "degraded":        "true" if _qos_monitor.degraded else "false",
+            "degradation_pct": str(_qos_monitor.degradation_pct),
         }
     }
     body = str(payload).encode()
@@ -562,13 +567,14 @@ def heartbeat_loop():
 async def startup_event():
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
-    print(f"[NODE:{NODE_ID[:10]}] started v1.04.0")
+    print(f"[NODE:{NODE_ID[:10]}] started v1.05.0")
     print(f"[NODE:{NODE_ID[:10]}] tier={NODE_PROFILE['tier']} (forced={_FORCED_TIER or 'no'})")
     print(f"[NODE:{NODE_ID[:10]}] advertised={NODE_ADVERTISED_ENDPOINT}")
     print(f"[NODE:{NODE_ID[:10]}] vram_gb={VRAM_GB} (env={_vram_env} detected={_vram_detected})")
     print(f"[NODE:{NODE_ID[:10]}] boot_peers={BOOT_PEERS or 'none — will use registry auto-discovery'}")
     print(f"[NODE:{NODE_ID[:10]}] peer_max_age_s={PEER_MAX_AGE_S}")
-    print(f"[NODE:{NODE_ID[:10]}] max_load_units={MAX_LOAD_UNITS} ({'esplicito' if _max_load_units_env else 'auto-derivato da vram+engine'}) queue_timeout_s={REQUEST_QUEUE_TIMEOUT_S} engine={INFERENCE_BACKEND}")
+    print(f"[NODE:{NODE_ID[:10]}] backend_type={BACKEND_TYPE} adaptive_limiter={'on' if _load_limiter.adaptive else 'off (sequenziale)'} seed_concurrency={LOAD_SEED_CONCURRENCY} queue_timeout_s={REQUEST_QUEUE_TIMEOUT_S}")
+    print(f"[NODE:{NODE_ID[:10]}] qos: healthy_pct={LOAD_HEALTHY_PCT} degraded_pct={LOAD_DEGRADED_PCT} tps_collapse_pct={LOAD_TPS_COLLAPSE_PCT} poll_s={LOAD_QOS_POLL_S}")
     print(f"[NODE:{NODE_ID[:10]}] registry={REGISTRY_URL}")
     print(f"[NODE:{NODE_ID[:10]}] registry_public={REGISTRY_PUBLIC_URL}")
     print(f"[NODE:{NODE_ID[:10]}] ollama -> {OLLAMA_URL}")
@@ -608,7 +614,6 @@ def health():
 @app.get("/status")
 def status():
     prune_stale_peers()
-    active_u, queued_u = _load_limiter.active_units, _load_limiter.queued_units
     return {
         "node_id":        NODE_ID,
         "public_key":     NODE_PUBKEY,
@@ -622,39 +627,38 @@ def status():
         "peers_total":    len(_peers),
         "memory_entries": len(_read_memory(9999)),
         "engine":         INFERENCE_BACKEND,
+        "backend_type":   BACKEND_TYPE,
         "capability_profile": capability_profile(INFERENCE_BACKEND),
-        "active_load":      active_u,
-        "queued_load":      queued_u,
-        "max_load_units":   MAX_LOAD_UNITS,
-        "active_requests":  active_u,
-        "queued_requests":  queued_u,
-        "max_concurrent":   MAX_LOAD_UNITS,
+        "active_requests":  _load_limiter.active_requests,
+        "queued_requests":  _load_limiter.queued_requests,
+        "capacity":         _load_limiter.capacity,
+        "saturation":       _qos_monitor.saturation,
+        "degraded":         _qos_monitor.degraded,
+        "degradation_pct":  _qos_monitor.degradation_pct,
         "running":        True,
     }
 
 @app.get("/metrics")
 async def node_metrics():
-    """Metriche backend normalizzate per il control-plane (prototipo).
+    """Metriche backend normalizzate per il control-plane.
     Il nodo è un semplice exporter: espone capability statiche + stato
-    runtime osservato dal motore (per modello e aggregato). La decisione di
-    routing resta al control-plane, che consumerà questi dati per sostituire
-    i pesi statici ENGINE_SCORES con telemetria osservata."""
+    runtime osservato dal motore (per modello e aggregato) + stato di
+    concorrenza QoS (schema v3: conteggi, non unità di carico)."""
     payload = dict(await collect_metrics(INFERENCE_BACKEND))
-    active_u, queued_u = _load_limiter.active_units, _load_limiter.queued_units
     # dict(...) sopra: collect_metrics restituisce l'oggetto CACHATO condiviso
     # (TTL); senza la copia, mutare qui payload["load"] corromperebbe la cache
     # e i successivi poll restituirebbero lo stesso oggetto già alterato.
     payload["node_id"] = NODE_ID
     payload["engine"]  = INFERENCE_BACKEND
     payload["load"]    = {
-        "active_units":    active_u,
-        "queued_units":    queued_u,
-        "max_load_units":  MAX_LOAD_UNITS,
-        "active_requests": active_u,
-        "queued_requests": queued_u,
+        "active_requests": _load_limiter.active_requests,
+        "queued_requests": _load_limiter.queued_requests,
+        "capacity":        round(_load_limiter.capacity, 2),
+        "saturation":      _qos_monitor.saturation,
+        "degraded":        _qos_monitor.degraded,
+        "degradation_pct": _qos_monitor.degradation_pct,
         # Quale modello sta EFFETTIVAMENTE eseguendo richieste adesso
-        # (modello -> unità di carico attive). Assente sui nodi non aggiornati:
-        # la dashboard deve ripiegare senza euristiche.
+        # (modello -> conteggio richieste in-flight).
         "active_by_model": dict(_load_limiter.active_by_model),
     }
     return payload
@@ -744,13 +748,12 @@ async def execute_task(task: dict):
     )
     model = task.get("model") or task.get("payload", {}).get("model") or DEFAULT_MODEL
 
-    weight = estimate_model_load_units(model)
-    if not await _try_acquire_slot(model, weight):
+    if not await _try_acquire_slot(model):
         return _busy_response()
     try:
         response_text = await ollama_generate(prompt, model)
     finally:
-        await _release_slot(model, weight)
+        await _release_slot(model)
 
     # Salva in memoria locale e propaga al CP, solo se non sono dei task per i
     # titoli (task_id con prefisso "title-"), altrimenti si genera un loop
@@ -802,12 +805,10 @@ async def v1_chat_completions_proxy(request: Request):
     except Exception:
         payload = {}
     stream = bool(payload.get("stream", False))
-
-    weight = estimate_model_load_units(payload.get("model", ""))
     model  = payload.get("model", "") or DEFAULT_MODEL
 
     if stream:
-        if not await _try_acquire_slot(model, weight):
+        if not await _try_acquire_slot(model):
             return _busy_response()
 
         async def _stream_gen():
@@ -823,10 +824,10 @@ async def v1_chat_completions_proxy(request: Request):
             except Exception as e:
                 yield f'data: {{"error": "{e}"}}\n\n'.encode()
             finally:
-                await _release_slot(model, weight)
+                await _release_slot(model)
         return StreamingResponse(_stream_gen(), media_type="text/event-stream")
 
-    if not await _try_acquire_slot(model, weight):
+    if not await _try_acquire_slot(model):
         return _busy_response()
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
@@ -844,7 +845,7 @@ async def v1_chat_completions_proxy(request: Request):
             status_code=503, media_type="application/json",
         )
     finally:
-        await _release_slot(model, weight)
+        await _release_slot(model)
 
 @app.get("/ollama/health")
 async def check_ollama():
@@ -877,6 +878,27 @@ async def ollama_pull(body: dict):
         stream_pull(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+async def qos_loop():
+    """Aggiorna periodicamente il QoS monitor e pilota il limiter adattativo:
+    sano -> capacità cresce, degradato -> collassa e il nodo rifiuta nuovi
+    task (acquire() in _AdaptiveLoadLimiter)."""
+    while True:
+        try:
+            data = await collect_metrics(INFERENCE_BACKEND)
+            _qos_monitor.update(
+                data.get("server", {}),
+                data.get("runtime", {}),
+                _load_limiter.active_by_model,
+            )
+            await _load_limiter.apply_qos(_qos_monitor.degraded, calibrated=_qos_monitor.calibrated)
+        except Exception as e:
+            print(f"[NODE:{NODE_ID[:10]}] qos loop error: {e}")
+        await asyncio.sleep(LOAD_QOS_POLL_S)
+
+@app.on_event("startup")
+async def _start_qos_loop():
+    asyncio.create_task(qos_loop())
 
 if __name__ == "__main__":
     import uvicorn

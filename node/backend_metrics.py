@@ -13,15 +13,16 @@
 #
 # Schema della risposta (GET /metrics sul nodo):
 #   node_id / engine / backend_type / capability_profile / load / sampled_at
-#   schema_version : versione dello schema (v2), per gestire deployment eterogenei
+#   schema_version : versione dello schema (v3), per gestire deployment eterogenei
 #   server  : metriche aggregate a livello di backend (code, util, throughput,
 #             mean/p50/p95 per TTFT e latenza, health)
 #   runtime : metriche PER MODELLO (loaded, vram, EWMA tok/s e latenza,
 #             campioni visti, data_age_s)
-#   load.active_by_model : modello -> unità di carico attive ADESSO (quale
-#             modello sta eseguendo le richieste correnti). Aggiunto in v2
-#             senza bump: i consumer più datati lo ignorano, i nodi più datati
-#             semplicemente non lo espongono.
+#   load    : stato concorrenza del nodo — v3 usa CONTEGGI + saturazione QoS
+#             (active_requests, queued_requests, capacity, saturation,
+#             degraded, degradation_pct, active_by_model con conteggi);
+#             le vecchie "unità di carico" (active_units/max_load_units)
+#             non esistono più.
 #
 # Affidabilità del dato (come fidarsi):
 #   server.health.up        -> il backend è raggiungibile (false = giù, non
@@ -91,7 +92,31 @@ _CAPABILITY_PROFILES = {
         "model_persistence":   True,
         "streaming":           True,
     },
+    "tgi": {
+        "backend_type":        "inference_server",
+        "continuous_batching": True,
+        "paged_attention":     False,
+        "dynamic_loading":     False,
+        "model_persistence":   True,
+        "streaming":           True,
+    },
+    "sglang": {
+        "backend_type":        "inference_server",
+        "continuous_batching": True,
+        "paged_attention":     True,
+        "dynamic_loading":     False,
+        "model_persistence":   True,
+        "streaming":           True,
+    },
     "ollama": {
+        "backend_type":        "model_manager",
+        "continuous_batching": False,
+        "paged_attention":     False,
+        "dynamic_loading":     True,
+        "model_persistence":   False,
+        "streaming":           True,
+    },
+    "lmstudio": {
         "backend_type":        "model_manager",
         "continuous_batching": False,
         "paged_attention":     False,
@@ -624,7 +649,10 @@ def _write_cache(engine: str, payload: dict):
 # con la propria (NODE_METRICS_SCHEMA_VERSION) per gestire deployment
 # eterogenei: un nodo con schema diverso non deve essere interpretato alla
 # cieca. Vedi control-plane/main.py.
-NODE_METRICS_SCHEMA_VERSION = 2
+# v3: load passa da "unità di carico" (active_units/max_load_units) a
+# conteggi + saturazione QoS (active_requests/queued_requests/capacity/
+# saturation/degraded/degradation_pct/active_by_model come conteggi).
+NODE_METRICS_SCHEMA_VERSION = 3
 
 
 async def collect_metrics(engine: str = "ollama") -> dict:

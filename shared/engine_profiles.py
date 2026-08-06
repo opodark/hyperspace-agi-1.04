@@ -1,54 +1,40 @@
 # shared/engine_profiles.py
-# Profili motore d'inferenza condivisi tra node e control-plane — stessa
-# logica di shared/model_weights.py (stima condivisa, non duplicata).
+# Profili d'inferenza condivisi tra node e control-plane.
 #
-# Due usi distinti dello stesso punteggio:
-#   1. control-plane: peso nello scoring di routing (ROUTING_WEIGHT_ENGINE)
-#   2. node: stima del default di MAX_LOAD_UNITS quando non impostato
-#      esplicitamente nel .env (stesso pattern di calculate_tier()/NODE_TIER)
+# Dopo l'introduzione della concurrency adattativa QoS (v1.05) il punteggio
+# non classifica più i singoli prodotti (vllm=1.0, ollama=0.5, ...): serve
+# solo a distinguere il PARADIGMA di serving, che è ciò che determina il
+# comportamento (limiter adattativo sul nodo, termine "backend" nello
+# scoring del CP):
+#   inference_server  -> modello persistente, batching continuo, concorrenza
+#                        alta (vLLM, TGI, SGLang)        -> punteggio alto
+#   model_manager     -> load/unload on-demand, concorrenza nativa minore
+#                        (Ollama, LM Studio)             -> punteggio basso
 #
-# Criterio: capacità di batching continuo/concorrenza reale, non maturità
-# del progetto — llama.cpp sta sopra a Ollama perché Ollama ci gira sopra e
-# storicamente ne eredita ma limita il parallelismo nativo.
+# La mappatura motore -> backend_type NON vive qui: è in
+# node/backend_metrics.py (_CAPABILITY_PROFILES), unica fonte di verità.
 
 import os
 import json
 
-ENGINE_SCORE_DEFAULT = float(os.getenv("ENGINE_SCORE_DEFAULT", "0.5"))
-_ENGINE_SCORES = {"vllm": 1.0, "tgi": 0.9, "llama.cpp": 0.7, "ollama": 0.5, "lmstudio": 0.4}
+BACKEND_TYPE_SCORE_DEFAULT = float(os.getenv("BACKEND_TYPE_SCORE_DEFAULT", "0.5"))
+_BACKEND_TYPE_SCORES = {"inference_server": 1.0, "model_manager": 0.5}
 try:
-    _ENGINE_SCORES.update({k.lower(): float(v) for k, v in json.loads(os.getenv("ENGINE_SCORES", "{}")).items()})
+    _BACKEND_TYPE_SCORES.update(
+        {k.lower(): float(v) for k, v in json.loads(os.getenv("BACKEND_TYPE_SCORES", "{}")).items()}
+    )
 except Exception:
     pass
 
-# Riferimento per la stima del default di MAX_LOAD_UNITS: quante unità di
-# carico per GB di VRAM, al punteggio motore di riferimento (Ollama, 0.5).
-# L'UNICO numero davvero "a naso" in questo modulo — va ricalibrato con dati
-# reali (vedi mesh-loadtest.py) quando disponibili. Cambiarlo qui si
-# propaga a tutta la tabella derivata, senza riscrivere voci singole.
-LOAD_UNITS_PER_VRAM_GB = float(os.getenv("LOAD_UNITS_PER_VRAM_GB", "0.125"))  # 1 unità ogni 8GB
-MIN_LOAD_UNITS = float(os.getenv("MIN_LOAD_UNITS", "1"))
+
+def backend_type_score(backend_type: str) -> float:
+    """Punteggio 0..1 per il paradigma di serving. Tipo non riconosciuto ->
+    default (model_manager, conservativo: concorrenza incerta)."""
+    return _BACKEND_TYPE_SCORES.get((backend_type or "").lower().strip(), BACKEND_TYPE_SCORE_DEFAULT)
 
 
-def engine_score(engine: str) -> float:
-    return _ENGINE_SCORES.get((engine or "").lower().strip(), ENGINE_SCORE_DEFAULT)
-
-
-def all_engine_scores() -> dict:
+def all_backend_type_scores() -> dict:
     """Copia del dizionario punteggi per esposizione esterna (es.
-    /config/routing-weights sul control-plane) — non esporre _ENGINE_SCORES
+    /config/routing-weights sul control-plane) — non esporre _BACKEND_TYPE_SCORES
     direttamente: è un dettaglio interno di questo modulo."""
-    return dict(_ENGINE_SCORES)
-
-
-def estimate_default_load_units(vram_gb: float, engine: str) -> float:
-    """Default di MAX_LOAD_UNITS quando non impostato esplicitamente nel
-    .env — stesso pattern di calculate_tier()/NODE_TIER: auto-rilevato da
-    segnali che il nodo già ha (VRAM_GB, INFERENCE_BACKEND), sovrascrivibile
-    a mano. Su CPU pura (vram_gb<=0) il collo di bottiglia sono i core, non
-    la memoria: concorrenza alta non aiuta, resta sempre a MIN_LOAD_UNITS
-    indipendentemente dal motore dichiarato."""
-    if vram_gb <= 0:
-        return MIN_LOAD_UNITS
-    multiplier = engine_score(engine) / 0.5  # normalizzato su Ollama = 1.0x
-    return max(MIN_LOAD_UNITS, round(vram_gb * LOAD_UNITS_PER_VRAM_GB * multiplier, 2))
+    return dict(_BACKEND_TYPE_SCORES)

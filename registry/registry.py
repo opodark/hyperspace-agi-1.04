@@ -77,17 +77,22 @@ def _active_nodes() -> list:
                 "version":        n.metadata.get("version", ""),
                 "specialization": n.metadata.get("specialization", "generalist"),
                 "avatar":         n.metadata.get("avatar", "🤖"),
-                # Carico corrente in unità, inviato dal nodo a ogni /register
+                # Stato concorrenza QoS inviato dal nodo a ogni /register
                 # (vedi node/main.py:register_to_registry). Assenti su nodi
-                # con versione precedente: default a 0/1 per non rompere il
-                # calcolo dello score lato dashboard/control-plane.
+                # con versione precedente: default conservativi per non
+                # rompere lo score lato dashboard/control-plane.
+                "active_requests": _safe_int(n.metadata.get("active_requests", "0")),
+                "queued_requests": _safe_int(n.metadata.get("queued_requests", "0")),
+                "capacity":        _safe_float(n.metadata.get("capacity", "1"), default=1.0),
+                "saturation":      _safe_float(n.metadata.get("saturation", "0"), default=0.0),
+                "degraded":        n.metadata.get("degraded", "false").lower() == "true",
+                "degradation_pct": _safe_float(n.metadata.get("degradation_pct", "0"), default=0.0),
+                "backend_type":    n.metadata.get("backend_type", "model_manager"),
+                "engine":          n.metadata.get("engine", "ollama"),
+                # legacy — alcuni consumer leggono ancora questi nomi
                 "active_load":     _safe_float(n.metadata.get("active_load", n.metadata.get("active_requests", "0"))),
                 "queued_load":     _safe_float(n.metadata.get("queued_load", n.metadata.get("queued_requests", "0"))),
                 "max_load_units":  _safe_float(n.metadata.get("max_load_units", n.metadata.get("max_concurrent", "1")), default=1.0),
-                "engine":          n.metadata.get("engine", "ollama"),
-                # legacy — alcuni consumer leggono ancora questi nomi
-                "active_requests": _safe_int(n.metadata.get("active_requests", "0")),
-                "queued_requests": _safe_int(n.metadata.get("queued_requests", "0")),
                 "max_concurrent":  _safe_int(n.metadata.get("max_concurrent", "1"), default=1),
             }
             for n in nodes.values()
