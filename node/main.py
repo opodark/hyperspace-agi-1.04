@@ -96,9 +96,10 @@ REQUEST_QUEUE_TIMEOUT_S = int(os.getenv("REQUEST_QUEUE_TIMEOUT_S", "10"))
 LOAD_SEED_CONCURRENCY   = float(os.getenv("LOAD_SEED_CONCURRENCY", "4"))
 LOAD_MIN_CONCURRENCY    = float(os.getenv("LOAD_MIN_CONCURRENCY", "1"))
 LOAD_MAX_CONCURRENCY    = float(os.getenv("LOAD_MAX_CONCURRENCY", "16"))
-# Soglie QoS in percentuale: HEALTHY = sotto questa il nodo può accettare
-# (e la capacità cresce), DEGRADED = "caduta drastica delle prestazioni" oltre
-# cui si rifiuta nuovo lavoro. DEGRADED=100 ~ latenza raddoppiata vs baseline.
+# Soglie QoS in percentuale: HEALTHY = sotto questa la capacità cresce,
+# tra HEALTHY e DEGRADED la capacità resta in PLATEAU (né crescita né
+# forzatura), DEGRADED = "caduta drastica delle prestazioni" oltre cui si
+# rifiuta nuovo lavoro. DEGRADED=100 ~ latenza raddoppiata vs baseline.
 LOAD_HEALTHY_PCT        = float(os.getenv("LOAD_HEALTHY_PCT", "25"))
 LOAD_DEGRADED_PCT       = float(os.getenv("LOAD_DEGRADED_PCT", "100"))
 # Collasso throughput: sotto il X% del riferimento il nodo è degradato a
@@ -177,9 +178,14 @@ class _AdaptiveLoadLimiter:
                     self._active_by_model.pop(model, None)
             self._cond.notify_all()
 
-    async def apply_qos(self, degraded: bool, calibrated: bool = True):
-        """Aggiorna lo stato QoS e applica un passo AIMD. Chiamato dal loop
-        QoS: sano -> +step (può superare il seed), degradato -> *shrink.
+    async def apply_qos(self, degraded: bool, calibrated: bool = True,
+                        degradation_pct: float = 0.0):
+        """Aggiorna lo stato QoS e applica un passo AIMD a TRE BANDE sulla
+        degradazione osservata (degradation_pct), chiamato dal loop QoS:
+          <  LOAD_HEALTHY_PCT       -> sano: capacità +increase_step
+          [HEALTHY, DEGRADED)       -> PLATEAU: la capacità resta dove è,
+                                       né crescita né forzatura
+          degradato (>= soglia)     -> collasso: capacità *shrink_factor
         Senza riferimenti calibrati (calibrated=False) la capacità resta
         invariata al seed: non si ragiona su dati che non ci sono ancora."""
         async with self._lock:
@@ -188,8 +194,10 @@ class _AdaptiveLoadLimiter:
                 return
             if degraded:
                 self.capacity = max(self.capacity * self.shrink_factor, self.min_capacity)
-            else:
+            elif degradation_pct < LOAD_HEALTHY_PCT:
                 self.capacity = min(self.capacity + self.increase_step, self.max_capacity)
+            # else: plateau — la capacità resta invariata tra HEALTHY e la
+            # soglia degradata (evita il "dente di sega" su carichi medi).
 
     @property
     def active_requests(self) -> int:
@@ -891,7 +899,11 @@ async def qos_loop():
                 data.get("runtime", {}),
                 _load_limiter.active_by_model,
             )
-            await _load_limiter.apply_qos(_qos_monitor.degraded, calibrated=_qos_monitor.calibrated)
+            await _load_limiter.apply_qos(
+                _qos_monitor.degraded,
+                calibrated=_qos_monitor.calibrated,
+                degradation_pct=_qos_monitor.degradation_pct,
+            )
         except Exception as e:
             print(f"[NODE:{NODE_ID[:10]}] qos loop error: {e}")
         await asyncio.sleep(LOAD_QOS_POLL_S)

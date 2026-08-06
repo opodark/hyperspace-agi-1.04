@@ -527,6 +527,10 @@ def _record_routing_pick(node_id: str):
         cutoff = now - 3 * ROUTING_RECENT_WINDOW_S
         for k in [k for k, v in _recent_routing_picks.items() if v < cutoff]:
             _recent_routing_picks.pop(k, None)
+    # La penalità recent_s deve comparire subito anche nel display (fonte
+    # unica _fleet_scores): invalida la cache così il prossimo refresh la
+    # ricalcola col nuovo timestamp di routing.
+    _invalidate_fleet_scores()
 
 def _active_executable() -> list:
     return [n for n in _node_list() if n.get("status") == "active" and _best_endpoint(n)]
@@ -570,13 +574,22 @@ _SCORE_CACHE_AT = 0.0
 _SCORE_CACHE_TTL = max(5.0, 0.75 * METRICS_POLL_INTERVAL_S)
 _score_cache_lock = threading.Lock()
 
-def _fleet_scores(force: bool = False) -> dict:
+def _invalidate_fleet_scores():
+    """Azzera il TTL della cache score: il prossimo accesso a _fleet_scores
+    ricalcola con i dati correnti (nuovi pick di routing o metriche fresche)."""
+    global _SCORE_CACHE_AT
+    with _score_cache_lock:
+        _SCORE_CACHE_AT = 0.0
+
+def _fleet_scores() -> dict:
     """{node_id: {"score": float, "total": float, "breakdown": dict}} per la
-    flotta attiva eseguibile. Ricalcola solo se la cache è scaduta (o force)."""
+    flotta attiva eseguibile. Ricalcola solo se la cache è scaduta; viene
+    invalidata (TTL azzerato) da _record_routing_pick e dal refresh delle
+    metriche di un nodo."""
     global _SCORE_CACHE, _SCORE_CACHE_AT
     now = time.time()
     with _score_cache_lock:
-        if not force and _SCORE_CACHE and now - _SCORE_CACHE_AT < _SCORE_CACHE_TTL:
+        if _SCORE_CACHE and now - _SCORE_CACHE_AT < _SCORE_CACHE_TTL:
             return _SCORE_CACHE
         out = {}
         for n, score, breakdown in _routing_scores(_active_executable()):
@@ -2648,6 +2661,7 @@ def _collect_node_metrics():
         with ThreadPoolExecutor(max_workers=METRICS_MAX_WORKERS) as ex:
             results = list(ex.map(lambda c: _fetch(*c), candidates))
 
+    new_sample = False
     for nid, ep, payload, err in results:
         with _node_metrics_lock:
             entry = _node_metrics_cache.setdefault(nid, {
@@ -2677,6 +2691,13 @@ def _collect_node_metrics():
                 # Deployment eterogeneo: uno schema diverso resta esposto ma
                 # marcato, così il consumatore non lo interpreta alla cieca.
                 entry["schema_mismatch"] = payload.get("schema_version") != NODE_METRICS_SCHEMA_VERSION
+                new_sample = True
+    # Campioni freschi -> lo score (fonte unica _fleet_scores) riflette subito
+    # carico/saturazione/degradazione, senza aspettare la scadenza del TTL.
+    # Chiamata FUORI da _node_metrics_lock: _fleet_scores prende prima
+    # _score_cache_lock e poi _node_metrics_lock, l'ordine inverso deadloccerebbe.
+    if new_sample:
+        _invalidate_fleet_scores()
     # Prune SOLO dei nodi scomparsi dalla mesh. Un nodo temporaneamente giù
     # (in backoff, nessun campione fresco) MANTIENE cache e storico: sono
     # proprio i dati da tenere per capire cosa è successo.

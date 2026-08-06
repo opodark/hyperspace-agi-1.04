@@ -636,6 +636,7 @@ function renderNodeCard(n){
     var q=ld.queued_requests!=null?ld.queued_requests:(ld.queued_units||0);
     var sub='';
     if(ld.degraded)sub+='<span class="mx-down">DEGRADED</span> ';
+    if(ld.degradation_pct!=null)sub+=Math.round(ld.degradation_pct)+'% degr ';
     if(ld.saturation!=null)sub+=Math.round(ld.saturation*100)+'% sat';
     var subQ=q?'+'+mxF1(q)+' q':'';
     tiles.push(mxTile('Load',mxF1(act)+'/'+mxF1(cap),(subQ+' '+sub).trim()));
@@ -854,49 +855,15 @@ async function refreshHbBar(){
 }
 setInterval(refreshHbBar,5000); refreshHbBar();
 
-// ── ROUTING WEIGHTS ─────────────────────────────────────────────────────────
-// Pesi di routing letti dal control-plane, così il badge score/load in
-// dashboard riflette davvero cosa decide il routing invece di una formula
-// hardcoded lato client che potrebbe disallinearsi silenziosamente se i
-// pesi vengono cambiati via .env (ROUTING_WEIGHT_*).
-var ROUTING_WEIGHTS={vram:0.55,load:0.25,tier:0.10,uptime:0.10,backend:0.15,latency:0.45,tput:0.35,gpu:0.20,recent_penalty:0.10,recent_window:45,backend_scores:{},max_candidates:3};
-async function loadRoutingWeights(){
-  try{
-    var d=await(await fetch('/config/routing-weights')).json();
-    ROUTING_WEIGHTS=d;
-  }catch(e){}
-}
-loadRoutingWeights();
-setInterval(loadRoutingWeights,60000);
-
-function computeScore(n){
-  // Score REALE v1.05 se il control-plane lo espone (routing_score su
-  // /mesh/nodes, ibrido qualità+strutturale normalizzato sui candidati).
-  // Solo per nodi senza di esso (es. tabella registry, nodi inattivi)
-  // ricade su un'approssimazione del blocco STRUTTURALE dello score v1.05
-  // (la normalizzazione qualità avviene lato control-plane sul set di
-  // candidati, vedi control-plane/routing.py). Schema v3 (conteggi/capacity/
-  // saturation/degraded) con fallback v2 per nodi non aggiornati.
+// ── SCORE (fonte unica lato control-plane) ────────────────────────────────
+// Il control-plane espone il routing_score REALE v1.05 (ibrido qualità+
+// strutturale normalizzato sui candidati) su /mesh/nodes. Il client NON
+// ricalcola più nulla: legge routing_score e, per i nodi non routabili
+// (inattivi/non-executable/assenti dal mesh), mostra "—" invece di inventare
+// un valore fuori scala con una formula locale disallineata dai pesi .env.
+function nodeScore(n){
   var rs=parseFloat(n.routing_score);
-  if(!isNaN(rs))return rs;
-  var tierS={'root':3,'hub':2,'leaf':1};
-  var ts=(tierS[n.tier||'leaf']||1)/3;
-  var vs=Math.min(parseFloat(n.vram_gb||0),24)/24;
-  var us=Math.min(parseInt(n.uptime_s||0),604800)/604800;
-  var maxC=Math.max(parseFloat(n.capacity!=null?n.capacity:(n.max_load_units!=null?n.max_load_units:n.max_concurrent||1)),0.01);
-  var act=parseFloat(n.active_requests!=null?n.active_requests:(n.active_load||0));
-  var queuedL=parseFloat(n.queued_requests!=null?n.queued_requests:(n.queued_load||0));
-  var loadRatio=Math.min((act+queuedL)/maxC,1.5);
-  var ls=Math.max(0,1-loadRatio);
-  // Saturazione dichiarata dal nodo (v3): è il segnale di carico vero.
-  if(n.saturation!=null)ls=Math.min(ls,Math.max(0,1-n.saturation));
-  // Degradato = rifiuta nuovo lavoro: depenalizza pesantemente.
-  if(n.degraded)ls=Math.min(ls,0.1);
-  var bt=String(n.backend_type||(n.capability_profile&&n.capability_profile.backend_type)||'').toLowerCase();
-  var bs=(ROUTING_WEIGHTS.backend_scores||{})[bt];
-  if(bs===undefined)bs=0.5;
-  var w=ROUTING_WEIGHTS;
-  return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime+bs*w.backend;
+  return isNaN(rs)?null:rs;
 }
 
 // Score badge helper — colorazione coerente con lo score v1.05 (relativo
@@ -908,7 +875,8 @@ function computeScore(n){
 // non più su ALTO come con la vecchia normalizzazione degenere (_norm_high
 // restituiva 1.0 anche senza confronto).
 function scoreBadge(score){
-  var s=parseFloat(score)||0;
+  if(score==null||isNaN(score))return '<span class="score-badge" style="color:var(--text-faint);border:1px dashed var(--border)" title="Nodo non routabile: nessuno score routing v1.05">&#8212;</span>';
+  var s=parseFloat(score);
   var lbl=s>=0.65?'ALTO':s>=0.35?'MEDIO':'BASSO';
   var cls=s>=0.65?'score-high':s>=0.35?'score-mid':'score-low';
   var icon=s>=0.65?'&#9650;':s>=0.35?'&#9644;':'&#9660;';
@@ -944,7 +912,7 @@ async function refreshNodes(){
       var caps=(n.capabilities||[]).join(', ')||'?';
       var ver=n.version||'?';
       var ep=n.endpoint||'';
-      var score=computeScore(n);
+      var score=nodeScore(n);
       return '<div class="node-card">'
         +'<div class="nc-header"><span class="node-status-dot '+statusDotClass(n.status)+'"></span>'
         +'<span class="node-id" title="'+escH(n.node_id||'')+'">&#128187; '+escH(nid)+'</span>'
@@ -1119,7 +1087,7 @@ async function refreshRegistry(){
     	  :String(n.last_seen).replace('T',' ').slice(0,19);
       }
       var ep=n.endpoint||n.public_address||'';
-      var score=(scoreMap[n.node_id]!=null)?scoreMap[n.node_id]:computeScore(n);
+      var score=(scoreMap[n.node_id]!=null)?scoreMap[n.node_id]:null;
       return '<tr>'
         +'<td><span class="reg-id" title="'+escH(n.node_id||'')+'">'+(n.node_id||'?').slice(0,20)+'&hellip;</span></td>'
         +'<td><span class="reg-ep">'+escH(ep)+'</span></td>'
