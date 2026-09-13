@@ -76,6 +76,7 @@ main{padding:18px 20px;display:grid}
 .node-status-dot.unknown{background:var(--text-faint)}
 .node-id{font-family:var(--font-mono);font-size:.72rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .tier-badge{display:inline-flex;padding:2px 8px;border-radius:99px;font-size:.6rem;font-weight:700;text-transform:uppercase;flex-shrink:0}
+.engine-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:99px;font-size:.6rem;font-weight:700;flex-shrink:0;background:var(--info-bg);color:var(--info)}
 .tier-root{background:rgba(240,98,146,.15);color:var(--root)}
 .tier-hub{background:rgba(77,208,225,.12);color:var(--hub)}
 .tier-leaf{background:rgba(129,199,132,.12);color:var(--leaf)}
@@ -179,6 +180,32 @@ main{padding:18px 20px;display:grid}
 .mx-model-row{display:grid;grid-template-columns:1fr 80px 90px 90px;gap:8px;padding:6px 10px;font-size:.72rem;border-bottom:1px solid var(--divider)}
 .mx-model-row.head{color:var(--text-muted);font-size:.62rem;text-transform:uppercase;letter-spacing:.06em}
 .mx-empty{color:var(--text-faint);font-size:.72rem;padding:8px 2px}
+.mx-meta{font-family:var(--font-mono);font-size:.62rem;color:var(--text-faint);margin:2px 0 8px}
+.mx-node-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:10px}
+.mx-node-hdr{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:.72rem;margin-bottom:8px}
+.mx-node-name{font-family:var(--font-mono);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:120px}
+.mx-backend-badge{font-size:.58rem;font-weight:700;padding:2px 7px;border-radius:99px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.04em;flex-shrink:0}
+.mx-bt-inference{background:var(--info-bg);color:var(--info)}
+.mx-bt-manager{background:var(--primary-bg);color:var(--primary)}
+.mx-bt-unknown{background:var(--surface3);color:var(--text-faint)}
+.mx-node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px}
+.mx-node-tile{background:var(--surface2);border:1px solid var(--divider);border-radius:var(--radius);padding:7px 9px}
+.mx-node-tile-key{font-size:.56rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}
+.mx-node-tile-val{font-family:var(--font-mono);font-size:.86rem;color:var(--text);font-weight:600}
+.mx-up{color:var(--success)}
+.mx-down{color:var(--error)}
+.mx-runtime-row{display:grid;grid-template-columns:1fr 40px 60px 60px 64px 46px;gap:6px;padding:4px 8px;font-size:.66rem;border-bottom:1px solid var(--divider);align-items:center}
+.mx-runtime-row.head{color:var(--text-muted);font-size:.56rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--divider)}
+.mx-runtime-row.head span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mx-runtime-row .mono{font-family:var(--font-mono)}
+.mx-spark{display:block;margin-top:6px}
+.mx-scorebar{display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--surface2);margin:6px 0 4px}
+.mx-scorebar span{display:block;height:100%}
+.mx-score-terms{display:flex;flex-wrap:wrap;gap:6px 12px;font-family:var(--font-mono);font-size:.58rem;color:var(--text-muted)}
+.mx-score-terms b{color:var(--text)}
+.mx-score-check{font-family:var(--font-mono);font-size:.54rem;color:var(--text-faint);margin-top:2px}
+.mx-node-err{color:var(--error);font-size:.68rem;font-family:var(--font-mono);word-break:break-all}
+.mx-node-sub{font-size:.62rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin:8px 0 4px}
 /* setup */
 .setup-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:680px){.setup-grid{grid-template-columns:1fr}}
@@ -188,6 +215,17 @@ main{padding:18px 20px;display:grid}
 .legacy-body{display:none;padding-top:10px;border-top:1px solid var(--divider);margin-top:4px}
 .legacy-body.open{display:block}
 .legacy-warn{background:var(--warning-bg);border:1px solid var(--warning);border-radius:var(--radius);padding:7px 11px;font-size:.7rem;color:var(--warning);margin-bottom:10px}
+.env-banner{font-size:.68rem;color:var(--text-muted);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:7px 11px;margin-bottom:10px}
+.env-banner.err{color:var(--warning);border-color:var(--warning);background:var(--warning-bg)}
+.env-note{font-size:.64rem;color:var(--text-faint);background:var(--surface2);border-left:2px solid var(--border);border-radius:4px;padding:6px 10px;margin:4px 0 10px;line-height:1.45}
+.env-sec{font-size:.62rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin:12px 0 6px;padding-bottom:3px;border-bottom:1px solid var(--divider)}
+.env-row{display:grid;grid-template-columns:260px 1fr;gap:10px;align-items:start;padding:5px 0}
+@media(max-width:680px){.env-row{grid-template-columns:1fr}}
+.env-row .label{font-size:.7rem}
+.env-row .env-key{display:block;font-family:var(--font-mono);font-size:.56rem;color:var(--text-faint);margin-top:2px}
+.env-row .hint{font-size:.64rem;color:var(--text-muted);display:block;margin-top:3px;line-height:1.4}
+.env-ctl{display:flex;gap:8px}
+.env-ctl .inp{flex:1;min-width:0}
 /* modal */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:300;align-items:center;justify-content:center}
 .modal-overlay.open{display:flex}
@@ -368,6 +406,9 @@ main{padding:18px 20px;display:grid}
   <div id="mxModelList">
     <div class="mx-model-row head"><span>Modello</span><span>Req</span><span>Avg tok/s</span><span>Tok out</span></div>
   </div>
+  <div class="sec-title" style="margin-top:16px">Backend / Nodi &#8212; Telemetria</div>
+  <div class="mx-meta" id="mxNodesMeta">&#8635; caricamento&hellip;</div>
+  <div id="mxNodesList"><div class="mx-empty">Caricamento telemetria nodi&hellip;</div></div>
 </div>
 
 <!-- DIAGNOSTICS -->
@@ -416,6 +457,15 @@ main{padding:18px 20px;display:grid}
         <button class="btn btn-warn btn-sm" onclick="rotateSecret()">&#8635; Rotate</button>
       </div>
       <span class="hint" id="rsAt"></span>
+    </div>
+  </div>
+  <div class="card"><div class="card-title">&#129513;&#65039; Control-Plane Env</div>
+    <div class="env-banner" id="envBanner">Caricamento variabili...</div>
+    <div class="env-note">I pesi di routing sono <b>relativi</b> (non devono sommare a 1). Il blocco "qualità" (latenza/throughput/GPU) decide quando i campioni /metrics dei nodi sono freschi; altrimenti vale il blocco strutturale (VRAM/carico/tier/uptime).</div>
+    <div id="cpEnvList"></div>
+    <div class="setup-footer">
+      <button class="btn btn-ghost" onclick="loadEnv()">&#8634; Ricarica</button>
+      <button class="btn btn-primary" onclick="saveEnv()">&#128190; Applica e salva .env</button>
     </div>
   </div>
   <div class="card">
@@ -474,7 +524,340 @@ function showPanel(name,btn){
   if(name==='tasks')refreshTaskHistory();
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
-  if(name==='setup')loadCfg();
+  if(name==='setup'){loadCfg();loadEnv();}
+}
+
+// ── METRICS: live/summary (sessione) + telemetria nodi (/metrics/nodes) ──
+async function refreshMetrics(){
+  var live=null,sum=null,nodes=null;
+  try{live=await(await fetch('/metrics/live')).json();}catch(e){}
+  try{sum=await(await fetch('/metrics/summary')).json();}catch(e){}
+  try{nodes=await(await fetch('/metrics/nodes')).json();}catch(e){}
+  renderMetricsLive(live);
+  renderMetricsSummary(sum);
+  renderMetricsNodes(nodes);
+}
+// Poll periodico SOLO a tab attivo: il refresh all'apertura è già gestito da
+// showPanel('metrics'); evitiamo fetch inutili quando il pannello è nascosto.
+setInterval(function(){
+  var p=document.getElementById('panel-metrics');
+  if(p&&p.classList.contains('active'))refreshMetrics();
+},15000);
+
+function renderMetricsLive(live){
+  var gens=live&&live.generations||[];
+  var tps=0;
+  gens.forEach(function(g){tps+=parseFloat(g.tokens_per_sec||0);});
+  document.getElementById('mxLiveTps').textContent=tps.toFixed(1);
+  var el=document.getElementById('mxLiveList');
+  if(!gens.length){el.innerHTML='<div class="mx-empty">Nessuna generazione attiva.</div>';return;}
+  el.innerHTML=gens.map(function(g){
+    return '<div class="mx-live-item"><span title="'+escH(g.node_id||'')+'">'
+      +(g.model?escH(g.model):'?')+' &#183; '+escH((g.node_id||'').slice(0,12))
+      +'</span><span class="mx-live-tps">'+mxF1(g.tokens_per_sec)+' tok/s</span></div>';
+  }).join('');
+}
+
+function renderMetricsSummary(sum){
+  if(!sum){return;}
+  document.getElementById('mxAvgTps').textContent=sum.avg_tokens_per_sec!=null?mxF1(sum.avg_tokens_per_sec):'\u2014';
+  document.getElementById('mxReq').textContent=mxNum(sum.requests);
+  document.getElementById('mxTokOut').textContent=mxNum(sum.tokens_out);
+  document.getElementById('mxTokIn').textContent=mxNum(sum.tokens_in);
+  var el=document.getElementById('mxModelList');
+  var mods=sum.models||[];
+  var head='<div class="mx-model-row head"><span>Modello</span><span>Req</span><span>Avg tok/s</span><span>Tok out</span></div>';
+  if(!mods.length){
+    el.innerHTML=head+'<div class="mx-empty">Nessuna interazione registrata.</div>';
+    return;
+  }
+  el.innerHTML=head+mods.map(function(m){
+    return '<div class="mx-model-row"><span title="'+escH(m.model||'')+'">'+escH(m.model||'?')+'</span>'
+      +'<span>'+mxNum(m.requests)+'</span>'
+      +'<span>'+(m.avg_tokens_per_sec!=null?mxF1(m.avg_tokens_per_sec):'&#8212;')+'</span>'
+      +'<span>'+mxNum(m.tokens_out)+'</span></div>';
+  }).join('');
+}
+
+function renderMetricsNodes(data){
+  var meta=document.getElementById('mxNodesMeta');
+  var list=document.getElementById('mxNodesList');
+  if(!data||!data.nodes){
+    meta.textContent='\u2014 telemetria nodi non disponibile \u2014';
+    list.innerHTML='<div class="mx-empty">Endpoint /metrics/nodes non disponibile o errore di rete.</div>';
+    return;
+  }
+  meta.textContent='sampled_at='+(data.sampled_at||'\u2014')
+    +'  interval_s='+(data.interval_s!=null?data.interval_s:'\u2014')
+    +'  window='+(data.window!=null?data.window:'\u2014')
+    +'  schema='+(data.schema_version!=null?'v'+data.schema_version:'\u2014');
+  var nodes=data.nodes||[];
+  if(!nodes.length){list.innerHTML='<div class="mx-empty">Nessun nodo nel mesh.</div>';return;}
+  // Ordina: prima i nodi attivi con health UP, poi attivi non-stale, poi
+  // attivi stale, poi unreachable, infine stato sconosciuto.
+  nodes.sort(function(a,b){return mxNodeRank(a)-mxNodeRank(b);});
+  list.innerHTML=nodes.map(renderNodeCard).join('');
+}
+
+// Rank per ordinare le card: health reale pesa più dello stato dichiarato.
+function mxNodeRank(n){
+  var m=n.metrics||{};
+  var up=!!(m.server&&m.server.health&&m.server.health.up===true);
+  if(n.status==='active'&&up)return 0;
+  if(n.status==='active'&&!n.stale)return 1;
+  if(n.status==='active')return 2;
+  if(n.status==='unreachable')return 3;
+  return 4;
+}
+
+function renderNodeCard(n){
+  var m=n.metrics||null;
+  var bd=n.score_breakdown||null;
+  var rt=m&&m.runtime||null;
+  var rtKeys=rt?Object.keys(rt):[];
+  var name=escH(n.node_id?n.node_id.slice(0,16):(n.endpoint||'?'))
+    +(n.alias?' <span class="tier-badge" style="background:var(--primary-bg);color:var(--primary)">@'+escH(n.alias)+'</span>':'');
+  var btCls='mx-bt-unknown';
+  if(m&&m.backend_type==='inference_server')btCls='mx-bt-inference';
+  else if(m&&m.backend_type==='model_manager')btCls='mx-bt-manager';
+  var bt='<span class="mx-backend-badge '+btCls+'" title="backend_type">'+(m&&m.backend_type?escH(m.backend_type):'?')+'</span>';
+  var eng=m&&m.engine?'<span class="engine-badge" title="Motore d\'inferenza">&#9881; '+escH(m.engine)+'</span>':'';
+  var extra=[];
+  if(n.stale)extra.push('<span class="tier-badge" style="background:var(--warning-bg);color:var(--warning)" title="Ultimo campione pi&ugrave; vecchio di 2x intervallo di poll">&#9888; stale</span>');
+  if(n.schema_mismatch)extra.push('<span class="tier-badge" style="background:var(--error-bg);color:var(--error)" title="schema /metrics incompatibile">&#10007; schema</span>');
+  extra.push('<span style="font-family:var(--font-mono);font-size:.62rem;color:var(--text-faint)" title="et&agrave; ultimo campione: '
+    +(n.sample_age_s!=null?mxF1(n.sample_age_s)+'s':'&#8212;')
+    +' &mdash; raccolto: '+(n.last_collected_at?escH(n.last_collected_at):'mai')+'">'
+    +(n.sample_age_s!=null?mxF1(n.sample_age_s)+'s':'&#8212;')+'</span>');
+  var hdr='<div class="mx-node-hdr">'
+    +'<span class="node-status-dot '+statusDotClass(n.status)+'"></span>'
+    +'<span class="mx-node-name" title="'+escH(n.node_id||'')+'">'+name+'</span>'
+    +bt+eng+extra.join('')+'</div>';
+
+  // Tile backend (health o stato)
+  // up === true / false esplicito: un health presente ma senza chiave "up"
+  // (payload malformato) non deve essere interpretato come DOWN.
+  var hasHealth=!!(m&&m.server&&m.server.health);
+  var up=hasHealth?m.server.health.up===true:null;
+  var tiles=[];
+  if(up===null){
+    tiles.push(mxTile('Backend','<span class="mx-down">'+escH(n.status==='active'?'no data':(n.status||'offline'))+'</span>',''));
+  }else{
+    tiles.push(mxTile('Backend',up?'<span class="mx-up">UP</span>':'<span class="mx-down">DOWN</span>',''));
+  }
+  var tps=mxNodeTps(m);
+  tiles.push(mxTile('Tok/s',tps.val,tps.src));
+  var ld=m&&m.load||null;
+  if(ld){
+    // Schema v3: capacity/saturation/degraded. Fallback v2 (unità) per nodi
+    // non ancora aggiornati al nuovo contratto.
+    var act=ld.active_requests!=null?ld.active_requests:(ld.active_units||0);
+    var cap=ld.capacity!=null?ld.capacity:1;
+    var q=ld.queued_requests!=null?ld.queued_requests:(ld.queued_units||0);
+    var sub='';
+    if(ld.degraded)sub+='<span class="mx-down">DEGRADED</span> ';
+    if(ld.degradation_pct!=null)sub+=Math.round(ld.degradation_pct)+'% degr ';
+    if(ld.saturation!=null)sub+=Math.round(ld.saturation*100)+'% sat';
+    var subQ=q?'+'+mxF1(q)+' q':'';
+    tiles.push(mxTile('Load',mxF1(act)+'/'+mxF1(cap),(subQ+' '+sub).trim()));
+  }else{
+    tiles.push(mxTile('Load','&#8212;',''));
+  }
+  var p50=m&&m.server&&m.server.latency_ms_p50;
+  if(p50!=null)tiles.push(mxTile('Latenza p50',mxF1(p50)+' ms',''));
+  var gpu=m&&m.server&&m.server.gpu_cache_usage_perc;
+  if(gpu!=null)tiles.push(mxTile('Cache GPU',mxF1(gpu)+'%',''));
+  var rr=m&&m.server&&m.server.requests_running;
+  if(rr!=null)tiles.push(mxTile('Rich. attive',mxNum(rr),''));
+
+  // Sparkline da history[]
+  var sparkHtml='';
+  var hist=n.history||[];
+  if(hist.length>=2){
+    var tpsSeries=hist.map(function(h){
+      // stessa regola del tile: idle -> 0, altrimenti gauge vLLM o somma
+      // EWMA dei modelli che stanno eseguendo (load.active_by_model).
+      return sampleTokPerSec(h);
+    });
+    var ldSeries=hist.map(function(h){
+      var l=h.load||{};
+      var v=l.active_requests!=null?l.active_requests:l.active_units;
+      return v!=null?parseFloat(v):null;
+    });
+    sparkHtml='<div style="display:flex;gap:20px;flex-wrap:wrap;margin-top:8px">'
+      +'<div><div class="mx-node-sub" style="margin:0 0 2px">tok/s (storico)</div>'+sparkline(tpsSeries,220,34)+'</div>'
+      +'<div><div class="mx-node-sub" style="margin:0 0 2px">load (storico)</div>'+sparkline(ldSeries,220,34)+'</div>'
+      +'</div>';
+  }
+
+  // Righe per modello
+  var rowsHtml='';
+  if(rtKeys.length){
+    rowsHtml+='<div class="mx-node-sub">Modelli ('+rtKeys.length+')</div>'
+      +'<div class="mx-runtime-row head"><span>Modello</span><span>VRAM</span><span>tok/s</span><span>lat ms</span><span>sorgente</span><span>et&agrave;</span></div>';
+    rtKeys.sort().forEach(function(k){
+      var e=rt[k];
+      var dot=e.loaded?'<span style="color:var(--success)">&#9679;</span>':'<span style="color:var(--text-faint)">&#9675;</span>';
+      var short=k.length>34?k.slice(0,34)+'&hellip;':k;
+      rowsHtml+='<div class="mx-runtime-row"><span title="'+escH(k)+'">'+dot+' '+escH(short)+'</span>'
+        +'<span class="mono">'+(e.vram_gb!=null?mxF1(e.vram_gb)+'G':'&#8212;')+'</span>'
+        +'<span class="mono">'+(e.tokens_per_sec_ewma!=null?mxF1(e.tokens_per_sec_ewma):'&#8212;')+'</span>'
+        +'<span class="mono">'+(e.latency_ms_ewma!=null?mxF1(e.latency_ms_ewma):'&#8212;')+'</span>'
+        +'<span class="mono">'+mxSource(e.sample_source)+'</span>'
+        +'<span class="mono" style="color:var(--text-faint)">'+(e.data_age_s!=null?mxF1(e.data_age_s)+'s':'&#8212;')+'</span>'
+        +'</div>';
+    });
+  }
+
+  // Score routing (breakdown) — v1.05: blocchi STRUTTURALE (VRAM/Load/Tier/
+  // Uptime/Backend) e QUALITÀ osservata (Lat/Tput/GPU). bd.total è lo STESSO
+  // valore del badge "mesh nodes" (fonte unica _fleet_scores lato CP). I
+  // termini in legenda sono già pesati E scalati da health_s, quindi vale
+  // sempre l'invariante: Σ termini + recent_s = totale (verificata; lo scarto
+  // è solo l'arrotondamento dei termini a 4 decimali). recent_s (penalità
+  // "ultimo scelto") è un contributo negativo esplicito, non nascosto nel
+  // totale, così la somma visibile torna.
+  var scoreHtml='';
+  if(!bd){
+    scoreHtml='<div class="mx-node-sub">Score routing '
+      +'<span style="color:var(--text-faint);text-transform:none;font-weight:400">non routabile: nessuno score</span></div>';
+  }else{
+    var terms=[['vram_s','--primary','VRAM'],['load_s','--success','Load'],['tier_s','--info','Tier'],['uptime_s','--warning','Uptime'],['backend_s','--dream','Backend'],['lat_s','--primary','Lat'],['tps_s','--success','Tput'],['gpu_s','--info','GPU']];
+    var total=parseFloat(bd.total);if(isNaN(total))total=0;
+    var rows=[];
+    terms.forEach(function(t){
+      var v=parseFloat(bd[t[0]]||0);
+      if(v<=0)return; // termini assenti (es. qualità non disponibile) non vanno in barra/legenda
+      rows.push({k:t[2],v:v,c:t[1]});
+    });
+    var pos=0;rows.forEach(function(r){pos+=r.v;});
+    var segs='',leg='';
+    rows.forEach(function(r){
+      var pct=pos>0?(r.v/pos)*100:0;
+      segs+='<span style="background:var('+r.c+');width:'+pct.toFixed(1)+'%" title="'+r.k+' '+mxF2(r.v)+'"></span>';
+      leg+='<span><span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:var('+r.c+');margin-right:4px"></span>'+r.k+' <b>'+mxF2(r.v)+'</b></span>';
+    });
+    var rec=parseFloat(bd.recent_s)||0;
+    var gate=[];
+    if(bd.health_s!=null)gate.push('health \u00d7'+mxF2(bd.health_s));
+    if(bd.q!=null)gate.push('q '+mxF2(bd.q));
+    scoreHtml='<div class="mx-node-sub">Score routing '+scoreBadge(total)
+      +(gate.length?' &#183; <span style="color:var(--text-faint)">'+gate.join(' &#183; ')+'</span>':'')+'</div>'
+      +'<div class="mx-scorebar">'+segs+'</div>'
+      +'<div class="mx-score-terms">'+leg
+      +(rec<0?'<span><span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:var(--error);margin-right:4px"></span>recent <b style="color:var(--error)">'+mxF2(rec)+'</b></span>':'')
+      +'</div>'
+      +'<div class="mx-score-check">\u03a3 termini + recent = totale &#183; termini gi\u00e0 scalati da health_s</div>';
+  }
+
+  var errHtml='';
+  if(n.last_error)errHtml='<div class="mx-node-err">&#10007; '+escH(n.last_error)
+    +(n.last_collected_at?' &mdash; ultimo ok: '+escH(n.last_collected_at):'')+'</div>';
+  else if(!m&&n.status!=='active')errHtml='<div class="mx-node-err">nessuna telemetria raccolta</div>';
+
+  return '<div class="mx-node-card">'+hdr+'<div class="mx-node-grid">'+tiles.join('')+'</div>'
+    +sparkHtml+rowsHtml+scoreHtml+errHtml+'</div>';
+}
+
+function mxTile(k,v,sub){
+  return '<div class="mx-node-tile"><div class="mx-node-tile-key">'+k+'</div>'
+    +'<div class="mx-node-tile-val">'+v+'</div>'
+    +(sub?'<div style="font-family:var(--font-mono);font-size:.56rem;color:var(--text-faint)">'+sub+'</div>':'')
+    +'</div>';
+}
+
+function mxNodeTps(m){
+  if(!m)return {val:'\u2014',src:''};
+  // Tok/s = throughput CORRENTE: con load attivo si mostra il valore, da idle
+  // non c'è attività quindi il tile non deve restare "valorizzato".
+  var ld=m.load||{};
+  var active=parseFloat(ld.active_requests!=null?ld.active_requests:(ld.active_units||0))||0;
+  if(active<=0)return {val:'\u2014',src:'idle'};
+  var v=sampleTokPerSec(m);
+  if(v==null)return {val:'\u2014',src:'stima'};
+  var s=m.server||{};
+  if(s.tokens_per_sec!=null){
+    return {val:mxF1(v),src:s.tokens_per_sec_source?mxSource(s.tokens_per_sec_source):''};
+  }
+  var am=activeModels(m);
+  return {val:mxF1(v),src:am.length?'\u2248 '+am.join(', '):'\u2248 stima'};
+}
+
+// Modelli che stanno eseguendo richieste ADESSO (segnalati dal nodo in
+// load.active_by_model: modello -> unità di carico attive). Ritorna la lista
+// ordinata; vuota se il nodo non segnala nulla (vecchia versione).
+function activeModels(sample){
+  var abm=(sample.load||{}).active_by_model||{};
+  var out=[];
+  Object.keys(abm).forEach(function(k){
+    if(parseFloat(abm[k])>0)out.push(k);
+  });
+  return out.sort();
+}
+
+// Tok/s corrente da un campione (tile e sparkline): stessa regola.
+//   idle (load attivo <= 0)         -> 0 (nessuna throughput)
+//   vLLM (server.tokens_per_sec)    -> gauge reale
+//   Ollama                           -> somma degli EWMA dei modelli che
+//       stanno EFFETTIVAMENTE eseguendo (load.active_by_model). Niente
+//       euristiche sul campione "più recente": se il modello attivo non ha
+//       EWMA o il nodo non segnala il modello attivo -> null.
+function sampleTokPerSec(sample){
+  var ld=sample.load||{};
+  var active=parseFloat(ld.active_requests!=null?ld.active_requests:(ld.active_units||0))||0;
+  if(active<=0)return 0;
+  var s=sample.server||{};
+  if(s.tokens_per_sec!=null)return parseFloat(s.tokens_per_sec);
+  var abm=ld.active_by_model||{};
+  var r=sample.runtime||{};
+  var sum=null;
+  Object.keys(abm).forEach(function(k){
+    if(parseFloat(abm[k])<=0)return;
+    var e=r[k];
+    if(e&&e.tokens_per_sec_ewma!=null){
+      sum=(sum==null?0:sum)+parseFloat(e.tokens_per_sec_ewma);
+    }
+  });
+  return sum;
+}
+
+function sparkline(vals,w,h){
+  var min=null,max=null,pts=0;
+  for(var i=0;i<vals.length;i++){var v=vals[i];if(v==null||isNaN(v))continue;if(min==null||v<min)min=v;if(max==null||v>max)max=v;pts++;}
+  if(!pts)return '<div style="font-size:.6rem;color:var(--text-faint)">nessun dato</div>';
+  if(max===min)max=min+1;
+  var coords=[];
+  var span=vals.length>1?vals.length-1:1;
+  for(i=0;i<vals.length;i++){
+    var v2=vals[i];
+    if(v2==null||isNaN(v2))continue;
+    var x=span>0?(i/span*(w-2)+1):1;
+    var y=h-1-((v2-min)/(max-min))*(h-2);
+    coords.push(x.toFixed(1)+','+y.toFixed(1));
+  }
+  var inner;
+  if(coords.length===1){
+    var p=coords[0].split(',');
+    inner='<circle cx="'+p[0]+'" cy="'+p[1]+'" r="1.8" fill="var(--primary)"/>';
+  }else{
+    inner='<polyline fill="none" stroke="var(--primary)" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round" points="'+coords.join(' ')+'"/>';
+  }
+  return '<svg class="mx-spark" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'">'+inner+'</svg>';
+}
+
+// Helpers formattazione metrics
+function mxNum(v){
+  if(v==null||isNaN(v))return '\u2014';
+  var n=parseFloat(v);
+  if(Math.abs(n)>=1e6)return (n/1e6).toFixed(1)+'M';
+  if(Math.abs(n)>=1e3)return (n/1e3).toFixed(1)+'k';
+  return String(Math.round(n));
+}
+function mxF1(v){if(v==null||isNaN(v))return '\u2014';return (+parseFloat(v).toFixed(1)).toString();}
+function mxF2(v){if(v==null||isNaN(v))return '\u2014';return (+parseFloat(v).toFixed(2)).toString();}
+function mxSource(s){
+  if(!s)return '\u2014';
+  return ({ewma:'EWMA',gauge:'gauge',gauge_aggregate:'gauge+',counter_rate:'rate'})[s]||String(s);
 }
 
 // HB Bar
@@ -492,49 +875,45 @@ async function refreshHbBar(){
 }
 setInterval(refreshHbBar,5000); refreshHbBar();
 
-// ── ROUTING WEIGHTS ─────────────────────────────────────────────────────────
-// Pesi di routing letti dal control-plane, così il badge score/load in
-// dashboard riflette davvero cosa decide il routing invece di una formula
-// hardcoded lato client che potrebbe disallinearsi silenziosamente se i
-// pesi vengono cambiati via .env (ROUTING_WEIGHT_*).
-var ROUTING_WEIGHTS={vram:0.55,load:0.25,tier:0.10,uptime:0.10,max_candidates:3};
-async function loadRoutingWeights(){
-  try{
-    var d=await(await fetch('/config/routing-weights')).json();
-    ROUTING_WEIGHTS=d;
-  }catch(e){}
-}
-loadRoutingWeights();
-setInterval(loadRoutingWeights,60000);
-
-function computeScore(n){
-  var tierS={'root':3,'hub':2,'leaf':1};
-  var ts=(tierS[n.tier||'leaf']||1)/3;
-  var vs=Math.min(parseFloat(n.vram_gb||0),24)/24;
-  var us=Math.min(parseInt(n.uptime_s||0),604800)/604800;
-  var maxC=Math.max(parseInt(n.max_concurrent||1),1);
-  var loadRatio=Math.min(((parseInt(n.active_requests||0))+(parseInt(n.queued_requests||0)))/maxC,1.5);
-  var ls=Math.max(0,1-loadRatio);
-  var w=ROUTING_WEIGHTS;
-  return vs*w.vram+ls*w.load+ts*w.tier+us*w.uptime;
+// ── SCORE (fonte unica lato control-plane) ────────────────────────────────
+// Il control-plane espone il routing_score REALE v1.05 (ibrido qualità+
+// strutturale normalizzato sui candidati) su /mesh/nodes. Il client NON
+// ricalcola più nulla: legge routing_score e, per i nodi non routabili
+// (inattivi/non-executable/assenti dal mesh), mostra "—" invece di inventare
+// un valore fuori scala con una formula locale disallineata dai pesi .env.
+function nodeScore(n){
+  var rs=parseFloat(n.routing_score);
+  return isNaN(rs)?null:rs;
 }
 
-// Score badge helper
+// Score badge helper — colorazione coerente con lo score v1.05 (relativo
+// alla flotta dei candidati, normalizzazione min-max lato CP):
+//   ALTO   >= 0.65  (nodo che domina i candidati su qualità/struttura)
+//   MEDIO  0.35..0.65
+//   BASSO  < 0.35   (debole, degraded, stale o senza telemetria)
+// Un nodo leaf/model_manager/VRAM=0 "iniziale" ora si assesta sul MEDIO,
+// non più su ALTO come con la vecchia normalizzazione degenere (_norm_high
+// restituiva 1.0 anche senza confronto).
 function scoreBadge(score){
-  var s=parseFloat(score)||0;
+  if(score==null||isNaN(score))return '<span class="score-badge" style="color:var(--text-faint);border:1px dashed var(--border)" title="Nodo non routabile: nessuno score routing v1.05">&#8212;</span>';
+  var s=parseFloat(score);
+  var lbl=s>=0.65?'ALTO':s>=0.35?'MEDIO':'BASSO';
   var cls=s>=0.65?'score-high':s>=0.35?'score-mid':'score-low';
   var icon=s>=0.65?'&#9650;':s>=0.35?'&#9644;':'&#9660;';
-  return '<span class="score-badge '+cls+'">'+icon+' '+s.toFixed(2)+'</span>';
+  return '<span class="score-badge '+cls+'" title="Score routing v1.05 (relativo alla flotta dei candidati): ALTO &ge;0.65 &middot; MEDIO &ge;0.35 &middot; BASSO &lt;0.35">'+icon+' '+lbl+' '+s.toFixed(2)+'</span>';
 }
 
-// Load badge helper — mostra active/max e, se presente, la coda in attesa
+// Load badge helper — mostra active/capacity (schema v3) con fallback v2
 function loadBadge(n){
-  var maxC=Math.max(parseInt(n.max_concurrent||1),1);
-  var act=parseInt(n.active_requests||0);
-  var q=parseInt(n.queued_requests||0);
+  var maxC=Math.max(parseFloat(n.capacity!=null?n.capacity:(n.max_load_units!=null?n.max_load_units:n.max_concurrent||1)),0.01);
+  var act=parseFloat(n.active_requests!=null?n.active_requests:(n.active_load||0));
+  var q=parseFloat(n.queued_requests!=null?n.queued_requests:(n.queued_load||0));
   var ratio=act/maxC;
+  if(n.saturation!=null)ratio=Math.max(ratio,n.saturation);
   var cls=ratio>=1?'score-low':ratio>=0.5?'score-mid':'score-high';
-  var label=act+'/'+maxC+(q?' (+'+q+' coda)':'');
+  var r2=function(x){return Math.round(x*100)/100;};
+  var label=r2(act)+'/'+r2(maxC)+(q?' (+'+r2(q)+' coda)':'');
+  if(n.degraded)label+=' <span class="mx-down">DEGRADED</span>';
   return '<span class="score-badge '+cls+'">'+label+'</span>';
 }
 
@@ -548,16 +927,18 @@ async function refreshNodes(){
     grid.innerHTML=nodes.map(function(n){
       var nid=n.node_id?n.node_id.slice(0,16)+'...':n.endpoint||'?';
       var tier=n.tier||'leaf';
+      var engine=n.engine||'';
       var uptime=n.uptime_s?formatUptime(n.uptime_s):'?';
       var caps=(n.capabilities||[]).join(', ')||'?';
       var ver=n.version||'?';
       var ep=n.endpoint||'';
-      var score=computeScore(n);
+      var score=nodeScore(n);
       return '<div class="node-card">'
         +'<div class="nc-header"><span class="node-status-dot '+statusDotClass(n.status)+'"></span>'
         +'<span class="node-id" title="'+escH(n.node_id||'')+'">&#128187; '+escH(nid)+'</span>'
         +'<span class="tier-badge '+tierClass(tier)+'">'+tier+'</span>'
 	+(n.alias?'<span class="tier-badge" style="background:var(--primary-bg);color:var(--primary)">@'+escH(n.alias)+'</span>':'')
+	+(engine?'<span class="engine-badge" title="Motore d\'inferenza">&#9881; '+escH(engine)+'</span>':'')
         +scoreBadge(score)
 	+'<button class="btn btn-ghost btn-sm" style="padding:1px 7px;font-size:.6rem;margin-left:auto" '
         +'onclick="setAlias(\''+escH(n.node_id||'')+'\',\''+escH(n.alias||'')+'\')" title="Imposta/rimuovi alias">&#9998;</button>'
@@ -689,6 +1070,14 @@ function reLayout(){
 
 // Registry
 async function refreshRegistry(){
+  // Mappa node_id -> score reale v1.05 (esposto da /mesh/nodes): la tabella
+  // registry legge /registry/nodes (payload del servizio registry, senza
+  // score) ma deve mostrare lo stesso score del resto della dashboard.
+  var scoreMap={};
+  try{
+    var mn=await(await fetch('/mesh/nodes')).json();
+    mn.forEach(function(x){if(x.node_id&&x.routing_score!=null)scoreMap[x.node_id]=x.routing_score;});
+  }catch(e){}
   try{
     var rh=await(await fetch('/registry/health')).json();
     var dot=document.getElementById('regDot'),lbl=document.getElementById('regStatusLabel');
@@ -718,7 +1107,7 @@ async function refreshRegistry(){
     	  :String(n.last_seen).replace('T',' ').slice(0,19);
       }
       var ep=n.endpoint||n.public_address||'';
-      var score=computeScore(n);
+      var score=(scoreMap[n.node_id]!=null)?scoreMap[n.node_id]:null;
       return '<tr>'
         +'<td><span class="reg-id" title="'+escH(n.node_id||'')+'">'+(n.node_id||'?').slice(0,20)+'&hellip;</span></td>'
         +'<td><span class="reg-ep">'+escH(ep)+'</span></td>'
@@ -953,6 +1342,50 @@ async function saveCfg(){
   };
   var d=await(await fetch('/config/advanced',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
   showMsg(d.ok?'Salvato':'Errore');
+}
+// Control-Plane Env: modifica a runtime + persistenza su .env
+var CP_ENV=null;
+function envField(v){
+  var id='env_'+v.key;
+  if(v.type==='bool')return '<label class="cb" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="'+id+'"'+(v.value==='true'?' checked':'')+'/><span>attivo</span></label>';
+  if(v.options)return '<select id="'+id+'" class="inp">'+v.options.map(function(o){return '<option'+(o===v.value?' selected':'')+'>'+escH(o)+'</option>';}).join('')+'</select>';
+  if(v.type==='int'||v.type==='float')return '<input id="'+id+'" type="number" step="'+(v.type==='float'?'any':'1')+'" class="inp inp-mono" value="'+escH(v.value)+'"/>';
+  return '<input id="'+id+'" type="'+(v.type==='password'?'password':'text')+'" class="inp inp-mono" value="'+escH(v.value)+'" autocomplete="off"/>';
+}
+async function loadEnv(){
+  var banner=document.getElementById('envBanner');
+  var el=document.getElementById('cpEnvList');
+  var d=await(await fetch('/config/env')).json();
+  if(!d.ok){banner.textContent='Errore: '+(d.error||'unreachable');banner.className='env-banner err';el.innerHTML='';return;}
+  CP_ENV=d;
+  banner.textContent=d.writable
+    ?'File .env: '+d.file_path+' — le modifiche sono applicate SUBITO al runtime e salvate qui (sopravvivono al riavvio).'
+    :'File .env non scrivibile ('+d.file_path+'). Le modifiche saranno applicate SOLO al runtime corrente (persi al riavvio del container).';
+  banner.className=d.writable?'env-banner':'env-banner err';
+  var html='',lastSec='';
+  d.vars.forEach(function(v){
+    if(v.section!==lastSec){html+='<div class="env-sec">'+escH(v.section)+'</div>';lastSec=v.section;}
+    html+='<div class="env-row"><div><label class="label" for="env_'+v.key+'">'+escH(v.label)+'</label><span class="env-key">'+escH(v.key)+'</span></div>'
+       +'<div><div class="env-ctl">'+envField(v)+'</div>'+(v.hint?'<span class="hint">'+escH(v.hint)+'</span>':'')+'</div></div>';
+  });
+  el.innerHTML=html;
+}
+async function saveEnv(){
+  if(!CP_ENV){loadEnv();return;}
+  var updates={};
+  CP_ENV.vars.forEach(function(v){
+    var inp=document.getElementById('env_'+v.key);
+    if(!inp)return;
+    if(v.type==='bool')updates[v.key]=inp.checked?'true':'false';
+    else updates[v.key]=inp.value;
+  });
+  var d=await(await fetch('/config/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:updates})})).json();
+  if(d.ok){
+    showMsg('Env aggiornato ('+d.applied.length+' variabili)'+(d.persisted===false?' — .env NON scritto, valido solo fino a riavvio':''));
+    loadEnv();
+  }else{
+    showMsg('Errore: '+(d.error||'unknown'));
+  }
 }
 async function rotateSecret(){
   var d=await(await fetch('/config/secret/rotate',{method:'POST'})).json();

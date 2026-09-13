@@ -1,5 +1,13 @@
 # control-plane/main.py
-# HyperSpace AGI v1.04 — Control Plane
+# HyperSpace AGI v1.05 — Control Plane
+# v1.05: routing metric-driven — scoring IBRIDO (qualità osservata
+#        latenza/throughput per modello + pressione VRAM motore) normalizzato
+#        sul set di candidati, con fallback strutturale (vram/tier/uptime/
+#        backend_type) quando i campioni /metrics mancano o sono stale;
+#        saturazione del nodo da schema /metrics v3 (saturation/degraded),
+#        fallback v2 per nodi non aggiornati; penalità "ultimo scelto" per
+#        bilanciare il carico tra nodi di pari valore. Backend: punteggio per
+#        backend_type (inference_server vs model_manager), non più per prodotto.
 # feat: /v1/chat/completions OpenAI-compatible endpoint
 # feat: tool calling loop — web_search, omega_query, omega_store, get_mesh_status
 # feat: memory sync inter-nodo nell'heartbeat + smart task routing (carico + tier/vram/uptime)
@@ -35,6 +43,8 @@
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 import os, threading, time, requests, json, uuid, gzip, hashlib, socket, re
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import sys
 
@@ -47,6 +57,8 @@ from shared.identity import (
     make_request_headers,
     verify_request_headers,
 )
+from shared.engine_profiles import all_backend_type_scores as _all_backend_scores
+import routing as _routing
 from connectors.manager import ConnectorManager
 
 app = Flask(__name__)
@@ -71,18 +83,73 @@ MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080").rstrip("/")
 
 # ── ROUTING: PESI DELLO SCORING ─────────────────────────────────────────────
-# La VRAM pesa più di tutto il resto messo insieme: un nodo CPU-only
-# (vram_gb=0) va nettamente sfavorito anche quando è libero, perché è
-# strutturalmente lento — il carico serve solo a evitare di accodare
-# richieste su un nodo GPU già saturo, non a preferire la CPU rispetto a una
-# GPU semplicemente occupata. Non serve che sommino esattamente a 1.0, sono
-# pesi relativi. Esposti in sola lettura via /config/routing-weights così la
-# dashboard può allineare il badge visivo senza duplicare i default a mano.
+# v1.05: scoring IBRIDO metric-driven (vedi control-plane/routing.py). Il
+# blocco QUALITÀ (latenza/throughput per modello, pressione VRAM motore)
+# domina quando i campioni /metrics sono freschi; il blocco STRUTTURALE
+# (vram/tier/uptime/backend) è il fallback quando i dati mancano. I pesi
+# strutturali restano configurabili via ROUTING_WEIGHT_* (sono relativi, non
+# devono sommare a 1); quelli di qualità via ROUTING_WEIGHT_LATENCY/TPUT/GPU.
+# Esposti in sola lettura via /config/routing-weights.
 ROUTING_WEIGHT_VRAM   = float(os.getenv("ROUTING_WEIGHT_VRAM", "0.55"))
 ROUTING_WEIGHT_LOAD   = float(os.getenv("ROUTING_WEIGHT_LOAD", "0.25"))
 ROUTING_WEIGHT_TIER   = float(os.getenv("ROUTING_WEIGHT_TIER", "0.10"))
 ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
+# Peso del paradigma di serving (backend_type: inference_server vs
+# model_manager) nel blocco strutturale. Il punteggio per backend_type vive
+# in shared/engine_profiles.py — unica fonte di verità.
+ROUTING_WEIGHT_ENGINE = float(os.getenv("ROUTING_WEIGHT_ENGINE", "0.15"))
+# Blocco qualità (in funzione delle metriche osservate).
+ROUTING_WEIGHT_LATENCY = float(os.getenv("ROUTING_WEIGHT_LATENCY", "0.45"))
+ROUTING_WEIGHT_TPUT    = float(os.getenv("ROUTING_WEIGHT_TPUT", "0.35"))
+ROUTING_WEIGHT_GPU     = float(os.getenv("ROUTING_WEIGHT_GPU", "0.20"))
+# Bilanciamento: penalità "ultimo scelto" — il nodo appena usato viene
+# lievemente depenalizzato, con decadimento esponenziale nella finestra.
+# Piccola a default: rompe i pareggi senza far perdere un nodo migliore.
+ROUTING_RECENT_PENALTY  = float(os.getenv("ROUTING_RECENT_PENALTY", "0.10"))
+ROUTING_RECENT_WINDOW_S = float(os.getenv("ROUTING_RECENT_WINDOW_S", "45"))
 
+_ROUTING_WEIGHTS = {
+    "vram": ROUTING_WEIGHT_VRAM,
+    "load": ROUTING_WEIGHT_LOAD,
+    "tier": ROUTING_WEIGHT_TIER,
+    "uptime": ROUTING_WEIGHT_UPTIME,
+    "backend": ROUTING_WEIGHT_ENGINE,
+    "latency": ROUTING_WEIGHT_LATENCY,
+    "tput": ROUTING_WEIGHT_TPUT,
+    "gpu": ROUTING_WEIGHT_GPU,
+    "recent_penalty": ROUTING_RECENT_PENALTY,
+    "recent_window": ROUTING_RECENT_WINDOW_S,
+}
+
+# Nodi appena scelti dal router (node_id -> istante), per il termine
+# recent_s. Protetto da lock: la selezione gira su più thread di request.
+_recent_routing_lock = threading.Lock()
+_recent_routing_picks: dict = {}
+
+# ── TELEMETRIA NODI: pull periodico di /metrics dai nodi ───────────────────
+# Il control-plane interroga ogni nodo attivo sul suo /metrics (payload
+# backend normalizzato, vedi node/backend_metrics.py) a cadenza indipendente
+# dall'heartbeat di /status: lo stato operativo (routing) e la telemetria
+# (diagnosi, score breakdown, futuri termini di scoring osservati) restano
+# separati. I campioni restano in una finestra volatile in-memory
+# (METRICS_WINDOW) per i mini-grafici della dashboard; lo storico persistente
+# è una fase successiva (niente DB qui per ora).
+METRICS_POLL_INTERVAL_S = int(os.getenv("METRICS_POLL_INTERVAL_S", "20"))
+METRICS_POLL_TIMEOUT_S  = int(os.getenv("METRICS_POLL_TIMEOUT_S", "4"))
+METRICS_WINDOW          = int(os.getenv("METRICS_WINDOW", "20"))
+# Fetch dei nodi in PARALLELO: la raccolta seriale (timeout l'uno) sforerebbe
+# l'intervallo con molti nodi. METRICS_MAX_WORKERS limita la concorrenza.
+METRICS_MAX_WORKERS = int(os.getenv("METRICS_MAX_WORKERS", "8"))
+# Backoff sui nodi irraggiungibili: un nodo giù NON va martellato a ogni ciclo.
+# next_try_at = now + min(BASE * 2^fail_streak, MAX). Lo stale sample resta
+# servito (stale=true) finché il nodo non torna raggiungibile.
+METRICS_BACKOFF_BASE_S = float(os.getenv("METRICS_BACKOFF_BASE_S", "10"))
+METRICS_MAX_BACKOFF_S  = float(os.getenv("METRICS_MAX_BACKOFF_S", "120"))
+# Versione dello schema /metrics attesa. Deve combaciare con
+# NODE_METRICS_SCHEMA_VERSION in node/backend_metrics.py: i payload con
+# versione diversa (deployment eterogeneo) restano esposti ma marcati
+# schema_mismatch, così il consumatore non li interpreta alla cieca.
+NODE_METRICS_SCHEMA_VERSION = 3
 # Quanti nodi candidati (per score decrescente) il control-plane prova in
 # sequenza prima di ricadere su federazione/ollama-direct, quando un nodo
 # risponde "occupato" (503 node_busy_timeout).
@@ -180,13 +247,16 @@ def _register_local_node():
         "endpoint":     ep,
         "tier":         tier,
         "status":       "active",
-        "version":      "1.04.0",
+        "version":      "1.05.0",
         "vram_gb":      vram_gb,
         "peers_active": len(active_others),
         "uptime_s":     0,
         "active_requests": 0,
         "queued_requests": 0,
-        "max_concurrent":  1,
+        "capacity":        1,
+        "saturation":      0.0,
+        "degraded":        False,
+        "backend_type":    "model_manager",
         "last_seen":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "capabilities": ["ollama", "control-plane"],
         "is_local":     True,
@@ -426,8 +496,6 @@ def _memory_append(entry: dict):
         _save_memory(entries)
 
 # ── SMART TASK ROUTING ────────────────────────────────────────────────────────
-_TIER_SCORE = {"root": 3, "hub": 2, "leaf": 1}
-
 class NodeBusyError(Exception):
     """Il nodo ha risposto 503 node_busy_timeout: la sua coda interna è
     rimasta satura oltre il timeout configurato lato nodo. Il chiamante
@@ -436,34 +504,130 @@ class NodeBusyError(Exception):
         self.node_id = node_id
         super().__init__(message or f"nodo {node_id} occupato (coda satura)")
 
-def _node_score(node: dict) -> float:
-    """Score di routing. La VRAM pesa più di tutto (ROUTING_WEIGHT_VRAM):
-    un nodo CPU-only è strutturalmente lento anche da libero. Il carico
-    (active_requests+queued_requests rispetto a max_concurrent, entrambi
-    riportati da /status del nodo) evita di accodare richieste su un nodo
-    GPU già saturo, preferendo un nodo più libero anche se meno potente.
-    peers_active NON entra più nel punteggio: è una metrica di
-    connettività P2P, non un proxy di capacità di calcolo."""
-    tier_s   = _TIER_SCORE.get(node.get("tier", "leaf"), 1) / 3.0
-    vram_s   = min(float(node.get("vram_gb", 0)), 24.0) / 24.0
-    uptime_s = min(int(node.get("uptime_s", 0)), 604800) / 604800.0
+def _latest_metrics(nid: str) -> dict:
+    """Ultimo campione /metrics del nodo, senza mutare la cache. None se
+    mai raccolto (nodo non ancora pollato o irraggiungibile)."""
+    with _node_metrics_lock:
+        entry = _node_metrics_cache.get(nid)
+        if not entry:
+            return None
+        samples = entry["samples"]
+        return samples[-1] if samples else None
 
-    max_c    = max(int(node.get("max_concurrent", 1) or 1), 1)
-    active_r = int(node.get("active_requests", 0))
-    queued_r = int(node.get("queued_requests", 0))
-    # >1.0 quando il nodo ha già più richieste (attive+in coda) della sua
-    # capacità dichiarata; il clamp a 1.5 evita che un nodo con una coda
-    # mostruosa faccia collassare load_s in modo indistinguibile da uno
-    # solo leggermente sovraccarico.
-    load_ratio = min((active_r + queued_r) / max_c, 1.5)
-    load_s     = max(0.0, 1.0 - load_ratio)
+def _recent_ts(node_id: str):
+    with _recent_routing_lock:
+        return _recent_routing_picks.get(node_id)
 
-    return (
-        vram_s   * ROUTING_WEIGHT_VRAM
-        + load_s   * ROUTING_WEIGHT_LOAD
-        + tier_s   * ROUTING_WEIGHT_TIER
-        + uptime_s * ROUTING_WEIGHT_UPTIME
-    )
+def _record_routing_pick(node_id: str):
+    """Registra un tentativo di routing verso il nodo (per il termine
+    recent_s). Pruning dei riferimenti scaduti per non far crescere la mappa."""
+    now = time.time()
+    with _recent_routing_lock:
+        _recent_routing_picks[node_id] = now
+        cutoff = now - 3 * ROUTING_RECENT_WINDOW_S
+        for k in [k for k, v in _recent_routing_picks.items() if v < cutoff]:
+            _recent_routing_picks.pop(k, None)
+    # La penalità recent_s deve comparire subito anche nel display (fonte
+    # unica _fleet_scores): invalida la cache così il prossimo refresh la
+    # ricalcola col nuovo timestamp di routing.
+    _invalidate_fleet_scores()
+
+def _active_executable() -> list:
+    return [n for n in _node_list() if n.get("status") == "active" and _best_endpoint(n)]
+
+def _routing_scores(active_nodes: list, model: str = "") -> list:
+    """[(node, score, breakdown)] ordinati per score decrescente. Fonde ogni
+    nodo col suo ultimo campione /metrics, normalizza i segnali sul set di
+    candidati (control-plane/routing.py, min-max dinamico) e applica la
+    penalità "ultimo scelto". E' la funzione centrale del routing v1.05:
+    lo score è una funzione delle metriche osservate, non solo di pesi."""
+    metrics_map = {n.get("node_id", ""): _latest_metrics(n.get("node_id", "")) for n in active_nodes}
+    sigs = [_routing.extract_signal(n, metrics_map.get(n.get("node_id", "")), model)
+            for n in active_nodes]
+    _routing.rank_signals(sigs, _ROUTING_WEIGHTS, metrics_interval_s=METRICS_POLL_INTERVAL_S)
+    now = time.time()
+    out = []
+    for n, sig in zip(active_nodes, sigs):
+        score, breakdown = _routing.compute_score(
+            sig, _ROUTING_WEIGHTS, _recent_ts(n.get("node_id", "")), now)
+        out.append((n, score, breakdown))
+    out.sort(key=lambda t: t[1], reverse=True)
+    return out
+
+def _score_terms_breakdown(breakdown: dict) -> float:
+    """Somma dei soli termini pesati (esclusi health_s/q, che sono gate
+    informativi non additivi). Coincide con lo score effettivo."""
+    terms = ("vram_s", "load_s", "tier_s", "uptime_s", "backend_s",
+             "lat_s", "tps_s", "gpu_s", "recent_s")
+    return sum(float(breakdown.get(k, 0.0)) for k in terms)
+
+
+# ── fonte unica degli score di routing (display) ──────────────────────────
+# Sia /mesh/nodes che /metrics/nodes leggono da qui: lo score della flotta
+# viene calcolato UNA volta (contesto: candidati attivi eseguibili) e
+# messo in cache per un breve TTL. Prima c'erano due calcoli indipendenti
+# (e per i nodi non eseguibili /metrics/nodes normalizzava su un contesto
+# degenere di un solo nodo, dove _norm_high vale 1.0: score più alto del
+# badge). Con la cache i due punti di visualizzazione non possono divergere.
+_SCORE_CACHE = {}
+_SCORE_CACHE_AT = 0.0
+_SCORE_CACHE_TTL = max(5.0, 0.75 * METRICS_POLL_INTERVAL_S)
+_score_cache_lock = threading.Lock()
+
+def _invalidate_fleet_scores():
+    """Azzera il TTL della cache score: il prossimo accesso a _fleet_scores
+    ricalcola con i dati correnti (nuovi pick di routing o metriche fresche)."""
+    global _SCORE_CACHE_AT
+    with _score_cache_lock:
+        _SCORE_CACHE_AT = 0.0
+
+def _fleet_scores() -> dict:
+    """{node_id: {"score": float, "total": float, "breakdown": dict}} per la
+    flotta attiva eseguibile. Ricalcola solo se la cache è scaduta; viene
+    invalidata (TTL azzerato) da _record_routing_pick e dal refresh delle
+    metriche di un nodo."""
+    global _SCORE_CACHE, _SCORE_CACHE_AT
+    now = time.time()
+    with _score_cache_lock:
+        if _SCORE_CACHE and now - _SCORE_CACHE_AT < _SCORE_CACHE_TTL:
+            return _SCORE_CACHE
+        out = {}
+        for n, score, breakdown in _routing_scores(_active_executable()):
+            nid = n.get("node_id", "")
+            if not nid:
+                continue
+            out[nid] = {
+                "score": round(score, 4),
+                "total": round(_score_terms_breakdown(breakdown), 4),
+                "breakdown": {k: round(v, 4) for k, v in breakdown.items()},
+            }
+        _SCORE_CACHE = out
+        _SCORE_CACHE_AT = now
+        return out
+
+def _node_score_components(node: dict, model: str = "") -> dict:
+    """Breakdown dello score di routing del nodo (fonte unica: _fleet_scores).
+    Ritorna il dict con i termini pesati più 'total'. Vuoto se il nodo non è
+    un candidato routabile (nessuno score da mostrare, coerente col badge)."""
+    e = _fleet_scores().get(node.get("node_id", ""))
+    if not e:
+        return {}
+    return dict(e["breakdown"], total=e["total"])
+
+def _node_score(node: dict, model: str = "") -> float:
+    """Score di routing effettivo del nodo. Cerca nella fonte unica
+    (_fleet_scores); per contesti fuori flotta (es. topologia che include un
+    nodo non eseguibile) ricalcola su contesto ampliato come prima."""
+    e = _fleet_scores().get(node.get("node_id", ""))
+    if e is not None:
+        return e["score"]
+    ctx = _active_executable()
+    if not any(n.get("node_id") == node.get("node_id") for n in ctx):
+        ctx = ctx + [node]
+    for _n, score, _b in _routing_scores(ctx, model=model):
+        if _n.get("node_id") == node.get("node_id"):
+            return score
+    return 0.0
 
 def _node_ids_with_model(model: str) -> set:
     """Node id di chi ha davvero 'model' installato, secondo l'ultimo giro di
@@ -519,7 +683,12 @@ def _select_best_node(active_nodes: list, model: str = "") -> dict:
             _last_discarded_warn_ids = discarded_ids
     if not executable:
         return None
-    return max(executable, key=_node_score)
+    ranked = _routing_scores(executable, model=model)
+    if not ranked:
+        return None
+    best = ranked[0][0]
+    _record_routing_pick(best.get("node_id", ""))
+    return best
 
 def _rank_candidate_nodes(active_nodes: list, pinned_node_id: str = None, max_candidates: int = None, model: str = "") -> list:
     """Nodi eseguibili ordinati per score decrescente, col nodo pinnato (se
@@ -536,7 +705,7 @@ def _rank_candidate_nodes(active_nodes: list, pinned_node_id: str = None, max_ca
     executable = [n for n in candidates if _best_endpoint(n)]
     if not executable:
         return []
-    ranked = sorted(executable, key=_node_score, reverse=True)
+    ranked = [n for n, _s, _b in _routing_scores(executable, model=model)]
     if pinned_node_id:
         pinned = next((n for n in ranked if n.get("node_id") == pinned_node_id), None)
         if pinned:
@@ -857,9 +1026,10 @@ def _tool_get_mesh_status(args: dict) -> str:
         f"Ultimo tick: {hb_state.get('last_tick', 'N/A')}",
     ]
     for n in active:
+        cap = n.get("capacity", n.get("max_concurrent", 1))
         lines.append(
             f"  - {n.get('node_id','?')[:16]} | tier={n.get('tier','?')} vram={n.get('vram_gb','?')}GB "
-            f"load={n.get('active_requests',0)}/{n.get('max_concurrent',1)}"
+            f"load={n.get('active_requests',0)}/{cap}"
         )
     return "\n".join(lines)
 
@@ -1314,6 +1484,7 @@ def v1_chat_completions():
             for candidate in candidates:
                 node_id_c  = candidate.get("node_id", "cp")
                 endpoint_c = _best_endpoint(candidate)
+                _record_routing_pick(node_id_c)
                 try:
                     body = json.dumps(stream_data, sort_keys=True).encode()
                     headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
@@ -1395,6 +1566,7 @@ def v1_chat_completions():
     for candidate in candidates:
         node_id  = candidate.get("node_id", "cp")
         endpoint = _best_endpoint(candidate)
+        _record_routing_pick(node_id)
         task["node"] = node_id
         db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
         push_log('inter_node_message', f'task {task_id} -> {node_id[:12]}',
@@ -1672,7 +1844,87 @@ def mesh_announce():
 
 @app.route('/mesh/nodes')
 def get_mesh_nodes():
-    return jsonify(_node_list())
+    nodes = _node_list()
+    # Score reale v1.05 (ibrido qualità+strutturale, normalizzato sul set di
+    # candidati + penalità "ultimo scelto") dalla FONTE UNICA _fleet_scores():
+    # la stessa usata da /metrics/nodes, così badge e breakdown coincidono.
+    # La dashboard non deve ricostruire la formula lato client con i vecchi
+    # pesi statici. Nodi non candidati (inattivi, senza endpoint eseguibile)
+    # restano senza routing_score: il client usa il fallback strutturale.
+    scores = _fleet_scores()
+    for n in nodes:
+        e = scores.get(n.get("node_id", ""))
+        if e:
+            n["routing_score"] = e["score"]
+    return jsonify(nodes)
+
+@app.route('/metrics/nodes')
+def get_metrics_nodes():
+    """Metriche backend normalizzate dei nodi (vedi node/backend_metrics.py):
+    ultimo campione + finestra storica in-memory (per mini-grafici) +
+    breakdown dello score di routing (per spiegare il ranking). I nodi senza
+    campioni raccolti (mai pollati o irraggiungibili) restano in lista con
+    metrics/history nulli e status coerente con l'ultimo polling."""
+    with _node_metrics_lock:
+        cache_snapshot = {
+            nid: {
+                "samples":         list(entry["samples"]),
+                "endpoint":        entry["endpoint"],
+                "status":          entry["status"],
+                "last_at":         entry.get("last_at", 0.0),
+                "last_error":      entry.get("last_error"),
+                "schema_mismatch": entry.get("schema_mismatch", False),
+            }
+            for nid, entry in _node_metrics_cache.items()
+        }
+    now = time.time()
+    nodes = []
+    for n in _node_list():
+        nid    = n.get("node_id", "")
+        entry  = cache_snapshot.get(nid)
+        samples = entry["samples"] if entry else []
+        last    = samples[-1] if samples else None
+        sample_age_s = round(max(now - entry["last_at"], 0.0), 1) if entry and entry["last_at"] else None
+        breakdown = None
+        if n.get("status") == "active":
+            # Fonte unica _fleet_scores(): stesso valore di /mesh/nodes
+            # (routing_score). Nessun ricalcolo con contesto degenere.
+            comp = _node_score_components(n)
+            if comp:
+                breakdown = comp
+        nodes.append({
+            "node_id":    nid,
+            "alias":      _node_aliases.get(nid, ""),
+            "endpoint":   entry["endpoint"] if entry else _best_endpoint(n),
+            "status":     entry["status"] if entry else n.get("status", "unknown"),
+            # Freschezza: età dell'ultimo campione raccolto e flag stale
+            # (età > 2x intervallo di poll = un ciclo saltato o nodo giù).
+            "sample_age_s":  sample_age_s,
+            "stale":         sample_age_s is not None and sample_age_s > 2 * METRICS_POLL_INTERVAL_S,
+            "last_collected_at": (
+                datetime.fromtimestamp(entry["last_at"], timezone.utc).isoformat(timespec="seconds")
+                if entry and entry["last_at"] else None),
+            "last_error":      entry["last_error"] if entry else None,
+            "schema_version":  (last or {}).get("schema_version"),
+            "schema_mismatch": entry["schema_mismatch"] if entry else None,
+            "metrics":    last,
+            "history":    [
+                {"sampled_at":  s.get("sampled_at"),
+                 "collected_at": s.get("collected_at"),
+                 "server":     s.get("server", {}),
+                 "load":       s.get("load", {}),
+                 "runtime":    s.get("runtime", {})}
+                for s in samples[-METRICS_WINDOW:]
+            ],
+            "score_breakdown": breakdown,
+        })
+    return jsonify({
+        "sampled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "interval_s": METRICS_POLL_INTERVAL_S,
+        "window":     METRICS_WINDOW,
+        "schema_version": NODE_METRICS_SCHEMA_VERSION,
+        "nodes":      nodes,
+    })
 
 @app.route('/nodes/active')
 def get_nodes_active():
@@ -1938,6 +2190,13 @@ def get_routing_weights():
         "load":   ROUTING_WEIGHT_LOAD,
         "tier":   ROUTING_WEIGHT_TIER,
         "uptime": ROUTING_WEIGHT_UPTIME,
+        "backend": ROUTING_WEIGHT_ENGINE,
+        "latency": ROUTING_WEIGHT_LATENCY,
+        "tput":   ROUTING_WEIGHT_TPUT,
+        "gpu":    ROUTING_WEIGHT_GPU,
+        "recent_penalty": ROUTING_RECENT_PENALTY,
+        "recent_window":  ROUTING_RECENT_WINDOW_S,
+        "backend_scores": _all_backend_scores(),
         "max_candidates": ROUTING_MAX_CANDIDATES,
     })
 
@@ -1981,6 +2240,446 @@ def rotate_secret():
     push_log('system', 'Shared secret rotated', status='success')
     return jsonify({"ok": True, "secret": new_secret,
                     "rotatedAt": advanced_config['security']['secretRotatedAt']})
+
+# ── ENV DEL CONTROL-PLANE (modifica a runtime + persistenza su .env) ───────
+# Il control-plane legge la configurazione dalle env var a ogni avvio (vedi
+# sezione CONFIG). Questa sezione espone alla dashboard (tab Setup) le
+# variabili rilevanti del CP: le modifiche vengono applicate SUBITO al
+# runtime (globals del processo, senza ricreare il container) E scritte sul
+# .env della repo (montato in /repo dal docker-compose), così restano valide
+# anche al prossimo `docker compose up`. Le chiavi non esposte qui non sono
+# modificabili da remoto, di proposito. Se il .env non è scrivibile (es. CP
+# avviato fuori Docker), la modifica runtime viene comunque applicata.
+_ENV_FILE_PATH    = os.getenv("ENV_FILE_PATH",    os.path.join(BASE_DIR, "..", ".env"))
+_ENV_EXAMPLE_PATH = os.getenv("ENV_EXAMPLE_PATH", os.path.join(BASE_DIR, "..", ".env.example"))
+_env_lock = threading.Lock()
+
+_ENV_META = [
+    # Inferenza e modelli
+    {"section": "Inferenza e modelli", "key": "OLLAMA_URL", "type": "str",
+     "label": "Ollama / LM Studio URL",
+     "hint": "URL del backend di inferenza locale. In Docker usa http://host.docker.internal:11434 (Ollama) o http://host.docker.internal:1234 (LM Studio).",
+     "default": "http://host.docker.internal:11434"},
+    {"section": "Inferenza e modelli", "key": "OLLAMA_MODEL", "type": "str",
+     "label": "Modello di default",
+     "hint": "Modello usato quando una richiesta non ne specifica uno esplicitamente (es. qwen3:8b)."},
+    {"section": "Inferenza e modelli", "key": "INFERENCE_BACKEND", "type": "str",
+     "label": "Backend di inferenza",
+     "options": ["ollama", "lmstudio", "vllm"],
+     "hint": "Motore che serve l'inferenza su questa installazione. Letto sia dal nodo sia dal CP (per il fallback ollama-direct).",
+     "default": "ollama"},
+    # Routing e scoring
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_VRAM", "type": "float",
+     "label": "Peso VRAM",
+     "hint": "La VRAM domina lo scoring: un nodo CPU-only, anche libero, è strutturalmente lento e va preferito solo come ultima risorsa.",
+     "default": "0.55"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_LOAD", "type": "float",
+     "label": "Peso carico",
+     "hint": "Peso del carico reale del nodo (active/queued requests da /status), non dei semplici peer attivi.",
+     "default": "0.25"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_TIER", "type": "float",
+     "label": "Peso tier",
+     "hint": "Peso del tier del nodo (root/hub/leaf): i nodi gerarchicamente superiori vengono preferiti a parità di altre condizioni.",
+     "default": "0.10"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_UPTIME", "type": "float",
+     "label": "Peso uptime",
+     "hint": "Peso dell'affidabilità nel tempo: quanto a lungo il nodo è rimasto attivo e raggiungibile.",
+     "default": "0.10"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_ENGINE", "type": "float",
+     "label": "Peso backend_type",
+     "hint": "Peso del paradigma di serving (inference_server vs model_manager), NON del singolo prodotto (vllm/ollama/...). I punteggi per tipo vivono in shared/engine_profiles.py.",
+     "default": "0.15"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_LATENCY", "type": "float",
+     "label": "Peso latenza (qualità)",
+     "hint": "Peso della latenza osservata per modello. Blocco 'qualità': attivo solo quando i campioni /metrics sono freschi, altrimenti decide il blocco strutturale.",
+     "default": "0.45"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_TPUT", "type": "float",
+     "label": "Peso throughput (qualità)",
+     "hint": "Peso del throughput (tok/s) osservato per modello — blocco 'qualità', valido quando le metriche sono fresche.",
+     "default": "0.35"},
+    {"section": "Routing e scoring", "key": "ROUTING_WEIGHT_GPU", "type": "float",
+     "label": "Peso pressione VRAM (qualità)",
+     "hint": "Peso della pressione VRAM del motore del nodo (quanto è sotto sforzo) — blocco 'qualità'.",
+     "default": "0.20"},
+    {"section": "Routing e scoring", "key": "ROUTING_RECENT_PENALTY", "type": "float",
+     "label": "Penalità 'ultimo scelto'",
+     "hint": "Depenalizza lievemente il nodo appena usato, con decadimento esponenziale nella finestra, per rompere i pareggi tra nodi di pari valore senza far perdere un nodo migliore.",
+     "default": "0.10"},
+    {"section": "Routing e scoring", "key": "ROUTING_RECENT_WINDOW_S", "type": "float",
+     "label": "Finestra penalità (s)",
+     "hint": "Secondi in cui la penalità 'ultimo scelto' resta attiva e decade esponenzialmente.",
+     "default": "45"},
+    {"section": "Routing e scoring", "key": "ROUTING_MAX_CANDIDATES", "type": "int",
+     "label": "Candidati provati in sequenza",
+     "hint": "Quando un nodo risponde 'occupato' (503 node_busy_timeout) o non ha il modello, il CP prova i migliori N candidati per score PRIMA di ricadere su ollama-direct/federazione.",
+     "default": "3"},
+    # Memoria a lungo termine
+    {"section": "Memoria a lungo termine", "key": "MEMORY_TTL_DAYS", "type": "int",
+     "label": "TTL memoria (giorni)",
+     "hint": "Le voci di memoria più vecchie di questo numero di giorni vengono rimosse alla prossima potatura (memoria a lungo termine / tool omega).",
+     "default": "7"},
+    {"section": "Memoria a lungo termine", "key": "MEMORY_MAX_ENTRIES", "type": "int",
+     "label": "Max voci in memoria",
+     "hint": "Numero massimo di voci conservate: oltre questo tetto vengono potate le più vecchie.",
+     "default": "200"},
+    # Telemetria nodi
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_POLL_INTERVAL_S", "type": "int",
+     "label": "Poll /metrics (s)",
+     "hint": "Cadenza con cui il CP interroga il /metrics di ogni nodo attivo (serve allo scoring metric-driven e ai mini-grafici della dashboard).",
+     "default": "20"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_POLL_TIMEOUT_S", "type": "int",
+     "label": "Timeout poll (s)",
+     "hint": "Timeout per ogni singolo fetch di /metrics verso un nodo.",
+     "default": "4"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_WINDOW", "type": "int",
+     "label": "Finestra campioni",
+     "hint": "Quanti campioni /metrics restano in memoria per nodo (storico per i mini-grafici).",
+     "default": "20"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_MAX_WORKERS", "type": "int",
+     "label": "Fetch paralleli",
+     "hint": "Max fetch /metrics eseguiti in parallelo: con molti nodi la raccolta seriale sforerebbe l'intervallo di poll.",
+     "default": "8"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_BACKOFF_BASE_S", "type": "float",
+     "label": "Backoff base (s)",
+     "hint": "Base dell'escalation esponenziale per i nodi irraggiungibili: prossimo tentativo a BASE × 2^fallimenti (non vengono martellati a ogni ciclo).",
+     "default": "10"},
+    {"section": "Telemetria nodi (/metrics)", "key": "METRICS_MAX_BACKOFF_S", "type": "float",
+     "label": "Backoff massimo (s)",
+     "hint": "Tetto massimo del backoff sui nodi irraggiungibili: oltre questo non si sale mai.",
+     "default": "120"},
+    # Web search
+    {"section": "Web search", "key": "SEARXNG_URL", "type": "str",
+     "label": "URL SearXNG",
+     "hint": "URL del motore di ricerca self-hosted (container searxng) usato dal tool web_search. Se irraggiungibile c'è un fallback automatico su DuckDuckGo lite.",
+     "default": "http://searxng:8080"},
+    # OmniRoute
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_ENABLED", "type": "bool",
+     "label": "OmniRoute abilitato",
+     "hint": "Attiva l'ultimo livello di fallback quando NESSUN nodo della mesh (locale o federato) può rispondere. false lo disattiva del tutto.",
+     "default": "true"},
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_URL", "type": "str",
+     "label": "URL OmniRoute",
+     "hint": "URL del gateway OmniRoute (container nella rete Docker). Normalmente non va modificato.",
+     "default": "http://omniroute:20128"},
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_API_KEY", "type": "password",
+     "label": "API key OmniRoute",
+     "hint": "Opzionale: per collegare provider propri dalla dashboard OmniRoute (http://<host>:20128). Vuota = usa i provider free-tier di default. Lascia *** per non cambiarla.",
+     "default": ""},
+    {"section": "OmniRoute (fallback esterno)", "key": "OMNIROUTE_MODEL", "type": "str",
+     "label": "Modello OmniRoute",
+     "hint": "Modello richiesto a OmniRoute. 'auto' = selezione automatica del provider disponibile.",
+     "default": "auto"},
+    # Compressione prompt
+    {"section": "Compressione prompt", "key": "PROMPT_COMPRESSION_ENABLED", "type": "bool",
+     "label": "Compressione prompt",
+     "hint": "Comprime i prompt lunghi via Caveman (engine reale di OmniRoute) prima dell'inferenza sulla mesh locale. Attivala solo dopo averla testata: comprime il fraseggio e può confondere modelli piccoli/quantizzati.",
+     "default": "false"},
+    {"section": "Compressione prompt", "key": "PROMPT_COMPRESSION_MODE", "type": "str",
+     "label": "Modalità compressione",
+     "options": ["lite", "standard", "aggressive", "ultra", "rtk", "stacked"],
+     "hint": "Quanto aggressivamente comprimere il fraseggio: lite → standard → aggressive → ultra (più aggressivo = più perde sostanza).",
+     "default": "standard"},
+    {"section": "Compressione prompt", "key": "PROMPT_COMPRESSION_MIN_CHARS", "type": "int",
+     "label": "Soglia minima (chars)",
+     "hint": "Solo i prompt con più di questo numero di caratteri vengono compressi.",
+     "default": "200"},
+    # Federazione
+    {"section": "Federazione CP-to-CP", "key": "FEDERATION_ENABLED", "type": "bool",
+     "label": "Federazione abilitata",
+     "hint": "false isola completamente questo CP dagli altri siti: niente pairing, niente esecuzione di task remoti via /federate/execute.",
+     "default": "true"},
+    {"section": "Federazione CP-to-CP", "key": "FEDERATION_PUBLIC_URL", "type": "str",
+     "label": "URL pubblico del federation-gateway",
+     "hint": "URL pubblico del TUO federation-gateway (non del CP!): quello da condividere con l'admin di un altro sito per il pairing. Vuoto finché non hai un gateway pubblico attivo.",
+     "default": ""},
+    # Mesh
+    {"section": "Mesh", "key": "NODE_ENDPOINTS", "type": "str",
+     "label": "Endpoint nodi (virgola)",
+     "hint": "Lista separata da virgole degli endpoint dei nodi noti, es. node-1:8084,node-2:8084. I nodi si registrano comunque da soli al registry.",
+     "default": "node-1:8084"},
+    {"section": "Mesh", "key": "TOOL_CAPABLE_MODELS", "type": "str",
+     "label": "Modelli tool-capable (override)",
+     "hint": "'*' abilita le tool call su TUTTI i modelli; vuoto = usa i pattern automatici (qwen3, llama3.x, mistral, phi4...). Utile per modelli che supportano il function calling ma non sono nei pattern.",
+     "default": ""},
+]
+
+_ENV_ROUTING_WEIGHT_KEYS = {
+    "ROUTING_WEIGHT_VRAM", "ROUTING_WEIGHT_LOAD", "ROUTING_WEIGHT_TIER",
+    "ROUTING_WEIGHT_UPTIME", "ROUTING_WEIGHT_ENGINE", "ROUTING_WEIGHT_LATENCY",
+    "ROUTING_WEIGHT_TPUT", "ROUTING_WEIGHT_GPU",
+    "ROUTING_RECENT_PENALTY", "ROUTING_RECENT_WINDOW_S",
+}
+
+# Getter del valore CORRENTE a runtime (fonte di verità per la dashboard).
+_ENV_RUNTIME_GET = {
+    "OLLAMA_URL": lambda: OLLAMA_URL,
+    "OLLAMA_MODEL": lambda: DEFAULT_MODEL,
+    "INFERENCE_BACKEND": lambda: INFERENCE_BACKEND,
+    "ROUTING_WEIGHT_VRAM": lambda: ROUTING_WEIGHT_VRAM,
+    "ROUTING_WEIGHT_LOAD": lambda: ROUTING_WEIGHT_LOAD,
+    "ROUTING_WEIGHT_TIER": lambda: ROUTING_WEIGHT_TIER,
+    "ROUTING_WEIGHT_UPTIME": lambda: ROUTING_WEIGHT_UPTIME,
+    "ROUTING_WEIGHT_ENGINE": lambda: ROUTING_WEIGHT_ENGINE,
+    "ROUTING_WEIGHT_LATENCY": lambda: ROUTING_WEIGHT_LATENCY,
+    "ROUTING_WEIGHT_TPUT": lambda: ROUTING_WEIGHT_TPUT,
+    "ROUTING_WEIGHT_GPU": lambda: ROUTING_WEIGHT_GPU,
+    "ROUTING_RECENT_PENALTY": lambda: ROUTING_RECENT_PENALTY,
+    "ROUTING_RECENT_WINDOW_S": lambda: ROUTING_RECENT_WINDOW_S,
+    "ROUTING_MAX_CANDIDATES": lambda: ROUTING_MAX_CANDIDATES,
+    "MEMORY_TTL_DAYS": lambda: MEMORY_TTL_DAYS,
+    "MEMORY_MAX_ENTRIES": lambda: MEMORY_MAX_ENTRIES,
+    "SEARXNG_URL": lambda: SEARXNG_URL,
+    "METRICS_POLL_INTERVAL_S": lambda: METRICS_POLL_INTERVAL_S,
+    "METRICS_POLL_TIMEOUT_S": lambda: METRICS_POLL_TIMEOUT_S,
+    "METRICS_WINDOW": lambda: METRICS_WINDOW,
+    "METRICS_MAX_WORKERS": lambda: METRICS_MAX_WORKERS,
+    "METRICS_BACKOFF_BASE_S": lambda: METRICS_BACKOFF_BASE_S,
+    "METRICS_MAX_BACKOFF_S": lambda: METRICS_MAX_BACKOFF_S,
+    "OMNIROUTE_URL": lambda: OMNIROUTE_URL,
+    "OMNIROUTE_API_KEY": lambda: OMNIROUTE_API_KEY,
+    "OMNIROUTE_MODEL": lambda: OMNIROUTE_MODEL,
+    "OMNIROUTE_ENABLED": lambda: OMNIROUTE_ENABLED,
+    "PROMPT_COMPRESSION_ENABLED": lambda: PROMPT_COMPRESSION_ENABLED,
+    "PROMPT_COMPRESSION_MODE": lambda: PROMPT_COMPRESSION_MODE,
+    "PROMPT_COMPRESSION_MIN_CHARS": lambda: PROMPT_COMPRESSION_MIN_CHARS,
+    "FEDERATION_ENABLED": lambda: FEDERATION_ENABLED,
+    "FEDERATION_PUBLIC_URL": lambda: FEDERATION_PUBLIC_URL,
+    "NODE_ENDPOINTS": lambda: ",".join(NODE_ENDPOINTS),
+    "TOOL_CAPABLE_MODELS": lambda: _TOOL_CAPABLE_OVERRIDE,
+}
+
+def _coerce_env_val(meta: dict, raw):
+    t = meta["type"]
+    if t == "bool":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    if t == "int":
+        return int(str(raw).strip())
+    if t == "float":
+        return float(str(raw).strip())
+    return str(raw).strip()
+
+def _env_str(meta: dict, cv) -> str:
+    if meta["type"] == "bool":
+        return "true" if cv else "false"
+    return str(cv)
+
+def _apply_env_runtime(meta: dict, cv) -> None:
+    """Applica la modifica SUBITO al runtime (globals del processo) e ad
+    os.environ. Il file .env viene scritto separatamente da _persist_env."""
+    global OLLAMA_URL, DEFAULT_MODEL, INFERENCE_BACKEND
+    global MEMORY_TTL_DAYS, MEMORY_MAX_ENTRIES, SEARXNG_URL
+    global ROUTING_MAX_CANDIDATES
+    global METRICS_POLL_INTERVAL_S, METRICS_POLL_TIMEOUT_S, METRICS_WINDOW
+    global METRICS_MAX_WORKERS, METRICS_BACKOFF_BASE_S, METRICS_MAX_BACKOFF_S
+    global OMNIROUTE_URL, OMNIROUTE_API_KEY, OMNIROUTE_MODEL, OMNIROUTE_ENABLED
+    global PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MODE, PROMPT_COMPRESSION_MIN_CHARS
+    global FEDERATION_ENABLED, FEDERATION_PUBLIC_URL
+    global NODE_ENDPOINTS, _TOOL_CAPABLE_OVERRIDE, _ROUTING_WEIGHTS, _SCORE_CACHE_TTL
+
+    key = meta["key"]
+    os.environ[key] = str(cv)
+
+    changed_weights = False
+    if key == "OLLAMA_URL":
+        OLLAMA_URL = str(cv).rstrip("/")
+        advanced_config["ollama"]["url"] = OLLAMA_URL
+    elif key == "OLLAMA_MODEL":
+        DEFAULT_MODEL = str(cv)
+        advanced_config["ollama"]["defaultModel"] = DEFAULT_MODEL
+    elif key == "INFERENCE_BACKEND":
+        INFERENCE_BACKEND = str(cv)
+    elif key == "MEMORY_TTL_DAYS":
+        MEMORY_TTL_DAYS = int(cv)
+    elif key == "MEMORY_MAX_ENTRIES":
+        MEMORY_MAX_ENTRIES = int(cv)
+    elif key == "SEARXNG_URL":
+        SEARXNG_URL = str(cv).rstrip("/")
+    elif key in _ENV_ROUTING_WEIGHT_KEYS:
+        globals()[key] = float(cv)
+        changed_weights = True
+    elif key == "ROUTING_MAX_CANDIDATES":
+        ROUTING_MAX_CANDIDATES = max(1, int(cv))
+    elif key == "METRICS_POLL_INTERVAL_S":
+        METRICS_POLL_INTERVAL_S = max(2, int(cv))
+        _SCORE_CACHE_TTL = max(5.0, 0.75 * METRICS_POLL_INTERVAL_S)
+    elif key == "METRICS_POLL_TIMEOUT_S":
+        METRICS_POLL_TIMEOUT_S = max(1, int(cv))
+    elif key == "METRICS_WINDOW":
+        METRICS_WINDOW = max(2, int(cv))
+        with _node_metrics_lock:
+            for entry in _node_metrics_cache.values():
+                entry["samples"] = deque(entry["samples"], maxlen=METRICS_WINDOW)
+    elif key == "METRICS_MAX_WORKERS":
+        METRICS_MAX_WORKERS = max(1, int(cv))
+    elif key == "METRICS_BACKOFF_BASE_S":
+        METRICS_BACKOFF_BASE_S = max(0.5, float(cv))
+    elif key == "METRICS_MAX_BACKOFF_S":
+        METRICS_MAX_BACKOFF_S = max(METRICS_BACKOFF_BASE_S, float(cv))
+    elif key == "OMNIROUTE_URL":
+        OMNIROUTE_URL = str(cv).rstrip("/")
+    elif key == "OMNIROUTE_API_KEY":
+        OMNIROUTE_API_KEY = str(cv).strip()
+    elif key == "OMNIROUTE_MODEL":
+        OMNIROUTE_MODEL = str(cv)
+    elif key == "OMNIROUTE_ENABLED":
+        OMNIROUTE_ENABLED = bool(cv)
+    elif key == "PROMPT_COMPRESSION_ENABLED":
+        PROMPT_COMPRESSION_ENABLED = bool(cv)
+    elif key == "PROMPT_COMPRESSION_MODE":
+        PROMPT_COMPRESSION_MODE = str(cv)
+    elif key == "PROMPT_COMPRESSION_MIN_CHARS":
+        PROMPT_COMPRESSION_MIN_CHARS = max(0, int(cv))
+    elif key == "FEDERATION_ENABLED":
+        FEDERATION_ENABLED = bool(cv)
+    elif key == "FEDERATION_PUBLIC_URL":
+        FEDERATION_PUBLIC_URL = str(cv).rstrip("/")
+    elif key == "NODE_ENDPOINTS":
+        NODE_ENDPOINTS = [e.strip() for e in str(cv).split(",") if e.strip()]
+        for ep in NODE_ENDPOINTS:
+            _known_endpoints.add(_normalize_endpoint(ep))
+    elif key == "TOOL_CAPABLE_MODELS":
+        _TOOL_CAPABLE_OVERRIDE = str(cv)
+
+    if changed_weights:
+        _ROUTING_WEIGHTS.update({
+            "vram":            ROUTING_WEIGHT_VRAM,
+            "load":            ROUTING_WEIGHT_LOAD,
+            "tier":            ROUTING_WEIGHT_TIER,
+            "uptime":          ROUTING_WEIGHT_UPTIME,
+            "backend":         ROUTING_WEIGHT_ENGINE,
+            "latency":         ROUTING_WEIGHT_LATENCY,
+            "tput":            ROUTING_WEIGHT_TPUT,
+            "gpu":             ROUTING_WEIGHT_GPU,
+            "recent_penalty":  ROUTING_RECENT_PENALTY,
+            "recent_window":   ROUTING_RECENT_WINDOW_S,
+        })
+        _invalidate_fleet_scores()
+
+def _read_env_text() -> str:
+    path = _ENV_FILE_PATH if os.path.isfile(_ENV_FILE_PATH) else _ENV_EXAMPLE_PATH
+    if not os.path.isfile(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def _setvar(text: str, key: str, val: str) -> str:
+    """Replace-or-append di una riga KEY=VALUE. Mirror della logica usata dal
+    wizard di onboarding (onboarding/server.py) e dall'installer."""
+    pattern = rf"^{re.escape(key)}=.*$"
+    replacement = f"{key}={val}"
+    new_text, n = re.subn(pattern, replacement, text, flags=re.MULTILINE)
+    if n == 0:
+        if new_text and not new_text.endswith("\n"):
+            new_text += "\n"
+        new_text += replacement + "\n"
+    return new_text
+
+def _env_file_writable() -> bool:
+    try:
+        if not os.path.isdir(os.path.dirname(_ENV_FILE_PATH) or "."):
+            return False
+        if os.path.isfile(_ENV_FILE_PATH):
+            return os.access(_ENV_FILE_PATH, os.W_OK)
+        return os.access(os.path.dirname(_ENV_FILE_PATH) or ".", os.W_OK)
+    except Exception:
+        return False
+
+def _persist_env(updates: dict) -> str:
+    """Scrive le chiavi sul .env della repo (replace-or-append). Ritorna il
+    path usato. Lancia RuntimeError se non scrivibile."""
+    with _env_lock:
+        text = _read_env_text()
+        for key, val in updates.items():
+            text = _setvar(text, key, str(val))
+        with open(_ENV_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(text)
+        return _ENV_FILE_PATH
+
+@app.route('/config/env')
+def get_config_env():
+    persisted = {}
+    if os.path.isfile(_ENV_FILE_PATH):
+        try:
+            with open(_ENV_FILE_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    persisted[k.strip()] = v.strip()
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"lettura {_ENV_FILE_PATH}: {e}",
+                            "vars": [], "file_path": _ENV_FILE_PATH})
+    out = []
+    for meta in _ENV_META:
+        key = meta["key"]
+        getter = _ENV_RUNTIME_GET.get(key)
+        if getter is not None:
+            try:
+                value = getter()
+            except Exception:
+                value = persisted.get(key, meta.get("default", ""))
+        elif key in persisted:
+            value = persisted[key]
+        else:
+            value = os.environ.get(key, meta.get("default", ""))
+        value = "" if value is None else str(value)
+        if meta.get("type") == "password" and value:
+            value = "***"
+        item = {"key": key, "section": meta["section"], "label": meta["label"],
+                "type": meta["type"], "value": value,
+                "default": str(meta.get("default", "")), "hint": meta.get("hint", "")}
+        if meta.get("options"):
+            item["options"] = meta["options"]
+        out.append(item)
+    return jsonify({"ok": True, "file_path": _ENV_FILE_PATH,
+                    "writable": _env_file_writable(), "vars": out})
+
+@app.route('/config/env', methods=['POST'])
+def set_config_env():
+    data = request.get_json(force=True, silent=True) or {}
+    updates = data.get("updates") or data
+    if not isinstance(updates, dict) or not updates:
+        return jsonify({"ok": False, "error": "payload non valido"}), 400
+    by_key = {m["key"]: m for m in _ENV_META}
+    applied = {}
+    errors = []
+    with _env_lock:
+        for key, raw in updates.items():
+            meta = by_key.get(key)
+            if not meta:
+                errors.append(f"chiave sconosciuta: {key}")
+                continue
+            # Password: vuoto o '***' = lascia invariata
+            if meta.get("type") == "password" and raw in (None, "", "***"):
+                continue
+            try:
+                cv = _coerce_env_val(meta, raw)
+            except (ValueError, TypeError):
+                errors.append(f"{key}: valore non valido per tipo {meta['type']}")
+                continue
+            _apply_env_runtime(meta, cv)
+            applied[key] = _env_str(meta, cv)
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors),
+                        "applied": list(applied.keys())}), 400
+    if not applied:
+        return jsonify({"ok": True, "applied": []})
+    try:
+        path = _persist_env(applied)
+    except Exception as e:
+        # Il runtime è già aggiornato; il .env no. Non facciamo fallire la
+        # richiesta: le modifiche restano attive finché il container non viene
+        # ricreato (e a quel punto andrebbero riapplicate).
+        push_log('system', 'Env CP: persistenza su .env fallita', str(e), status='warn')
+        return jsonify({"ok": True, "applied": list(applied.keys()),
+                        "persisted": False,
+                        "error": f"runtime ok, ma .env non scritto: {e}"})
+    push_log('system', 'Env CP aggiornato', ', '.join(applied.keys()), status='success')
+    return jsonify({"ok": True, "applied": list(applied.keys()),
+                    "persisted": True, "path": path})
 
 @app.route('/models')
 def list_models():
@@ -2037,7 +2736,8 @@ def assign_task():
     for selected in candidates:
         endpoint = _best_endpoint(selected)
         node_id  = selected["node_id"]
-        score    = round(_node_score(selected), 3)
+        _record_routing_pick(node_id)
+        score    = round(_node_score(selected, model=requested_model), 3)
         task.update({"status": "assigned", "node": node_id, "endpoint": endpoint, "routing_score": score})
         db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
         tid = str(uuid.uuid4())[:8]
@@ -2281,6 +2981,12 @@ def _sync_memory_across_nodes():
 
 # ── HEARTBEAT ─────────────────────────────────────────────────────────────────
 def _is_valid_json_response(r) -> bool:
+    """True solo se la risposta è 200 E JSON parsabile. Prima controllava
+    solo il Content-Type: un 404/500 con corpo JSON (es. il 404 di default
+    di FastAPI, {"detail":"Not Found"}) veniva classificato come risposta
+    valida, mascherando un endpoint mancante o rotto come "ping OK"."""
+    if r.status_code != 200:
+        return False
     ct = r.headers.get("Content-Type", "")
     if "text/html" in ct or "text/plain" in ct:
         return False
@@ -2352,6 +3058,117 @@ def _poll_mesh_nodes():
             push_log('mesh_event', f'Local node demoted to hub ({len(remote_active)} remote active)',
                      source=_LOCAL_NODE_ID[:16], status='info')
 
+# ── TELEMETRIA NODI: COLLECTOR (pull periodico di /metrics) ────────────────
+# Cache in-memory: node_id -> {samples: deque(maxlen=METRICS_WINDOW),
+# endpoint, status, last_at, last_error, error_ts, fail_streak, next_try_at,
+# schema_mismatch}. Ogni campione è il payload normalizzato del nodo
+# (GET /metrics sul nodo). Finestra volatile, niente DB: serve a diagnosi,
+# mini-grafici e ai futuri termini di scoring basati su telemetria osservata.
+# Thread separato da heartbeat_loop (stato operativo) così la cadenza della
+# telemetria non dipende dal ciclo di routing.
+_node_metrics_lock = threading.Lock()
+_node_metrics_cache: dict = {}
+
+def _collect_node_metrics():
+    now = time.time()
+    # Nodi candidati: attivi, con id ed endpoint eseguibile, non locali, e
+    # FUORI dal backoff — un nodo irraggiungibile non va martellato a ogni
+    # ciclo (vedi METRICS_BACKOFF_BASE_S / METRICS_MAX_BACKOFF_S).
+    candidates = []
+    for n in _node_list():
+        if n.get("status") != "active":
+            continue
+        nid = n.get("node_id", "")
+        if not nid:
+            continue
+        if _LOCAL_NODE_ENABLED and nid == _LOCAL_NODE_ID:
+            continue
+        ep = _best_endpoint(n)
+        if not ep:
+            continue
+        with _node_metrics_lock:
+            existing = _node_metrics_cache.get(nid)
+            if existing and now < existing.get("next_try_at", 0.0):
+                continue
+        candidates.append((nid, ep))
+
+    def _fetch(nid, ep):
+        try:
+            r = requests.get(f"{ep}/metrics", timeout=METRICS_POLL_TIMEOUT_S)
+            if r.status_code != 200 or not _is_valid_json_response(r):
+                raise ValueError(f"HTTP {r.status_code}")
+            payload = r.json()
+            # Timbro l'istante di raccolta lato CP: il sampled_at del nodo può
+            # restare identico tra poll (cache TTL lato nodo), quindi senza un
+            # collected_at locale lo storico apparirebbe con campioni duplicati.
+            # Microsecondi: a cadenza breve secondi non basterebbero a rendere
+            # distinti due campioni ravvicinati.
+            payload["collected_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            return nid, ep, payload, None
+        except Exception as e:
+            return nid, ep, None, str(e)[:120]
+
+    # Fetch in PARALLELO: con N nodi e timeout l'uno, la versione seriale
+    # sforerebbe l'intervallo di poll (requests è thread-safe; l'aggiornamento
+    # della cache avviene sotto lock subito dopo).
+    results = []
+    if candidates:
+        with ThreadPoolExecutor(max_workers=METRICS_MAX_WORKERS) as ex:
+            results = list(ex.map(lambda c: _fetch(*c), candidates))
+
+    new_sample = False
+    for nid, ep, payload, err in results:
+        with _node_metrics_lock:
+            entry = _node_metrics_cache.setdefault(nid, {
+                "samples": deque(maxlen=METRICS_WINDOW),
+                "endpoint": "", "status": "unknown", "last_at": 0.0,
+                "last_error": None, "error_ts": None,
+                "fail_streak": 0, "next_try_at": 0.0, "schema_mismatch": False,
+            })
+            if err is not None:
+                entry["status"]     = "unreachable"
+                entry["last_error"] = err
+                entry["error_ts"]   = now
+                entry["fail_streak"] = entry.get("fail_streak", 0) + 1
+                entry["next_try_at"] = now + min(
+                    METRICS_BACKOFF_BASE_S * (2 ** max(entry["fail_streak"] - 1, 0)),
+                    METRICS_MAX_BACKOFF_S,
+                )
+            else:
+                entry["samples"].append(payload)
+                entry["endpoint"]      = ep
+                entry["status"]        = "active"
+                entry["last_at"]       = now
+                entry["last_error"]    = None
+                entry["error_ts"]      = None
+                entry["fail_streak"]   = 0
+                entry["next_try_at"]   = 0.0
+                # Deployment eterogeneo: uno schema diverso resta esposto ma
+                # marcato, così il consumatore non lo interpreta alla cieca.
+                entry["schema_mismatch"] = payload.get("schema_version") != NODE_METRICS_SCHEMA_VERSION
+                new_sample = True
+    # Campioni freschi -> lo score (fonte unica _fleet_scores) riflette subito
+    # carico/saturazione/degradazione, senza aspettare la scadenza del TTL.
+    # Chiamata FUORI da _node_metrics_lock: _fleet_scores prende prima
+    # _score_cache_lock e poi _node_metrics_lock, l'ordine inverso deadloccerebbe.
+    if new_sample:
+        _invalidate_fleet_scores()
+    # Prune SOLO dei nodi scomparsi dalla mesh. Un nodo temporaneamente giù
+    # (in backoff, nessun campione fresco) MANTIENE cache e storico: sono
+    # proprio i dati da tenere per capire cosa è successo.
+    with _node_metrics_lock:
+        live_ids = {n.get("node_id") for n in _node_list() if n.get("node_id")}
+        for nid in [k for k in _node_metrics_cache if k not in live_ids]:
+            _node_metrics_cache.pop(nid, None)
+
+def metrics_loop():
+    time.sleep(5)
+    while True:
+        cycle_start = time.time()
+        _collect_node_metrics()
+        elapsed = time.time() - cycle_start
+        time.sleep(max(METRICS_POLL_INTERVAL_S - elapsed, 1))
+
 def heartbeat_loop():
     time.sleep(3)
     push_log('system', 'Control-plane v1.04 started',
@@ -2418,6 +3235,7 @@ if __name__ == '__main__':
     _load_aliases_from_db()
     _register_local_node()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=metrics_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=8085, debug=False)
 else:
     _load_nodes_from_db()
@@ -2425,3 +3243,4 @@ else:
     _load_aliases_from_db()
     _register_local_node()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=metrics_loop, daemon=True).start()
