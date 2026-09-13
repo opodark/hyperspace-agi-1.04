@@ -1653,33 +1653,93 @@ def omega_health():
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
 
+# ── MCP SERVER ────────────────────────────────────────────────────────────────
+# Server MCP conforme (JSON-RPC 2.0 su HTTP POST). Espone verso l'esterno gli
+# stessi tool del tool loop interno — connettori GitHub/Google/Office365
+# compresi — cosi' un runtime agentico esterno (Hermes Agent, Claude Code, ...)
+# li usa nativamente senza che noi si debba reimplementarli da quella parte.
+#
+# Sorgenti uniche, nessuna duplicazione: l'elenco viene da BUILTIN_TOOLS (che
+# gia' include connector_manager.get_all_tools()) e l'esecuzione da
+# _execute_tool_call(), lo stesso dispatcher del percorso /v1/chat/completions.
+#
+# Metodi: initialize, notifications/*, ping, tools/list, tools/call.
+# La vecchia forma `omega_call` resta accettata per retrocompatibilita'.
+
+# Revisioni del protocollo che conosciamo. Se il client ne chiede una piu'
+# recente gliela confermiamo comunque: la superficie che usiamo (tools/list +
+# tools/call) non e' cambiata fra le revisioni, e rifiutare romperebbe client
+# nuovi senza motivo.
+MCP_PROTOCOL_VERSION = "2025-06-18"
+
+
+def _mcp_tools() -> list:
+    """BUILTIN_TOOLS tradotti nello schema MCP (parameters -> inputSchema)."""
+    out = []
+    for t in BUILTIN_TOOLS:
+        fn = (t or {}).get("function") or {}
+        name = fn.get("name")
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "description": fn.get("description", ""),
+            "inputSchema": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return out
+
+
 @app.route('/mcp', methods=['POST'])
 def omega_mcp():
     payload = request.get_json(force=True, silent=True) or {}
-    rpc_id  = payload.get("id", 1)
-    def _ok(text):
-        return jsonify({"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": text}]}, "id": rpc_id})
+    rpc_id  = payload.get("id")
+    method  = str(payload.get("method") or "")
+    params  = payload.get("params") or {}
+
+    def _result(result):
+        return jsonify({"jsonrpc": "2.0", "result": result, "id": rpc_id})
+
+    # Errore applicativo: JSON-RPC vuole HTTP 200, l'errore sta nel corpo.
     def _err(msg, code=-32600):
-        return jsonify({"jsonrpc": "2.0", "error": {"code": code, "message": msg}, "id": rpc_id}), 400
-    if payload.get("method") != "tools/call":
-        return _err(f"Unsupported method: {payload.get('method')}")
-    params    = payload.get("params") or {}
-    tool_name = params.get("name", "")
-    arguments = params.get("arguments") or {}
-    if tool_name == "omega_call":
-        inner_tool = str(arguments.get("tool", ""))
-        inner_args = arguments.get("args") or {}
-    else:
-        inner_tool, inner_args = tool_name, arguments
-    _OMEGA = {"omega_query": _omega_query, "omega_store": _omega_store,
-              "omega_reflect": _omega_reflect, "omega_stats": _omega_stats}
-    handler = _OMEGA.get(inner_tool)
-    if not handler:
-        return _err(f"Unknown tool: {inner_tool}", -32601)
-    try:
-        return _ok(handler(inner_args))
-    except Exception as exc:
-        return _err(str(exc), -32603)
+        return jsonify({"jsonrpc": "2.0", "error": {"code": code, "message": msg}, "id": rpc_id})
+
+    # Le notifiche non hanno id e non vogliono risposta.
+    if rpc_id is None and method.startswith("notifications/"):
+        return "", 202
+
+    if method == "initialize":
+        asked = str(params.get("protocolVersion") or "").strip()
+        return _result({
+            "protocolVersion": asked or MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "hyperspace-control-plane", "version": "1.05"},
+        })
+
+    if method == "ping":
+        return _result({})
+
+    if method == "tools/list":
+        return _result({"tools": _mcp_tools()})
+
+    if method == "tools/call":
+        tool_name = str(params.get("name", ""))
+        arguments = params.get("arguments") or {}
+        if tool_name == "omega_call":
+            tool_name = str(arguments.get("tool", ""))
+            arguments = arguments.get("args") or {}
+        if not any(t["name"] == tool_name for t in _mcp_tools()):
+            return _err(f"Unknown tool: {tool_name}", -32602)
+        try:
+            text = _execute_tool_call(tool_name, arguments)
+        except Exception as exc:
+            # Il tool e' fallito: per MCP non e' un errore di protocollo ma un
+            # risultato con isError, cosi' il modello puo' leggerlo e reagire.
+            return _result({"content": [{"type": "text", "text": f"Tool error: {exc}"}],
+                            "isError": True})
+        return _result({"content": [{"type": "text", "text": str(text)}], "isError": False})
+
+    return _err(f"Unsupported method: {method}", -32601)
+
 
 # ── LOG ENDPOINTS ─────────────────────────────────────────────────────────────
 @app.route('/logs')
