@@ -61,7 +61,7 @@ async def notify_ui(from_node: str, to_node: str, label: str):
 
 | Var | Default | Descrizione |
 |---|---|---|
-| `CP_URL` | `http://localhost:8000` | URL Control Plane |
+| `CP_URL` | `http://localhost:8085` | URL Control Plane |
 | `REGISTRY_URL` | `http://localhost:8086` | URL Registry |
 | `POLL_INTERVAL` | `4` | Secondi tra i poll REST |
 | `UI_BRIDGE_URL` | `http://localhost:8099` | (lato CP) dove pushare gli eventi |

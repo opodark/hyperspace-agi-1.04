@@ -1,6 +1,6 @@
 # Architecture
 
-Hyperspace AGI 1.03 is organized as a modular distributed agent system. The repo keeps the orchestration core, connector fabric, node runtimes, registry, memory layer, and infrastructure UI separated so each piece can evolve independently.
+HyperSpace-AGI is organized as a modular distributed agent system. The repo keeps the orchestration core, connector fabric, node runtimes, registry, memory layer, and infrastructure UI separated so each piece can evolve independently.
 
 ## Core layers
 

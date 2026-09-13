@@ -1,6 +1,6 @@
 # Web Node
 
-The web node is the browser-first worker path for Hyperspace AGI 1.03. It exists so the mesh can include weaker devices that cannot run Docker or heavy local services.
+The web node is the browser-first worker path for HyperSpace-AGI. It exists so the mesh can include weaker devices that cannot run Docker or heavy local services.
 
 ## Purpose
 

@@ -1,10 +1,12 @@
-# HyperSpace AGI 1.04 — HIP (HyperSpace Intent Protocol)
+# HyperSpace AGI 1.04
 
-HyperSpace is a coordination protocol that lets independent AI runtimes cooperate across heterogeneous infrastructure — not another chat app, but the layer that sits above individual agent runtimes and routes intents to the workers best suited to handle them.
+HyperSpace-AGI is an **operational runtime for local and distributed AI agents** — not an experimental framework or a single chatbot. It orchestrates specialized agents (memory, tools, policy, roles) on real dev/automation/knowledge workloads, with local inference (Ollama), Docker isolation, and direct human-agent collaboration on the project filesystem.
 
-The inference engine (Ollama, LM Studio, or any OpenAI-compatible backend) runs wherever you point it — natively on a host for direct GPU access, or in Docker via the optional GPU profiles. HyperSpace itself stays protocol-first: discovery, capability advertisement, intent routing, worker negotiation, and connector fabric are the core.
+Mission, lexicon and architectural principles are fixed in [VISION.md](VISION.md); phases, milestones and deliverables are in [ROADMAP.md](ROADMAP.md) — read those first, this README covers what's in the repo and how to run it.
 
-## Architectural Positioning
+**Current phase**: a Windows **Primary Brain** node — always-on, hosts the local LLM runtimes, routes tasks, keeps state/memory, and exposes secure remote access over a private network (Tailscale, transitional — see [docs/tailscale-mesh-setup.md](docs/tailscale-mesh-setup.md)). Full multi-node mesh and the **HyperSpace Intent Protocol (HIP)** below are the long-term direction (Phase 4 in the roadmap), not the current architecture.
+
+## Long-term direction (Phase 4 — not active yet)
 
 ```text
                 AI Model
@@ -19,6 +21,8 @@ The inference engine (Ollama, LM Studio, or any OpenAI-compatible backend) runs 
                     │
      Distributed Worker Network
 ```
+
+See the [HIP section of ROADMAP.md](ROADMAP.md#visione-a-lungo-termine--hyperspace-intent-protocol-hip) for the full design (intent schema, capability advertisement, intent router, runtime independence).
 
 ## What is in this repo
 
@@ -35,13 +39,13 @@ The inference engine (Ollama, LM Studio, or any OpenAI-compatible backend) runs 
 - `docs/` — architecture and deployment notes.
 - `data/` — mounted volumes (Obsidian vault, SearXNG config, node data).
 
-## Implementation Goals for 1.04
-- Intent schema (HIP)
-- Capability advertisement
-- Runtime adapter API
-- Intent Router
-- Worker negotiation
-- Browser Worker integration
+## Current focus (Phase 1 — Windows Primary Brain)
+- Stabilize the Asus Windows host as the primary node.
+- `.env`, `docker-compose.windows.yml`, persistent paths, Ollama via `host.docker.internal`.
+- Tailscale as secure remote access to the node and its internal services.
+- Validate the 14B model pair (generalist + coder) under real RAM/latency/concurrency.
+
+Full stream-by-stream detail (runtime core, agent framework, memory layer, ops) is in [ROADMAP.md](ROADMAP.md).
 
 ## Connector fabric
 
@@ -87,8 +91,8 @@ Planned responsibilities:
 ## Quick Start
 
 ```bash
-git clone https://github.com/opodark/opodark-hyperspace-agi-1.03.git
-cd opodark-hyperspace-agi-1.03
+git clone https://github.com/opodark/hyperspace-agi-1.04.git
+cd hyperspace-agi-1.04
 cp .env.example .env   # or .env.mac / .env.ubuntu / .env.windows depending on host
 
 ./setup.sh   # macOS / Linux
@@ -133,8 +137,7 @@ npx ts-node control-plane/index.ts
 
 ## Product Principle
 
-HyperSpace is not another chat app.
-HyperSpace is the coordination protocol that lets independent AI runtimes cooperate across heterogeneous infrastructures.
+HyperSpace-AGI is not another chat app. It's an operational runtime: process management, model routing, queues, memory, observability and recovery come before dashboards and UX (see [VISION.md](VISION.md) principle #1). The Intent Protocol above is where the runtime is headed once multi-node mesh becomes the active phase — it does not describe today's architecture.
 
 ## Suggested next steps
 
@@ -143,6 +146,8 @@ HyperSpace is the coordination protocol that lets independent AI runtimes cooper
 3. Decide whether the browser node should ship as a web app, extension, or both.
 4. Reconcile the Node/TS HIP skeleton (`control-plane/index.ts`) with the Python `main.py` service that the Dockerfiles actually build, so there is a single source of truth for the control plane.
 
+See [ROADMAP.md](ROADMAP.md#deliverable-prioritari) for the full prioritized deliverable list.
+
 ## Notes
 
-This repository is the 1.04 evolution of the HyperSpace stack, layering the HyperSpace Intent Protocol (HIP) on top of the working 1.02/1.03 mesh (registry, control-plane, node workers, memory graph, Obsidian, SearXNG), with Open WebUI as the default interface.
+This repository is the 1.04 evolution of the HyperSpace stack: the working 1.02/1.03 mesh (registry, control-plane, node workers, memory graph, Obsidian, SearXNG) repositioned as an operational agent runtime, with Open WebUI as the default interface and the Intent Protocol (HIP) as long-term direction rather than current architecture.

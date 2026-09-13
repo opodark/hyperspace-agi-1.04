@@ -1,6 +1,6 @@
 # Network Profiles
 
-Hyperspace AGI 1.03 supports two clear network profiles. They share the same codebase philosophy, but they differ in trust boundaries, propagation rules, and how nodes join the mesh.
+HyperSpace-AGI supports two clear network profiles. They share the same codebase philosophy, but they differ in trust boundaries, propagation rules, and how nodes join the mesh.
 
 ## Enterprise Local
 
