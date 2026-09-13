@@ -238,6 +238,7 @@ main{padding:18px 20px;display:grid}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:var(--surface)}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.inactive-nodes{margin-top:18px}.inactive-nodes summary{cursor:pointer;color:var(--text-muted);padding:12px 0}.inactive-nodes .node-card,.inactive-nodes .mx-node-card{opacity:.5}.inactive-nodes .node-card:hover,.inactive-nodes .mx-node-card:hover{opacity:1}.diag-node-fields{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}.diag-node-fields .fg{flex:1;min-width:180px}
 </style>
 </head>
 <body>
@@ -278,7 +279,7 @@ main{padding:18px 20px;display:grid}
 <div id="panel-nodes" class="panel active">
   <div class="sec-title">Mesh Nodes &#8212; Live</div>
   <div class="row"><button class="btn btn-ghost btn-sm" onclick="refreshNodes()">&#8634; Refresh</button><span style="font-size:.7rem;color:var(--text-muted)" id="nodesCount"></span></div>
-  <div class="nodes-grid" id="nodesGrid"><div class="nodes-empty">Loading nodes&#8230;</div></div>
+  <div class="nodes-grid" id="nodesGrid"><div class="nodes-empty">Loading nodes&#8230;</div></div><details class="inactive-nodes" id="inactiveNodes" hidden><summary id="inactiveNodesLabel">Nodi non raggiungibili</summary><div class="nodes-grid" id="inactiveNodesGrid"></div></details>
 </div>
 
 <!-- TOPOLOGY -->
@@ -419,13 +420,13 @@ main{padding:18px 20px;display:grid}
     <div class="card"><div class="card-title">&#128202; Topology Raw</div><button class="btn btn-primary btn-sm" onclick="diagTopology()">Fetch</button><div class="diag-out" id="dTopo"></div></div>
     <div class="card"><div class="card-title">&#128196; Registry Raw</div><button class="btn btn-reg btn-sm" onclick="diagRegistry()">Fetch</button><div class="diag-out" id="dReg"></div></div>
     <div class="card"><div class="card-title">&#129302; Ollama Status</div><button class="btn btn-success btn-sm" onclick="checkOllama()">Check</button><div class="diag-out" id="dOllama"></div></div>
-    <div class="card"><div class="card-title">&#128173; Simulate Dream</div>
-      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:8px"><input id="drNode" class="inp inp-mono" placeholder="node-id" style="width:120px"/><input id="drText" class="inp" placeholder="Dream text..." style="flex:1"/></div>
-      <button class="btn btn-dream btn-sm" onclick="sendDream()">Send Dream</button><div class="diag-out" id="dDream"></div>
+    <div class="card"><div class="card-title">&#128173; Simulate Dream</div><p class="hint">Inserisce un evento di prova nei log. I sogni automatici vengono generati dal worker quando &egrave; libero.</p>
+      <div class="diag-node-fields"><label class="fg">Nodo<select id="drNode" class="inp" aria-label="Nodo del sogno"></select></label><input id="drText" class="inp" placeholder="Dream text..." style="flex:1"/></div>
+      <button class="btn btn-dream btn-sm" id="sendDreamButton" onclick="sendDream()">Simula evento Dream</button><div class="diag-out" id="dDream"></div><button class="btn btn-ghost btn-sm" onclick="checkDreamWorker()">Stato sogni automatici del nodo</button><div class="diag-out" id="dDreamWorker"></div>
     </div>
-    <div class="card"><div class="card-title">&#128172; Simulate Chat</div>
-      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:8px"><input id="chFrom" class="inp inp-mono" placeholder="from" style="width:90px"/><input id="chTo" class="inp inp-mono" placeholder="to" style="width:90px"/><input id="chMsg" class="inp" placeholder="Message..." style="flex:1"/></div>
-      <button class="btn btn-chat btn-sm" onclick="sendChat()">Send Chat</button><div class="diag-out" id="dChat"></div>
+    <div class="card"><div class="card-title">&#128172; Simulate Chat</div><p class="hint">Inserisce un evento di prova: non invia una richiesta al modello.</p>
+      <div class="diag-node-fields"><label class="fg">From<select id="chFrom" class="inp" aria-label="Nodo mittente"></select></label><label class="fg">To<select id="chTo" class="inp" aria-label="Nodo destinatario"></select></label><input id="chMsg" class="inp" placeholder="Message..." style="flex:1"/></div>
+      <button class="btn btn-chat btn-sm" id="sendChatButton" onclick="sendChat()">Simula evento Chat</button><div class="diag-out" id="dChat"></div>
     </div>
     <div class="card"><div class="card-title">&#9881;&#65039; HB Status</div><button class="btn btn-ghost btn-sm" onclick="checkHb()">Refresh</button><div class="diag-out" id="dHb"></div></div>
     <div class="card"><div class="card-title">&#128202; Ping All Nodes</div><button class="btn btn-ghost btn-sm" onclick="pingAll()">Ping All</button><div class="diag-out" id="dPing"></div></div>
@@ -518,7 +519,7 @@ function showPanel(name,btn){
   document.querySelectorAll('nav button').forEach(function(b){b.classList.remove('active');});
   document.getElementById('panel-'+name).classList.add('active');
   btn.classList.add('active');
-  if(name==='nodes')refreshNodes();
+  if(name==='nodes'||name==='diag')refreshNodes();
   if(name==='topology')loadTopology();
   if(name==='registry')refreshRegistry();
   if(name==='tasks')refreshTaskHistory();
@@ -596,7 +597,11 @@ function renderMetricsNodes(data){
   // Ordina: prima i nodi attivi con health UP, poi attivi non-stale, poi
   // attivi stale, poi unreachable, infine stato sconosciuto.
   nodes.sort(function(a,b){return mxNodeRank(a)-mxNodeRank(b);});
-  list.innerHTML=nodes.map(renderNodeCard).join('');
+  var online=nodes.filter(function(n){return n.status==='active';});
+  var offline=nodes.filter(function(n){return n.status!=='active';});
+  var previous=list.querySelector('details');
+  var wasOpen=previous&&previous.open;
+  list.innerHTML=online.map(renderNodeCard).join('')+(offline.length?'<details class="inactive-nodes" '+(wasOpen?'open':'')+'><summary>Nodi non raggiungibili ('+offline.length+')</summary>'+offline.map(renderNodeCard).join('')+'</details>':'');
 }
 
 // Rank per ordinare le card: health reale pesa più dello stato dichiarato.
@@ -920,12 +925,19 @@ function loadBadge(n){
 // Nodes
 async function refreshNodes(){
   try{
-    var nodes=await(await fetch('/mesh/nodes')).json();
+    var response=await fetch('/mesh/nodes');
+    if(!response.ok)throw new Error('Discovery HTTP '+response.status);
+    var nodes=await response.json();
+    updateDiagnosticNodes(nodes);
     var grid=document.getElementById('nodesGrid');
-    document.getElementById('nodesCount').textContent=nodes.length+' node'+(nodes.length!==1?'s':'');
+    var active=nodes.filter(function(n){return n.status==='active';});
+    var inactive=nodes.filter(function(n){return n.status!=='active';});
+    document.getElementById('nodesCount').textContent=active.length+' attivi / '+inactive.length+' non raggiungibili';
+    document.getElementById('inactiveNodes').hidden=!inactive.length;
+    document.getElementById('inactiveNodesLabel').textContent='Nodi non raggiungibili ('+inactive.length+')';
     if(!nodes.length){grid.innerHTML='<div class="nodes-empty">No nodes discovered yet.</div>';return;}
-    grid.innerHTML=nodes.map(function(n){
-      var nid=n.node_id?n.node_id.slice(0,16)+'...':n.endpoint||'?';
+    var nodeCard=function(n){
+      var nid=n.is_local?'Fallback locale (control-plane)':(n.node_id?n.node_id.slice(0,16)+'...':n.endpoint||'?');
       var tier=n.tier||'leaf';
       var engine=n.engine||'';
       var uptime=n.uptime_s?formatUptime(n.uptime_s):'?';
@@ -945,6 +957,7 @@ async function refreshNodes(){
         +'</div>'
         +'<div class="node-meta">'
         +'<span class="nm-label">Endpoint</span><span class="nm-val" title="'+escH(ep)+'">'+escH(ep.replace('https://','').slice(0,30))+'</span>'
+        +'<span class="nm-label">Ultimo contatto</span><span class="nm-val">'+escH(n.last_seen||'--')+'</span>'
         +'<span class="nm-label">Version</span><span class="nm-val">'+escH(ver)+'</span>'
         +'<span class="nm-label">Uptime</span><span class="nm-val">'+uptime+'</span>'
         +'<span class="nm-label">Load</span><span class="nm-val">'+loadBadge(n)+'</span>'
@@ -955,8 +968,10 @@ async function refreshNodes(){
         +'<span style="color:var(--text-faint);margin-right:4px">pubkey</span>'
         +'<span class="peer-tag" title="'+escH(n.public_key||'')+'">'+escH((n.public_key||'').slice(0,20))+'&hellip;</span>'
         +'</div></div>';
-    }).join('');
-  }catch(e){document.getElementById('nodesGrid').innerHTML='<div class="nodes-empty">Error: '+escH(e.message)+'</div>';}
+    };
+    grid.innerHTML=active.map(nodeCard).join('')||'<div class="nodes-empty">Nessun nodo attivo.</div>';
+    document.getElementById('inactiveNodesGrid').innerHTML=inactive.map(nodeCard).join('');
+  }catch(e){updateDiagnosticNodes([]);document.getElementById('nodesGrid').innerHTML='<div class="nodes-empty">Error: '+escH(e.message)+'</div>';}
 }
 setInterval(refreshNodes,15000); refreshNodes();
 
@@ -1264,21 +1279,48 @@ async function clearLogs(){await fetch('/logs/clear',{method:'POST'});refreshLog
 setInterval(refreshLogs,5000);
 
 // Diagnostics
+function updateDiagnosticNodes(nodes){
+  var seen=new Set();
+  var available=nodes.filter(function(n){
+    if(!n.node_id||!n.endpoint||n.status!=='active'||seen.has(n.node_id))return false;
+    seen.add(n.node_id);return true;
+  });
+  ['drNode','chFrom','chTo'].forEach(function(id){
+    var select=document.getElementById(id), old=select.value;
+    select.replaceChildren();
+    if(!available.length)select.add(new Option('Nessun nodo raggiungibile',''));
+    available.forEach(function(n){select.add(new Option((n.alias||n.node_id.slice(0,12))+' ? '+n.endpoint,n.node_id));});
+    if(available.some(function(n){return n.node_id===old;}))select.value=old;
+    select.disabled=!available.length;
+  });
+  var from=document.getElementById('chFrom'),to=document.getElementById('chTo');
+  if(from.value===to.value&&available.length>1)to.value=available.find(function(n){return n.node_id!==from.value;}).node_id;
+  function validate(){document.getElementById('sendChatButton').disabled=!from.value||!to.value||from.value===to.value;}
+  from.onchange=to.onchange=validate;validate();
+  document.getElementById('sendDreamButton').disabled=!available.length;
+}
 async function diagMeshNodes(){document.getElementById('dMesh').textContent='...';var d=await(await fetch('/mesh/nodes')).json();document.getElementById('dMesh').textContent=JSON.stringify(d,null,2);}
 async function diagTopology(){document.getElementById('dTopo').textContent='...';var d=await(await fetch('/mesh/topology')).json();document.getElementById('dTopo').textContent=JSON.stringify(d,null,2);}
 async function diagRegistry(){document.getElementById('dReg').textContent='...';var d=await(await fetch('/registry/nodes')).json();document.getElementById('dReg').textContent=JSON.stringify(d,null,2);}
 async function checkOllama(){document.getElementById('dOllama').textContent='...';var d=await(await fetch('/ollama/status')).json();document.getElementById('dOllama').textContent=JSON.stringify(d,null,2);}
 async function checkHb(){var d=await(await fetch('/hb/status')).json();document.getElementById('dHb').textContent=JSON.stringify(d,null,2);}
 async function diagRoutingWeights(){document.getElementById('dRoutingWeights').textContent='...';var d=await(await fetch('/config/routing-weights')).json();document.getElementById('dRoutingWeights').textContent=JSON.stringify(d,null,2);}
+async function checkDreamWorker(){
+  var id=document.getElementById('drNode').value;if(!id)return;
+  var out=document.getElementById('dDreamWorker');out.textContent='Caricamento...';
+  try{var response=await fetch('/dreams/status?node_id='+encodeURIComponent(id));out.textContent=JSON.stringify(await response.json(),null,2);}catch(e){out.textContent=e.message;}
+}
 async function sendDream(){
-  var node=document.getElementById('drNode').value.trim()||'node-sim';
+  var node=document.getElementById('drNode').value;
+  if(!node)return;
   var sum=document.getElementById('drText').value.trim()||'Autonomous cycle';
   var r=await fetch('/logs/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'dream',summary:sum,sourceNode:node,status:'info',detail:'Injected via Diagnostics'})});
   document.getElementById('dDream').textContent=JSON.stringify(await r.json(),null,2);
 }
 async function sendChat(){
-  var from=document.getElementById('chFrom').value.trim()||'node-a';
-  var to=document.getElementById('chTo').value.trim()||'node-b';
+  var from=document.getElementById('chFrom').value;
+  var to=document.getElementById('chTo').value;
+  if(!from||!to||from===to)return;
   var msg=document.getElementById('chMsg').value.trim()||'hello';
   var r=await fetch('/logs/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'node_chat',summary:from+' -> '+to+': '+msg,sourceNode:from,targetNode:to,status:'info',detail:'Injected'})});
   document.getElementById('dChat').textContent=JSON.stringify(await r.json(),null,2);

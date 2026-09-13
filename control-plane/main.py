@@ -198,14 +198,14 @@ FEDERATION_ENABLED    = os.getenv("FEDERATION_ENABLED", "true").lower() == "true
 FEDERATION_PUBLIC_URL = os.getenv("FEDERATION_PUBLIC_URL", "").rstrip("/")
 
 # ── NODO ROOT/HUB LOCALE ─────────────────────────────────────────────────────
-# LOCAL_NODE_ID       : ID stabile (default: deriva da hostname)
+# LOCAL_NODE_ID       : ID stabile (default: identita persistente del control-plane)
 # LOCAL_NODE_ENDPOINT : endpoint raggiungibile dall'interno Docker
 #                       es. http://host.docker.internal:8085
 #                       Se vuoto, il nodo locale viene registrato ma il routing
 #                       usa direttamente Ollama (ollama-direct) senza proxy.
 # LOCAL_NODE_ENABLED  : true (default) — disabilita con false per non registrare.
 def _stable_local_id() -> str:
-    h = socket.gethostname()
+    h = generate_or_load_identity()["node_id"]
     return "local-" + hashlib.sha1(h.encode()).hexdigest()[:16]
 
 _LOCAL_NODE_ID       = os.getenv("LOCAL_NODE_ID", "") or _stable_local_id()
@@ -374,6 +374,11 @@ def _load_nodes_from_db():
         if not nid:
             continue
         n["endpoint"] = ep
+        # Retain old synthetic fallback nodes as history, never as live workers.
+        if nid.startswith("local-") and nid != _LOCAL_NODE_ID and not ep:
+            n["status"] = "unreachable"
+            with db._conn() as con:
+                con.execute("UPDATE nodes SET status='unreachable' WHERE node_id=?", (nid,))
         _nodes_by_id[nid] = n
         if ep:
             _known_endpoints.add(ep)
@@ -1780,7 +1785,25 @@ def add_log():
         target=data.get('targetNode',''), status=data.get('status','info'),
         trace_id=data.get('traceId','')
     )
+    if data.get('type') == 'dream':
+        hb_state['last_dream'] = entry['ts']
     return jsonify(entry), 201
+
+@app.route('/dreams/status')
+def dream_node_status():
+    node_id = request.args.get("node_id", "")
+    node = next((n for n in _node_list() if n.get("node_id") == node_id), None)
+    if not node or node.get("status") != "active" or not _best_endpoint(node):
+        return jsonify({"error": "Nodo non raggiungibile"}), 404
+    try:
+        response = requests.get(f"{_best_endpoint(node)}/dreams/status", timeout=5)
+        if response.status_code == 404:
+            return jsonify({"error": "Questo nodo non supporta ancora i sogni automatici: aggiornare il worker"}), 409
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
 
 @app.route('/logs/clear', methods=['POST'])
 def clear_logs():

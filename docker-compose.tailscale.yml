@@ -1,0 +1,12 @@
+# Add private mesh access while retaining localhost bindings.
+# Use together with docker-compose.windows.yml; set TAILSCALE_BIND_IP in .env.
+services:
+  hyperspace-core:
+    ports:
+      - "${TAILSCALE_BIND_IP:?Set TAILSCALE_BIND_IP}:8088:8085"
+  hyperspace-registry:
+    ports:
+      - "${TAILSCALE_BIND_IP:?Set TAILSCALE_BIND_IP}:8086:8086"
+  hyperspace-node-1:
+    ports:
+      - "${TAILSCALE_BIND_IP:?Set TAILSCALE_BIND_IP}:8081:8084"
