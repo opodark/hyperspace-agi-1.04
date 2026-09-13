@@ -27,6 +27,13 @@ data/
 node_identity.json
 peers.json
 
+# WireGuard — le chiavi reali non finiscono mai nel repo
+# (docs/wireguard-mesh-setup.md contiene solo un wg0.conf
+# d'esempio con placeholder)
+*.key
+wg0.conf
+*.wg-quick.conf
+
 # Editor
 .vscode/
 .idea/

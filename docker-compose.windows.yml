@@ -21,6 +21,14 @@ version: '3.9'
 #    Tutte le variabili "mesh" non definite in .env.windows (REGISTRY_
 #    PUBLIC_URL, PUBLIC_ENDPOINT, ecc.) usano i default già presenti
 #    in v1.02 tramite ${VAR:-default}.
+#  - omniroute e hyperspace-federation-gateway sono stati aggiunti qui il
+#    2026-09-13 per parita' con docker-compose.yml: prima mancavano del
+#    tutto su Windows (nessun fallback esterno, nessuna federazione).
+#  - Tutte le porte sono legate a ${MESH_BIND_IP:-127.0.0.1} (default:
+#    solo localhost, comportamento invariato). Per usare questa macchina
+#    come hub mesh (vedi docs/wireguard-mesh-setup.md) si imposta
+#    MESH_BIND_IP=<ip dell'interfaccia WireGuard> in .env.windows, cosi'
+#    i peer la raggiungono senza esporre le porte a tutta la rete/internet.
 #
 # Uso:
 #   cp .env.windows .env
@@ -31,13 +39,15 @@ version: '3.9'
 # la copia. Stessa convenzione di docker-compose.yml con .env.mac
 # / .env.ubuntu.)
 #
-# Dashboard core:    http://localhost:8088
-# Open WebUI:        http://localhost:3000
-# Registry:          http://localhost:8086
-# Node 1:            http://localhost:8081/status
-# SearXNG:           http://localhost:8092
-# Infra-UI Bridge:   http://localhost:8099
-# Memory Graph:      http://localhost:8090/status
+# Dashboard core:      http://localhost:8088
+# Open WebUI:          http://localhost:3000
+# Registry:            http://localhost:8086
+# Node 1:              http://localhost:8081/status
+# SearXNG:             http://localhost:8092
+# Infra-UI Bridge:     http://localhost:8099
+# Memory Graph:        http://localhost:8090/status
+# OmniRoute:           http://localhost:20128
+# Federation Gateway:  http://localhost:8095
 # Obsidian GUI:      http://localhost:8091
 # ============================================================
 
@@ -87,13 +97,46 @@ services:
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+  # -- OmniRoute (fallback esterno) --------------------------------------------
+  # Parita' con docker-compose.yml: quando la mesh non riesce a servire una
+  # richiesta, hyperspace-core cade su questo tier esterno invece di fallire.
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    container_name: hyperspace-omniroute
+    restart: ${RESTART_POLICY}
+    ports:
+      - "${MESH_BIND_IP:-127.0.0.1}:${OMNIROUTE_PORT:-20128}:20128"
+    volumes:
+      - omniroute_data:/app/data
+
+  # -- Federation Gateway --------------------------------------------------------
+  # Unico componente pensato per essere esposto pubblicamente nello scenario di
+  # control-plane confederati: inoltra solo le rotte whitelisted verso
+  # hyperspace-core (vedi federation-gateway/main.py). Parita' con
+  # docker-compose.yml — vedi il commento li' per i dettagli.
+  hyperspace-federation-gateway:
+    build:
+      context: ./federation-gateway
+      dockerfile: Dockerfile
+    container_name: hyperspace-federation-gateway
+    restart: ${RESTART_POLICY}
+    depends_on:
+      hyperspace-core:
+        condition: service_started
+    ports:
+      - "${MESH_BIND_IP:-127.0.0.1}:${FEDERATION_GATEWAY_PORT:-8095}:8095"
+    environment:
+      CP_URL: "http://hyperspace-core:8085"
+      PYTHONUNBUFFERED: "1"
+
+
     volumes:
       - ${HS_CONFIG_DIR}:/app/config
       - ${HS_DATA_DIR}:/app/data
       - ${HS_MEMORY_DIR}:/app/memory
       - ${HS_LOG_DIR}:/app/logs
     ports:
-      - "127.0.0.1:8088:8085"
+      - "${MESH_BIND_IP:-127.0.0.1}:8088:8085"
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -115,7 +158,7 @@ services:
     volumes:
       - ${HS_DATA_DIR}/open-webui:/app/backend/data
     ports:
-      - "127.0.0.1:3000:8080"
+      - "${MESH_BIND_IP:-127.0.0.1}:3000:8080"
     depends_on:
       - hyperspace-core
 
@@ -135,7 +178,7 @@ services:
       REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       PYTHONUNBUFFERED: "1"
     ports:
-      - "127.0.0.1:${REGISTRY_PORT:-8086}:${REGISTRY_PORT:-8086}"
+      - "${MESH_BIND_IP:-127.0.0.1}:${REGISTRY_PORT:-8086}:${REGISTRY_PORT:-8086}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${REGISTRY_PORT:-8086}/health"]
       interval: 15s
@@ -156,7 +199,7 @@ services:
       SEARXNG_BASE_URL: "http://localhost:${SEARXNG_PORT:-8092}/"
       SEARXNG_SECRET: "${SEARXNG_SECRET:-hyperspace-searxng-secret}"
     ports:
-      - "127.0.0.1:${SEARXNG_PORT:-8092}:8080"
+      - "${MESH_BIND_IP:-127.0.0.1}:${SEARXNG_PORT:-8092}:8080"
     cap_drop:
       - ALL
     cap_add:
@@ -202,7 +245,7 @@ services:
     volumes:
       - ./data/node-1:/app/data
     ports:
-      - "127.0.0.1:8081:8084"
+      - "${MESH_BIND_IP:-127.0.0.1}:8081:8084"
 
   # -- Infra-UI Bridge (dashboard SSE, log viewer) ---------------------------
   hyperspace-bridge:
@@ -224,7 +267,7 @@ services:
       POLL_INTERVAL: "${POLL_INTERVAL:-4}"
       PYTHONUNBUFFERED: "1"
     ports:
-      - "127.0.0.1:8099:8099"
+      - "${MESH_BIND_IP:-127.0.0.1}:8099:8099"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8099/status"]
       interval: 20s
@@ -258,7 +301,7 @@ services:
     volumes:
       - ./data/obsidian-vault:/vault
     ports:
-      - "127.0.0.1:8090:8090"
+      - "${MESH_BIND_IP:-127.0.0.1}:8090:8090"
 
   # -- Obsidian nel browser (KasmVNC) -----------------------------------------
   hyperspace-obsidian:
@@ -277,8 +320,9 @@ services:
       - ./data/obsidian-vault:/config/vaults
       - obsidian_config:/config
     ports:
-      - "127.0.0.1:8091:3000"
+      - "${MESH_BIND_IP:-127.0.0.1}:8091:3000"
     shm_size: "1gb"
 
 volumes:
   obsidian_config:
+  omniroute_data:
