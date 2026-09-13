@@ -26,8 +26,8 @@ version: '3.9'
 #    tutto su Windows (nessun fallback esterno, nessuna federazione).
 #  - Tutte le porte sono legate a ${MESH_BIND_IP:-127.0.0.1} (default:
 #    solo localhost, comportamento invariato). Per usare questa macchina
-#    come hub mesh (vedi docs/wireguard-mesh-setup.md) si imposta
-#    MESH_BIND_IP=<ip dell'interfaccia WireGuard> in .env.windows, cosi'
+#    come hub mesh (vedi docs/tailscale-mesh-setup.md) si imposta
+#    MESH_BIND_IP=<ip Tailscale della macchina> in .env.windows, cosi'
 #    i peer la raggiungono senza esporre le porte a tutta la rete/internet.
 #
 # Uso:
