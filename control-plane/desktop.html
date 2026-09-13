@@ -99,18 +99,19 @@ footer a{color:var(--p);text-decoration:none}
 
 <script>
 const HOST = window.location.hostname;
+const CORE_PORT = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
 const SERVICES = {
   use: [
     {icon:'💬', title:'Chat', port:3000, path:'/', desc:'Open WebUI — chatta con la mesh, scegli modelli locali o OmniRoute dal menu.'},
     {icon:'🔀', title:'OmniRoute', port:20128, path:'/', desc:'Gateway verso 278+ provider esterni — fallback e dashboard provider/costi.'},
   ],
   manage: [
-    {icon:'📊', title:'Dashboard Mesh', port:8085, path:'/dashboard', desc:'Nodi, task, log, config avanzata — la vista operativa del control-plane.'},
+    {icon:'📊', title:'Dashboard Mesh', port:CORE_PORT, path:'/dashboard', desc:'Nodi, task, log, config avanzata — la vista operativa del control-plane.'},
     {icon:'✨', title:'Live 3D', port:8099, path:'/', desc:'Mesh in tempo reale via SSE — nodi, task, memoria, token/s.'},
     {icon:'🧠', title:'Memoria (Obsidian)', port:8091, path:'/', desc:'Vault Obsidian nel browser — ogni interazione della mesh diventa una nota collegata.'},
   ],
   setup: [
-    {icon:'🧙', title:'Setup Wizard', port:8088, path:'/', desc:'Primo avvio: configura .env, scarica modelli, imposta la specializzazione del nodo.'},
+    {icon:'🧙', title:Number(CORE_PORT) === 8088 ? 'Configurazione' : 'Setup Wizard', port:8088, path:Number(CORE_PORT) === 8088 ? '/dashboard' : '/', desc:Number(CORE_PORT) === 8088 ? 'Configurazione e gestione del control-plane.' : 'Primo avvio: configura .env, scarica modelli, imposta la specializzazione del nodo.'},
   ],
 };
 
@@ -118,7 +119,7 @@ function render(){
   for (const section of Object.keys(SERVICES)){
     const grid = document.getElementById('grid-'+section);
     grid.innerHTML = SERVICES[section].map((s,i)=>{
-      const url = `http://${HOST}:${s.port}${s.path}`;
+      const url = s.port === CORE_PORT ? `${window.location.origin}${s.path}` : `http://${HOST}:${s.port}${s.path}`;
       const id = `${section}-${i}`;
       return `<a class="tile" href="${url}" target="_blank" rel="noopener" data-check="${url}" id="tile-${id}">
         <div class="tile-icon">${s.icon}</div>
@@ -152,7 +153,7 @@ function toggleDoctor(){
 }
 async function loadDoctor(){
   try{
-    const r = await fetch(`http://${HOST}:8085/doctor`, {signal: AbortSignal.timeout(6000)});
+    const r = await fetch('/doctor', {signal: AbortSignal.timeout(6000)});
     const d = await r.json();
     const dot = document.getElementById('doctor-dot'), label = document.getElementById('doctor-label');
     dot.className = d.status;

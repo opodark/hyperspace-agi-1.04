@@ -97,6 +97,14 @@ services:
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - ${HS_CONFIG_DIR}:/app/config
+      - ${HS_DATA_DIR}:/app/data
+      - ${HS_MEMORY_DIR}:/app/memory
+      - ${HS_LOG_DIR}:/app/logs
+    ports:
+      - "${MESH_BIND_IP:-127.0.0.1}:8088:8085"
+
   # -- OmniRoute (fallback esterno) --------------------------------------------
   # Parita' con docker-compose.yml: quando la mesh non riesce a servire una
   # richiesta, hyperspace-core cade su questo tier esterno invece di fallire.
@@ -128,15 +136,6 @@ services:
     environment:
       CP_URL: "http://hyperspace-core:8085"
       PYTHONUNBUFFERED: "1"
-
-
-    volumes:
-      - ${HS_CONFIG_DIR}:/app/config
-      - ${HS_DATA_DIR}:/app/data
-      - ${HS_MEMORY_DIR}:/app/memory
-      - ${HS_LOG_DIR}:/app/logs
-    ports:
-      - "${MESH_BIND_IP:-127.0.0.1}:8088:8085"
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
