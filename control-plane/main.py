@@ -1195,6 +1195,17 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
     all_tools    = client_tools + [t for t in BUILTIN_TOOLS if t["function"]["name"] not in client_names]
     last_resp    = None
 
+    def _retry_without_tools(reason):
+        push_log('system', f'tool_loop fallback no-tools: {str(reason)[:120]}', status='warn')
+        plain = {**data, "messages": messages, "stream": False}
+        plain.pop("tools", None)
+        try:
+            return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
+        except NodeBusyError:
+            raise
+        except Exception as e2:
+            return {"error": {"message": str(e2), "type": "server_error"}}
+
     for iteration in range(max_iterations):
         payload = {**data, "messages": messages, "tools": all_tools, "stream": False}
         try:
@@ -1202,19 +1213,20 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
         except NodeBusyError:
             raise
         except ValueError as e:
-            push_log('system', f'tool_loop fallback no-tools: {str(e)[:120]}', status='warn')
             if iteration == 0:
-                plain = {**data, "messages": messages, "stream": False}
-                plain.pop("tools", None)
-                try:
-                    return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
-                except NodeBusyError:
-                    raise
-                except Exception as e2:
-                    return {"error": {"message": str(e2), "type": "server_error"}}
+                return _retry_without_tools(e)
             return last_resp or {"error": {"message": str(e), "type": "server_error"}}
         except Exception as e:
             return {"error": {"message": str(e), "type": "server_error"}}
+
+        # Un modello non tool-capable non sempre fa fallire la richiesta HTTP
+        # (niente ValueError sopra): spesso Ollama risponde 200 con un body
+        # JSON {"error": ...} valido, es. "<modello> does not support tools".
+        # Stesso fallback del ramo ValueError: ritenta UNA volta senza tools.
+        if resp.get("error"):
+            if iteration == 0:
+                return _retry_without_tools(resp["error"])
+            return last_resp or resp
 
         last_resp = resp
         choice    = resp.get("choices", [{}])[0]
