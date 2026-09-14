@@ -124,6 +124,72 @@ Senza questa riga, i bottoni WireGuard del pannello restituiscono
 | `tailscale_up` / `tailscale_down` | `tailscale up` / `tailscale down` | Se serve autenticazione interattiva (primo login), va fatta a mano una volta da terminale — il pannello non gestisce flussi OAuth |
 | `wg_status` | `wg show` | Sola lettura, funziona anche senza sudoers |
 | `wg_up` / `wg_down` | `sudo -n wg-quick up/down <interfaccia>` | Richiede la regola sudoers sopra |
+| `ble_scan` | `BleakScanner.discover()` | Sola lettura, richiede `pip install bleak` (unica azione con una dipendenza esterna — vedi sotto). Non inclusa nel poll automatico di `/network/status`: dura diversi secondi, va lanciata a mano |
+
+## Bottiglie: discovery firmato + proof-of-work
+
+Vive nel control-plane (non nell'host-agent: non serve accesso all'host, è
+logica pura + una rotta di rete), rotte `/bottles/publish`, `/bottles/list`,
+`/bottles/announce`. Sostituisce l'idea originale — pubblicare annunci su
+Pastebin/bacheche pubbliche generiche — scartata perché ricalca troppo da
+vicino un *dead-drop resolver* da command-and-control di malware (rischio
+concreto: ban, violazione ToS, finire in una IOC feed di threat-intel).
+
+Una bottiglia è un annuncio "sono il nodo X, raggiungimi qui" firmato con
+l'identità ECDSA del nodo (`shared/identity.py`, la stessa chiave già usata
+per firmare le richieste inter-nodo — nessuna nuova primitiva crittografica)
+più un proof-of-work stile Bitmessage (`shared/bottle.py`): un nonce che
+deve portare l'hash del payload ad avere N bit a zero in testa. Il PoW rende
+costoso inondare un relay di annunci falsi; la firma rende impossibile
+falsificare l'identità di un nodo che non controlli.
+
+Misurato su questo Mac (single-core, Python puro): ~600.000 hash/s. A 20 bit
+(default) il mining richiede tipicamente meno di 2 secondi; il pulsante
+"Annuncia questo nodo" nella dashboard blocca per quel tempo, è previsto.
+
+Il "relay" è semplicemente un altro control-plane HyperSpace: `/bottles/announce`
+senza `relay_url` pubblica sul nodo stesso (funziona anche in locale, senza
+altre macchine); con `relay_url` inoltra a `/bottles/publish` su quell'altro
+nodo. Storage in memoria (non su disco: sono annunci con TTL, non dati da
+conservare), al più una bottiglia per pubkey — una nuova sostituisce la
+precedente dello stesso nodo — con un tetto massimo di bottiglie distinte e
+rate-limit per IP come difesa in profondità oltre al PoW.
+
+## Esplorato ma non costruito: WiFi mesh, Bluetooth peripheral, ham radio
+
+Verificato il 2026-09-14, prima di scrivere codice non testabile per davvero:
+
+- **WiFi mesh diretto (senza router)**: su questo Mac AWDL (il livello sotto
+  AirDrop) è già attivo — ma è proprietario Apple, nessuna API pubblica per
+  app di terze parti, e non esiste su Windows/Linux. Un vero mesh WiFi
+  cross-platform richiederebbe tre implementazioni diverse (WiFi Direct via
+  wpa_supplicant su Linux, WiFi Direct API su Windows, niente di equivalente
+  esposto su macOS) — non è un pomeriggio di lavoro, è un progetto a sé.
+- **Bluetooth Low Energy, annuncio (peripheral/GATT server)**: `bleak`
+  (unica libreria BLE seria e cross-platform in Python, MIT) fa **solo**
+  scansione — è letteralmente descritta come "client", non "server". Per
+  annunciarsi servirebbe CoreBluetooth via PyObjC su macOS, BlueZ via D-Bus
+  su Linux, WinRT su Windows: tre percorsi nativi separati, nessuno scritto
+  qui. Quello che c'è oggi (`ble_scan`) è solo la metà "vedo chi c'è vicino".
+- **Ham radio (APRS/Winlink/Packet Radio-AX.25)**: nessun hardware presente
+  su nessuna delle tre macchine (né SDR, né TNC, né radio) — scrivere codice
+  per trasmettere/ricevere su RF senza poterlo verificare per davvero
+  avrebbe rotto la regola tenuta per tutta questa fase del progetto
+  (verificare sul serio, non solo scrivere). Provato **APRS-IS**, il ponte
+  internet della rete APRS (nessun hardware radio richiesto per riceverne il
+  traffico): un primo tentativo di connessione a `rotate.aprs2.net:14580`
+  è riuscito (banner del server ricevuto), un secondo è stato respinto con
+  "Login by user not allowed" — il nominativo generico `N0CALL` viene spesso
+  bloccato dai singoli server del pool. Serve un nominativo radioamatore
+  vero anche solo per ricevere in modo affidabile. **Trasmettere su
+  frequenze radioamatoriali richiede in ogni giurisdizione una licenza da
+  radioamatore**, oltre all'hardware — non aggirabile con codice.
+
+Se in futuro arriva hardware vero (un TNC, un RTL-SDR, un nominativo
+radioamatore) o tempo per il lavoro nativo per-OS sul BLE peripheral, questi
+tornano costruibili con lo stesso standard di verifica del resto del
+pannello. Fino ad allora, meglio onesti sul limite che codice che non si può
+testare.
 
 ## Limiti di questa prima versione
 
@@ -139,8 +205,10 @@ Senza questa riga, i bottoni WireGuard del pannello restituiscono
 
 ## File coinvolti
 
-- `hostctl/agent.py` — l'agent, unico file, zero dipendenze
-- `control-plane/main.py` — `/network/status`, `/network/action` (proxy verso l'agent)
-- `control-plane/dashboard.html` — tab "Network"
-- `tests/test_hostctl.py` — test della whitelist, validazione input, auth
-- `.env.example` — `HOSTCTL_TOKEN`, `HOSTCTL_PORT`, `HOSTCTL_URL`, `WIREGUARD_INTERFACE`
+- `hostctl/agent.py` — l'agent; zero dipendenze tranne `ble_scan` (`bleak`, opzionale)
+- `shared/bottle.py` — logica bottiglie: proof-of-work + validazione, nessuna dipendenza esterna
+- `control-plane/main.py` — `/network/status`, `/network/action` (proxy verso l'agent), `/bottles/publish`, `/bottles/list`, `/bottles/announce`
+- `control-plane/dashboard.html` — tab "Network" (card ngrok/Tailscale/WireGuard/BLE + sezione Bottiglie)
+- `tests/test_hostctl.py` — test della whitelist, validazione input, auth, `ble_scan`
+- `tests/test_bottle.py` — test del proof-of-work e della validazione delle bottiglie
+- `.env.example` — `HOSTCTL_TOKEN`, `HOSTCTL_PORT`, `HOSTCTL_URL`, `WIREGUARD_INTERFACE`, `BLE_SCAN_SECONDS`, `BOTTLE_MAX_COUNT`, `BOTTLE_MAX_AGE_S`, `BOTTLE_RATE_MAX_PER_HOUR`, `BOTTLE_RELAY_URL`

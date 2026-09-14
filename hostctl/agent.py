@@ -22,10 +22,21 @@ Uso:
     python3 hostctl/agent.py                    # avvia, legge .env
 
 Disabilitato finche' HOSTCTL_TOKEN non esiste: senza, l'avvio si rifiuta.
+
+Nota su ble_scan: e' l'unica azione con una dipendenza esterna (`bleak`,
+MIT) — tutto il resto di questo file resta stdlib puro apposta. Verificato
+2026-09-14: bleak fa scansione (ruolo BLE central/client) su tutte e tre le
+piattaforme, ma NON annuncio/GATT server (ruolo peripheral) — nessuna
+libreria seria lo fa in modo unificato multipiattaforma oggi (macOS
+servirebbe CoreBluetooth via PyObjC diretto, Linux BlueZ via D-Bus, Windows
+WinRT — tre implementazioni native separate). Un mesh BLE bidirezionale
+resta quindi fuori scope finche' non si scrive quella parte da zero per
+ciascun OS; qui c'e' solo la meta' "vedo chi c'e' vicino", non "mi annuncio".
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hmac
 import json
 import os
@@ -38,6 +49,12 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    from bleak import BleakScanner
+    _BLEAK_AVAILABLE = True
+except ImportError:
+    _BLEAK_AVAILABLE = False
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -210,6 +227,30 @@ def action_wg_down(_params: dict) -> dict:
     return _run(["sudo", "-n", "wg-quick", "down", _wg_interface()], timeout=15)
 
 
+def action_ble_scan(params: dict) -> dict:
+    """Scansione BLE (solo lettura, ruolo client/central). Vedi la nota in
+    cima al file: niente annuncio/peripheral, nessuna libreria seria lo fa
+    in modo unificato multipiattaforma oggi."""
+    if not _BLEAK_AVAILABLE:
+        return {"ok": False, "error": "bleak non installato — pip install bleak (opzionale, "
+                "solo questa azione ne ha bisogno)"}
+    try:
+        seconds = float(params.get("seconds", os.getenv("BLE_SCAN_SECONDS", "6")))
+        seconds = max(1.0, min(seconds, 30.0))  # tetto: uno scan non deve poter appendere il server a lungo
+    except (TypeError, ValueError):
+        seconds = 6.0
+
+    async def _scan():
+        devices = await BleakScanner.discover(timeout=seconds)
+        return [{"address": d.address, "name": d.name} for d in devices]
+
+    try:
+        found = asyncio.run(_scan())
+    except Exception as error:  # bleak solleva eccezioni diverse per OS/permessi
+        return {"ok": False, "error": f"scan fallita: {error}"}
+    return {"ok": True, "seconds": seconds, "count": len(found), "devices": found}
+
+
 ACTIONS = {
     "ngrok_status": action_ngrok_status,
     "ngrok_start": action_ngrok_start,
@@ -220,9 +261,10 @@ ACTIONS = {
     "wg_status": action_wg_status,
     "wg_up": action_wg_up,
     "wg_down": action_wg_down,
+    "ble_scan": action_ble_scan,
 }
 
-READ_ONLY_ACTIONS = {"ngrok_status", "tailscale_status", "wg_status"}
+READ_ONLY_ACTIONS = {"ngrok_status", "tailscale_status", "wg_status", "ble_scan"}
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────

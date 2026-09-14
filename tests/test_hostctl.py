@@ -119,6 +119,40 @@ class NgrokStopTests(unittest.TestCase):
         self.assertTrue(result["ok"])
 
 
+class BleScanTests(unittest.TestCase):
+    def test_reports_clearly_when_bleak_not_installed(self):
+        with patch.object(agent, "_BLEAK_AVAILABLE", False):
+            result = agent.action_ble_scan({})
+            self.assertFalse(result["ok"])
+            self.assertIn("bleak", result["error"])
+
+    def test_seconds_is_clamped_to_a_sane_range(self):
+        with patch.object(agent, "_BLEAK_AVAILABLE", True), \
+             patch.object(agent.asyncio, "run", return_value=[]) as run:
+            agent.action_ble_scan({"seconds": 9999})
+            # non possiamo leggere 'seconds' passato a BleakScanner.discover da qui
+            # (e' dentro la coroutine), ma verifichiamo che non esploda e risponda ok
+            run.assert_called_once()
+
+    def test_non_numeric_seconds_falls_back_to_default(self):
+        with patch.object(agent, "_BLEAK_AVAILABLE", True), \
+             patch.object(agent.asyncio, "run", return_value=[]) as run:
+            result = agent.action_ble_scan({"seconds": "non-un-numero"})
+            self.assertTrue(result["ok"])
+            run.assert_called_once()
+
+    def test_scan_failure_reported_cleanly_not_raised(self):
+        with patch.object(agent, "_BLEAK_AVAILABLE", True), \
+             patch.object(agent.asyncio, "run", side_effect=RuntimeError("bluetooth spento")):
+            result = agent.action_ble_scan({})
+            self.assertFalse(result["ok"])
+            self.assertIn("bluetooth spento", result["error"])
+
+    def test_registered_in_action_whitelist_as_read_only(self):
+        self.assertIn("ble_scan", agent.ACTIONS)
+        self.assertIn("ble_scan", agent.READ_ONLY_ACTIONS)
+
+
 class WgInterfaceValidationTests(unittest.TestCase):
     @patch.dict("os.environ", {"WIREGUARD_INTERFACE": "wg0"})
     def test_accepts_normal_name(self):

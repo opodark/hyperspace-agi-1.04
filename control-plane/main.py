@@ -58,6 +58,7 @@ from shared.identity import (
     verify_request_headers,
 )
 from shared.engine_profiles import all_backend_type_scores as _all_backend_scores
+from shared.bottle import verify_bottle, DEFAULT_DIFFICULTY_BITS as _BOTTLE_DIFFICULTY_BITS
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -2290,6 +2291,113 @@ def network_action():
     push_log('system', f'Network action: {action}', json.dumps(result, default=str),
              status='success' if result.get('ok') else 'error')
     return jsonify(result), status_code
+
+
+# ── BOTTIGLIE (discovery firmato + proof-of-work) ──────────────────────────
+# Alternativa a pubblicare annunci su Pastebin/bacheche pubbliche generiche
+# (scartato: assomiglia troppo a un dead-drop resolver da C2, rischio ban/
+# ToS/finire in una IOC feed). Qui il "relay" è questo stesso endpoint,
+# pensato apposta per questo scopo: chi pubblica deve firmare con la propria
+# identità di nodo (shared/identity.py, stessa chiave usata per firmare le
+# richieste inter-nodo) e risolvere un proof-of-work (shared/bottle.py,
+# modello Bitmessage) — rende costoso inondare il relay di annunci falsi
+# senza bisogno di un elenco di peer fidati a priori.
+#
+# Storage: al più una bottiglia per pubkey (una nuova sostituisce la
+# precedente dello stesso nodo, non si accumula), tetto massimo di bottiglie
+# distinte — oltre il tetto si scarta la più vecchia. In memoria, non su
+# disco: sono annunci di rendez-vous con TTL, non memoria da preservare fra
+# riavvii, un nodo che rivuole essere trovato ripubblica.
+_bottles: dict = {}
+_bottles_lock = threading.Lock()
+_BOTTLE_MAX_COUNT = int(os.getenv("BOTTLE_MAX_COUNT", "500"))
+_BOTTLE_MAX_AGE_S = int(os.getenv("BOTTLE_MAX_AGE_S", "3600"))
+
+# Rate limit per IP: il PoW rende costoso spammare, ma non lo impedisce a
+# chi ha CPU da spendere — difesa in profondità, non l'unica barriera.
+_bottle_rate: dict = {}
+_bottle_rate_lock = threading.Lock()
+_BOTTLE_RATE_MAX = int(os.getenv("BOTTLE_RATE_MAX_PER_HOUR", "20"))
+
+
+def _bottle_rate_check(ip: str) -> bool:
+    now = time.time()
+    with _bottle_rate_lock:
+        recent = [t for t in _bottle_rate.get(ip, []) if now - t < 3600]
+        if len(recent) >= _BOTTLE_RATE_MAX:
+            _bottle_rate[ip] = recent
+            return False
+        recent.append(now)
+        _bottle_rate[ip] = recent
+        return True
+
+
+def _bottles_prune_expired() -> None:
+    now = time.time()
+    for pubkey in [k for k, b in _bottles.items() if now - b.get("ts", 0) > _BOTTLE_MAX_AGE_S]:
+        _bottles.pop(pubkey, None)
+
+
+@app.route('/bottles/publish', methods=['POST'])
+def bottles_publish():
+    ip = request.remote_addr or "?"
+    if not _bottle_rate_check(ip):
+        return jsonify({"ok": False, "error": "troppe pubblicazioni da questo IP, riprova più tardi"}), 429
+    bottle = request.get_json(force=True, silent=True) or {}
+    valid, reason = verify_bottle(bottle, difficulty_bits=_BOTTLE_DIFFICULTY_BITS, max_age_s=_BOTTLE_MAX_AGE_S)
+    if not valid:
+        return jsonify({"ok": False, "error": reason}), 400
+    with _bottles_lock:
+        _bottles_prune_expired()
+        pubkey = bottle["pubkey"]
+        if pubkey not in _bottles and len(_bottles) >= _BOTTLE_MAX_COUNT:
+            oldest = min(_bottles, key=lambda k: _bottles[k].get("ts", 0))
+            _bottles.pop(oldest, None)
+        _bottles[pubkey] = bottle
+    push_log('system', 'Bottle published', f"pubkey={pubkey[:16]}… endpoint={bottle.get('endpoint')}")
+    return jsonify({"ok": True})
+
+
+@app.route('/bottles/list')
+def bottles_list():
+    with _bottles_lock:
+        _bottles_prune_expired()
+        bottles = list(_bottles.values())
+    return jsonify({"count": len(bottles), "difficulty_bits": _BOTTLE_DIFFICULTY_BITS,
+                    "max_age_s": _BOTTLE_MAX_AGE_S, "bottles": bottles})
+
+
+@app.route('/bottles/announce', methods=['POST'])
+def bottles_announce():
+    """Crea e pubblica una bottiglia per QUESTO nodo. La chiave privata vive
+    solo qui lato server (_cp_private_key, mai esposta al browser) — è per
+    questo che l'annuncio è un'azione server-side e non qualcosa che la
+    dashboard potrebbe fare da sola in JS."""
+    data     = request.get_json(force=True, silent=True) or {}
+    endpoint = data.get("endpoint") or os.getenv("PUBLIC_ENDPOINT", "") or _LOCAL_NODE_ENDPOINT
+    if not endpoint:
+        return jsonify({"ok": False, "error": "nessun endpoint da annunciare — imposta PUBLIC_ENDPOINT "
+                        "nel .env o passa 'endpoint' esplicitamente"}), 400
+    relay_url = (data.get("relay_url") or os.getenv("BOTTLE_RELAY_URL", "")).rstrip("/") or None
+
+    from shared.bottle import make_bottle
+    bottle = make_bottle(CP_PUBKEY, endpoint, _cp_private_key, difficulty_bits=_BOTTLE_DIFFICULTY_BITS)
+
+    if relay_url is None:
+        # nessun relay esterno configurato: pubblica su se stesso, cosi'
+        # il pulsante funziona anche in locale senza altre macchine.
+        with _bottles_lock:
+            _bottles_prune_expired()
+            _bottles[bottle["pubkey"]] = bottle
+        return jsonify({"ok": True, "relay": "self", "bottle": bottle})
+
+    try:
+        r = requests.post(f"{relay_url}/bottles/publish", json=bottle, timeout=10)
+        result = r.json() if r.content else {}
+        return jsonify({"ok": bool(result.get("ok")), "relay": relay_url, "bottle": bottle,
+                        "relay_response": result}), r.status_code
+    except requests.RequestException as error:
+        return jsonify({"ok": False, "error": f"relay non raggiungibile: {error}", "bottle": bottle}), 502
 
 
 @app.route('/doctor')
