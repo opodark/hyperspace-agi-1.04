@@ -255,6 +255,7 @@ main{padding:18px 20px;display:grid}
     <button onclick="showPanel('logs',this)">&#128203; Logs</button>
     <button onclick="showPanel('metrics',this)">&#9889; Metrics</button>
     <button onclick="showPanel('diag',this)">&#128295; Diagnostics</button>
+    <button onclick="showPanel('network',this)">&#128225; Network</button>
     <button onclick="showPanel('setup',this)">&#9881;&#65039; Setup</button>
   </nav>
   <div class="hdr-right">
@@ -434,6 +435,54 @@ main{padding:18px 20px;display:grid}
   </div>
 </div>
 
+<!-- NETWORK -->
+<div id="panel-network" class="panel">
+  <div class="sec-title">Network</div>
+  <p class="hint">
+    WireGuard/Tailscale/ngrok girano sull'host, non in questo container: questo
+    pannello parla con <code>hostctl/agent.py</code>, un processo separato che
+    va avviato a parte sulla stessa macchina. Vedi <code>docs/network-panel.md</code>.
+  </p>
+  <div class="card" id="netUnconfigured" hidden>
+    <div class="card-title">&#9888;&#65039; Host-agent non configurato</div>
+    <p class="hint">
+      Manca <code>HOSTCTL_TOKEN</code> in <code>.env</code> su questa macchina.
+      Genera un token con <code>python3 hostctl/agent.py --generate-token</code>,
+      poi avvia l'agent con <code>python3 hostctl/agent.py</code> e riavvia il
+      control-plane perch&eacute; rilegga il <code>.env</code>.
+    </p>
+  </div>
+  <div class="card" id="netError" style="border-color:var(--error)" hidden></div>
+  <div class="diag-grid" id="netCards" hidden>
+    <div class="card">
+      <div class="card-title"><span class="node-status-dot unknown" id="netNgrokDot"></span> ngrok</div>
+      <div id="netNgrokBody" class="hint">Caricamento&hellip;</div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="netNgrokStart()">&#9654; Avvia tunnel</button>
+        <button class="btn btn-danger btn-sm" onclick="netAction('ngrok_stop')">&#9632; Ferma</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="node-status-dot unknown" id="netTsDot"></span> Tailscale</div>
+      <div id="netTsBody" class="hint">Caricamento&hellip;</div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="netAction('tailscale_up')">&#9654; Up</button>
+        <button class="btn btn-danger btn-sm" onclick="netAction('tailscale_down')">&#9632; Down</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="node-status-dot unknown" id="netWgDot"></span> WireGuard</div>
+      <div id="netWgBody" class="hint">Caricamento&hellip;</div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="netAction('wg_up')">&#9654; Up</button>
+        <button class="btn btn-danger btn-sm" onclick="netAction('wg_down')">&#9632; Down</button>
+      </div>
+      <p class="hint" style="margin-top:6px">Serve una regola <code>sudoers</code> dedicata — vedi <code>docs/network-panel.md</code>.</p>
+    </div>
+  </div>
+  <div class="diag-out" id="netActionOut" style="margin-top:10px"></div>
+</div>
+
 <!-- SETUP -->
 <div id="panel-setup" class="panel">
   <div class="sec-title">Setup</div>
@@ -526,7 +575,101 @@ function showPanel(name,btn){
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
   if(name==='setup'){loadCfg();loadEnv();}
+  if(name==='network')refreshNetwork();
 }
+
+// ── NETWORK: stato/azioni su ngrok, Tailscale, WireGuard via host-agent ────
+// Il control-plane gira in un container e non puo' toccare direttamente la
+// rete dell'host: /network/status e /network/action proxano verso
+// hostctl/agent.py, che gira nativo sull'host (vedi docs/network-panel.md).
+async function refreshNetwork(){
+  var out;
+  try{
+    out=await(await fetch('/network/status')).json();
+  }catch(e){
+    document.getElementById('netUnconfigured').hidden=true;
+    document.getElementById('netError').hidden=false;
+    document.getElementById('netError').textContent='Errore: '+e.message;
+    document.getElementById('netCards').hidden=true;
+    return;
+  }
+  if(!out.configured){
+    document.getElementById('netUnconfigured').hidden=false;
+    document.getElementById('netError').hidden=true;
+    document.getElementById('netCards').hidden=true;
+    return;
+  }
+  document.getElementById('netUnconfigured').hidden=true;
+  if(out.error){
+    document.getElementById('netError').hidden=false;
+    document.getElementById('netError').textContent='Errore: '+out.error;
+    document.getElementById('netCards').hidden=true;
+    return;
+  }
+  document.getElementById('netError').hidden=true;
+  document.getElementById('netCards').hidden=false;
+  renderNgrokCard(out.ngrok);
+  renderTailscaleCard(out.tailscale);
+  renderWgCard(out.wireguard);
+}
+
+function renderNgrokCard(n){
+  var dot=document.getElementById('netNgrokDot'), body=document.getElementById('netNgrokBody');
+  if(!n){dot.className='node-status-dot unknown';body.textContent='Nessun dato.';return;}
+  dot.className='node-status-dot '+(n.running?'active':'unreachable');
+  if(!n.running){
+    body.innerHTML='Non in esecuzione.<br><label class="fg" style="margin-top:6px;display:block">Porta locale da esporre'
+      +'<input id="netNgrokPort" class="inp" type="number" min="1" max="65535" placeholder="es. 8085" style="margin-top:4px"/></label>';
+  }else{
+    body.innerHTML=(n.tunnels||[]).map(function(t){
+      return '<div style="margin-bottom:4px"><a href="'+escH(t.public_url)+'" target="_blank" rel="noopener">'+escH(t.public_url)+'</a>'
+        +' &rarr; '+escH(t.addr||'?')+'</div>';
+    }).join('')||'In esecuzione, nessun tunnel elencato.';
+  }
+}
+
+function renderTailscaleCard(t){
+  var dot=document.getElementById('netTsDot'), body=document.getElementById('netTsBody');
+  if(!t||!t.ok){dot.className='node-status-dot unreachable';body.textContent=(t&&t.error)||'Tailscale non raggiungibile su questo host.';return;}
+  var running=t.backend_state==='Running';
+  dot.className='node-status-dot '+(running?'active':'unreachable');
+  var peers=(t.peers||[]).map(function(p){
+    return '<div style="display:flex;gap:6px;align-items:center;margin-top:3px">'
+      +'<span class="node-status-dot '+(p.online?'active':'unreachable')+'"></span>'
+      +'<span>'+escH(p.hostname||'?')+'</span>'
+      +'<span style="color:var(--text-muted);font-size:.7rem">'+escH((p.ips||[])[0]||'')+'</span></div>';
+  }).join('');
+  body.innerHTML='<div><strong>'+escH((t.self||{}).hostname||'questa macchina')+'</strong> — '+escH(t.backend_state||'?')+'</div>'
+    +'<div style="margin-top:4px;color:var(--text-muted);font-size:.7rem">Peer</div>'+(peers||'<span style="color:var(--text-muted)">nessun peer</span>');
+}
+
+function renderWgCard(w){
+  var dot=document.getElementById('netWgDot'), body=document.getElementById('netWgBody');
+  if(!w||!w.installed){dot.className='node-status-dot unknown';body.textContent='WireGuard non installato su questo host.';return;}
+  dot.className='node-status-dot '+(w.active?'active':'unreachable');
+  body.innerHTML=w.active?('<pre style="white-space:pre-wrap;margin:0;font-size:.7rem">'+escH(w.raw)+'</pre>'):'Nessuna interfaccia attiva.';
+}
+
+async function netAction(action,extra){
+  var out=document.getElementById('netActionOut');
+  out.textContent='In corso: '+action+'…';
+  try{
+    var body=Object.assign({action:action},extra||{});
+    var r=await fetch('/network/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var d=await r.json();
+    out.textContent=(d.ok?'OK — ':'Errore — ')+JSON.stringify(d);
+  }catch(e){out.textContent='Errore: '+e.message;}
+  refreshNetwork();
+}
+function netNgrokStart(){
+  var port=parseInt(document.getElementById('netNgrokPort').value,10);
+  if(!port){document.getElementById('netActionOut').textContent='Inserisci una porta valida.';return;}
+  netAction('ngrok_start',{port:port});
+}
+setInterval(function(){
+  var p=document.getElementById('panel-network');
+  if(p&&p.classList.contains('active'))refreshNetwork();
+},10000);
 
 // ── METRICS: live/summary (sessione) + telemetria nodi (/metrics/nodes) ──
 async function refreshMetrics(){

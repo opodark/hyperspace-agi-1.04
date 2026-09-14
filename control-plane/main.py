@@ -2241,6 +2241,57 @@ def _run_doctor_checks() -> list:
 
     return checks
 
+# ── NETWORK PANEL (proxy verso l'host-agent) ────────────────────────────────
+# WireGuard/Tailscale/ngrok girano sull'HOST, non nel container: il CP non
+# puo' lanciare `tailscale status` o `wg show` da qui dentro. hostctl/agent.py
+# gira nativo sull'host ed espone questo stato via HTTP; lo raggiungiamo con
+# host.docker.internal. Disattivato finche' HOSTCTL_TOKEN non e' impostato —
+# nessun default silenzioso: se manca, il pannello dice esplicitamente che
+# l'host-agent non e' configurato invece di provare a indovinare un URL.
+HOSTCTL_URL   = os.getenv("HOSTCTL_URL", "http://host.docker.internal:8765").rstrip("/")
+HOSTCTL_TOKEN = os.getenv("HOSTCTL_TOKEN", "")
+
+
+def _hostctl_configured() -> bool:
+    return bool(HOSTCTL_TOKEN)
+
+
+def _hostctl_headers() -> dict:
+    return {"Authorization": f"Bearer {HOSTCTL_TOKEN}"}
+
+
+@app.route('/network/status')
+def network_status():
+    if not _hostctl_configured():
+        return jsonify({"configured": False,
+                        "error": "HOSTCTL_TOKEN non impostato — host-agent non configurato su questa macchina"}), 503
+    try:
+        r = requests.get(f"{HOSTCTL_URL}/status", headers=_hostctl_headers(), timeout=5)
+        if r.status_code == 401:
+            return jsonify({"configured": True, "error": "token rifiutato dall'host-agent — HOSTCTL_TOKEN non allineato"}), 502
+        r.raise_for_status()
+        return jsonify({"configured": True, **r.json()})
+    except requests.RequestException as error:
+        return jsonify({"configured": True, "error": f"host-agent non raggiungibile: {error}"}), 502
+
+
+@app.route('/network/action', methods=['POST'])
+def network_action():
+    if not _hostctl_configured():
+        return jsonify({"ok": False, "error": "HOSTCTL_TOKEN non impostato — host-agent non configurato su questa macchina"}), 503
+    data   = request.get_json(force=True, silent=True) or {}
+    action = data.get("action", "")
+    try:
+        r = requests.post(f"{HOSTCTL_URL}/action", headers=_hostctl_headers(), json=data, timeout=25)
+        result = r.json() if r.content else {"ok": False, "error": "risposta vuota dall'host-agent"}
+        status_code = r.status_code
+    except requests.RequestException as error:
+        result, status_code = {"ok": False, "error": f"host-agent non raggiungibile: {error}"}, 502
+    push_log('system', f'Network action: {action}', json.dumps(result, default=str),
+             status='success' if result.get('ok') else 'error')
+    return jsonify(result), status_code
+
+
 @app.route('/doctor')
 def doctor():
     checks = _run_doctor_checks()
