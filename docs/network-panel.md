@@ -22,7 +22,7 @@ e viene raggiunto dal control-plane via `host.docker.internal`.
 │   ┌── container Docker ──┐        HTTP        ┌── processo host ──┐ │
 │   │   control-plane       │ ───────────────►   │  hostctl/agent.py │ │
 │   │   (dashboard, /network│  host.docker.      │  (127.0.0.1:8765) │ │
-│   │    /status, /action)  │  internal:8765     │                   │ │
+│   │    /status, /action)  │  internal:8765     │ HOSTCTL_BIND:8765 │ │
 │   └───────────────────────┘                    └─────────┬─────────┘ │
 │                                                            │          │
 │                                          ngrok / tailscale / wg-quick │
@@ -38,9 +38,11 @@ dashboard di una macchina mostra e controlla solo quella macchina.
 Questo agent può avviare/fermare tunnel e alzare/abbassare interfacce di
 rete. Tre cose lo tengono sicuro, e nessuna delle tre è opzionale:
 
-1. **Ascolta solo su `127.0.0.1`.** Mai `0.0.0.0`. Il container lo
-   raggiunge comunque, perché `host.docker.internal` instrada verso
-   l'host — non serve esporlo oltre il loopback.
+1. **Ascolta su un solo IP esplicito.** Mai `0.0.0.0` o `::`, che l'agent
+   rifiuta. Su Docker Desktop macOS/Windows il default `127.0.0.1` è
+   raggiungibile tramite `host.docker.internal`. Su Linux va usato l'IP del
+   bridge Docker (spesso `172.17.0.1`): `extra_hosts` risolve il nome ma non
+   inoltra magicamente il loopback dell'host.
 2. **Ogni richiesta richiede un token**, confrontato a tempo costante
    (`hmac.compare_digest`). Il bind su loopback da solo non basta: in
    certe configurazioni Docker, `host.docker.internal` è raggiungibile
@@ -53,6 +55,13 @@ rete. Tre cose lo tengono sicuro, e nessuna delle tre è opzionale:
 L'agent **si rifiuta di partire** finché non generi un token esplicitamente.
 Non esiste un default silenzioso.
 
+Il control-plane richiede inoltre un secondo segreto indipendente,
+`NETWORK_ADMIN_TOKEN`, sulle route `/network/status`, `/network/action` e
+`/bottles/announce`. Il token hostctl non viene mai consegnato al browser:
+la dashboard conserva quello amministrativo soltanto nel `sessionStorage`
+della scheda. In questo modo il control-plane non diventa un proxy anonimo
+verso le azioni privilegiate dell'host-agent.
+
 ## Setup
 
 ### 1. Genera il token (una volta sola, per macchina)
@@ -62,8 +71,18 @@ cd hyperspace-agi-1.04
 python3 hostctl/agent.py --generate-token
 ```
 
-Scrive `HOSTCTL_TOKEN=...` nel `.env` della repo — lo stesso file che legge
-il control-plane, quindi non serve copiarlo a mano da nessuna parte.
+Scrive due valori distinti nel `.env` della repo: `HOSTCTL_TOKEN` per il
+canale control-plane → host-agent e `NETWORK_ADMIN_TOKEN` per il canale
+browser → control-plane. I valori esistenti non vengono sovrascritti.
+
+Su Linux configura anche il bind al bridge Docker:
+
+```dotenv
+HOSTCTL_BIND=172.17.0.1
+```
+
+Ricava l'indirizzo effettivo con `ip -4 addr show docker0`; limita la porta
+8765 al bridge locale con il firewall. Wildcard bind non sono accettati.
 
 ### 2. Avvia l'agent
 
@@ -87,10 +106,11 @@ docker compose restart control-plane
 
 ### 4. Apri la dashboard → tab "Network"
 
-Tre card: ngrok, Tailscale, WireGuard. Ognuna mostra lo stato corrente e ha
-i bottoni per le azioni disponibili.
+Inserisci `NETWORK_ADMIN_TOKEN` nel campo dedicato. Il valore resta nella
+scheda corrente e non entra in URL o log. Le tre card ngrok, Tailscale e
+WireGuard mostrano lo stato corrente e le azioni disponibili.
 
-## WireGuard: serve una regola sudoers
+## WireGuard su Linux/macOS: serve una regola sudoers
 
 `wg-quick up/down` richiede privilegi di root. L'agent lancia
 `sudo -n wg-quick ...` (`-n` = non-interattivo: se non può autenticarsi
@@ -113,6 +133,27 @@ nome dell'interfaccia è parte del comando autorizzato.
 Senza questa riga, i bottoni WireGuard del pannello restituiscono
 "sudo: a password is required" — pulito, non un crash, ma non fanno nulla.
 
+### WireGuard su Windows
+
+Su Windows non esistono `sudo` e `wg-quick`. L'agent usa l'interfaccia
+ufficiale del client WireGuard:
+
+```dotenv
+WIREGUARD_INTERFACE=wg0
+WIREGUARD_CONFIG=C:\Users\tuo-utente\.wireguard\wg0.conf
+# opzionale, se non viene trovato automaticamente:
+WIREGUARD_EXECUTABLE=C:\Program Files\WireGuard\wireguard.exe
+WG_EXECUTABLE=C:\Program Files\WireGuard\wg.exe
+```
+
+`wg_up` esegue `wireguard.exe /installtunnelservice <config>` e `wg_down`
+esegue `/uninstalltunnelservice <interfaccia>`. L'host-agent deve essere
+avviato con i privilegi necessari a gestire il servizio tunnel.
+
+Tailscale e WireGuard vengono cercati prima nel `PATH`, poi nei percorsi
+standard sotto `C:\Program Files`. Installazioni non standard possono usare
+`TAILSCALE_EXECUTABLE`, `WIREGUARD_EXECUTABLE` e `WG_EXECUTABLE` nel `.env`.
+
 ## Cosa fa ciascuna azione
 
 | Azione | Comando reale | Note |
@@ -123,7 +164,7 @@ Senza questa riga, i bottoni WireGuard del pannello restituiscono
 | `tailscale_status` | `tailscale status --json` | Sola lettura |
 | `tailscale_up` / `tailscale_down` | `tailscale up` / `tailscale down` | Se serve autenticazione interattiva (primo login), va fatta a mano una volta da terminale — il pannello non gestisce flussi OAuth |
 | `wg_status` | `wg show` | Sola lettura, funziona anche senza sudoers |
-| `wg_up` / `wg_down` | `sudo -n wg-quick up/down <interfaccia>` | Richiede la regola sudoers sopra |
+| `wg_up` / `wg_down` | Unix: `sudo -n wg-quick`; Windows: `wireguard.exe /installtunnelservice` o `/uninstalltunnelservice` | Richiede sudoers su Unix o privilegi servizio su Windows |
 | `ble_scan` | `BleakScanner.discover()` | Sola lettura, richiede `pip install bleak` (unica azione con una dipendenza esterna — vedi sotto). Non inclusa nel poll automatico di `/network/status`: dura diversi secondi, va lanciata a mano |
 
 ## Bottiglie: discovery firmato + proof-of-work
@@ -147,13 +188,20 @@ Misurato su questo Mac (single-core, Python puro): ~600.000 hash/s. A 20 bit
 (default) il mining richiede tipicamente meno di 2 secondi; il pulsante
 "Annuncia questo nodo" nella dashboard blocca per quel tempo, è previsto.
 
-Il "relay" è semplicemente un altro control-plane HyperSpace: `/bottles/announce`
-senza `relay_url` pubblica sul nodo stesso (funziona anche in locale, senza
-altre macchine); con `relay_url` inoltra a `/bottles/publish` su quell'altro
-nodo. Storage in memoria (non su disco: sono annunci con TTL, non dati da
+Il "relay" è semplicemente un altro control-plane HyperSpace:
+`/bottles/announce` senza `BOTTLE_RELAY_URL` pubblica sul nodo stesso; con la
+variabile configurata inoltra a `/bottles/publish` su quel nodo. Endpoint e
+relay non sono accettati dal body browser: il server legge esclusivamente
+`PUBLIC_ENDPOINT` e `BOTTLE_RELAY_URL`, così un client non può usare la chiave
+del control-plane come signing oracle né provocare richieste SSRF.
+
+Storage in memoria (non su disco: sono annunci con TTL, non dati da
 conservare), al più una bottiglia per pubkey — una nuova sostituisce la
 precedente dello stesso nodo — con un tetto massimo di bottiglie distinte e
-rate-limit per IP come difesa in profondità oltre al PoW.
+rate-limit per IP come difesa in profondità oltre al PoW. Il federation
+gateway non espone ancora queste route: nella fase corrente i relay devono
+essere raggiunti sulla rete privata/Tailscale. Una futura esposizione pubblica
+richiede rate-limit nel gateway e propagazione autenticata dell'IP client.
 
 ## Esplorato ma non costruito: WiFi mesh, Bluetooth peripheral, ham radio
 
@@ -202,6 +250,8 @@ testare.
   ma la UI non "ricorda" quale porta avevi scelto nell'input.
 - `tailscale up` con un flusso di login nuovo (mai autenticato su questa
   macchina) va fatto interattivamente da terminale la prima volta.
+- Le bottle funzionano fra control-plane già raggiungibili via rete privata;
+  non costituiscono ancora un bootstrap pubblico indipendente.
 
 ## File coinvolti
 

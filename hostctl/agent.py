@@ -7,7 +7,8 @@ processo gira NATIVO sull'host (non in Docker, apposta) ed espone quello che
 serve via HTTP; il control-plane lo raggiunge via host.docker.internal.
 
 Sicurezza, non negoziabile:
-  - ascolta SOLO su 127.0.0.1 — mai 0.0.0.0, in nessun caso;
+  - ascolta su un IP host specifico — mai 0.0.0.0/::; default 127.0.0.1,
+    su Linux si configura esplicitamente l'IP del bridge Docker;
   - ogni richiesta deve portare il token in `Authorization: Bearer <token>`,
     confrontato a tempo costante — il bind su loopback non basta da solo,
     host.docker.internal in certe configurazioni Docker e' raggiungibile
@@ -18,7 +19,7 @@ Sicurezza, non negoziabile:
     questo agent di toccare la rete di un'altra macchina della mesh.
 
 Uso:
-    python3 hostctl/agent.py --generate-token   # scrive HOSTCTL_TOKEN in .env
+    python3 hostctl/agent.py --generate-token   # scrive due token distinti in .env
     python3 hostctl/agent.py                    # avvia, legge .env
 
 Disabilitato finche' HOSTCTL_TOKEN non esiste: senza, l'avvio si rifiuta.
@@ -38,13 +39,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -62,6 +66,9 @@ ENV_PATH = Path(os.getenv("HOSTCTL_ENV_PATH", BASE_DIR / ".env"))
 STATE_PATH = Path(os.getenv("HOSTCTL_STATE_PATH", Path.home() / ".hyperspace" / "hostctl_state.json"))
 
 _IFACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+_ngrok_lock = threading.Lock()
+_file_env: dict[str, str] = {}
+MAX_REQUEST_BYTES = 16 * 1024
 
 
 # ── config: letta da .env, mai inventata a runtime ─────────────────────────
@@ -79,19 +86,59 @@ def load_env(path: Path) -> dict:
     return values
 
 
-def generate_token(path: Path) -> str:
+def _env_has_key(lines: list[str], key: str) -> bool:
+    return any(line.partition("=")[0].strip() == key for line in lines
+               if "=" in line and not line.lstrip().startswith("#"))
+
+
+def generate_token(path: Path, key: str = "HOSTCTL_TOKEN") -> str:
     token = secrets.token_hex(32)
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    if any(l.startswith("HOSTCTL_TOKEN=") for l in lines):
-        print(f"HOSTCTL_TOKEN esiste gia' in {path} — non sovrascritto.")
+    if _env_has_key(lines, key):
+        print(f"{key} esiste gia' in {path} — non sovrascritto.")
         print("Cancella quella riga a mano se vuoi rigenerarlo.")
         sys.exit(1)
-    lines.append(f"HOSTCTL_TOKEN={token}")
+    lines.append(f"{key}={token}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"Token scritto in {path}.")
-    print("Ricordati di mettere lo STESSO valore nel .env che legge il")
-    print("control-plane (e' lo stesso file, se lanci l'agent dalla repo).")
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    print(f"{key} scritto in {path}.")
     return token
+
+
+def generate_missing_tokens(path: Path) -> dict[str, str]:
+    """Genera i due segreti indipendenti senza ruotare quelli esistenti."""
+    generated = {}
+    for key in ("HOSTCTL_TOKEN", "NETWORK_ADMIN_TOKEN"):
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        if _env_has_key(lines, key):
+            print(f"{key} esiste gia' in {path} — non sovrascritto.")
+            continue
+        generated[key] = generate_token(path, key)
+    return generated
+
+
+def apply_file_env(path: Path) -> dict:
+    """Carica la configurazione senza esportare segreti ai subprocess."""
+    global _file_env
+    values = load_env(path)
+    _file_env = values
+    return {**values, **os.environ}
+
+
+def config_value(key: str, default: str = "") -> str:
+    return os.environ.get(key, _file_env.get(key, default))
+
+
+def validate_bind_address(value: str) -> str:
+    """Accetta un IP host specifico, mai un wildcard bind."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ValueError("HOSTCTL_BIND deve essere un indirizzo IP esplicito") from error
+    if address.is_unspecified:
+        raise ValueError("HOSTCTL_BIND non può essere 0.0.0.0 o ::")
+    return str(address)
 
 
 # ── stato persistente minimo: solo il PID di ngrok fra un riavvio e l'altro ─
@@ -126,8 +173,39 @@ def _run(argv: list, timeout: int = 15) -> dict:
 def _pid_alive_and_named(pid: int, name_fragment: str) -> bool:
     """Controlla che il PID sia vivo E sia davvero il processo che pensiamo —
     evita di terminare un PID riusato da qualcos'altro dopo un riavvio."""
-    result = _run(["ps", "-p", str(pid), "-o", "comm="], timeout=5)
-    return result.get("ok", False) and name_fragment in result.get("stdout", "")
+    if _is_windows():
+        result = _run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], timeout=5)
+    else:
+        result = _run(["ps", "-p", str(pid), "-o", "comm="], timeout=5)
+    return result.get("ok", False) and name_fragment.lower() in result.get("stdout", "").lower()
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _windows_program_file(folder: str, executable: str) -> str | None:
+    program_files = os.getenv("ProgramFiles", r"C:\Program Files")
+    candidate = Path(program_files) / folder / executable
+    return str(candidate) if candidate.is_file() else None
+
+
+def _tailscale_executable() -> str | None:
+    configured = config_value("TAILSCALE_EXECUTABLE", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return str(path) if path.is_file() else None
+    return (shutil.which("tailscale.exe") or shutil.which("tailscale") or
+            (_windows_program_file("Tailscale", "tailscale.exe") if _is_windows() else None))
+
+
+def _wg_executable() -> str | None:
+    configured = config_value("WG_EXECUTABLE", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return str(path) if path.is_file() else None
+    return (shutil.which("wg.exe") or shutil.which("wg") or
+            (_windows_program_file("WireGuard", "wg.exe") if _is_windows() else None))
 
 
 # ── azioni: whitelist fissa, ognuna un argv precompilato ───────────────────
@@ -144,6 +222,11 @@ def action_ngrok_status(_params: dict) -> dict:
 
 
 def action_ngrok_start(params: dict) -> dict:
+    with _ngrok_lock:
+        return _action_ngrok_start(params)
+
+
+def _action_ngrok_start(params: dict) -> dict:
     if not shutil.which("ngrok"):
         return {"ok": False, "error": "ngrok non installato o non nel PATH"}
     try:
@@ -168,6 +251,11 @@ def action_ngrok_start(params: dict) -> dict:
 
 
 def action_ngrok_stop(_params: dict) -> dict:
+    with _ngrok_lock:
+        return _action_ngrok_stop(_params)
+
+
+def _action_ngrok_stop(_params: dict) -> dict:
     state = _read_state()
     pid = state.get("ngrok_pid")
     if not pid:
@@ -176,14 +264,17 @@ def action_ngrok_stop(_params: dict) -> dict:
         state.pop("ngrok_pid", None)
         _write_state(state)
         return {"ok": False, "error": "il pid tracciato non e' (piu') ngrok — stato ripulito"}
-    os.kill(pid, 15)  # SIGTERM
+    os.kill(pid, signal.SIGTERM)
     state.pop("ngrok_pid", None)
     _write_state(state)
     return {"ok": True, "stopped_pid": pid}
 
 
 def action_tailscale_status(_params: dict) -> dict:
-    result = _run(["tailscale", "status", "--json"], timeout=8)
+    executable = _tailscale_executable()
+    if not executable:
+        return {"ok": False, "error": "tailscale non installato o non nel PATH"}
+    result = _run([executable, "status", "--json"], timeout=8)
     if not result["ok"]:
         return result
     try:
@@ -199,32 +290,66 @@ def action_tailscale_status(_params: dict) -> dict:
 
 
 def action_tailscale_up(_params: dict) -> dict:
-    return _run(["tailscale", "up"], timeout=20)
+    executable = _tailscale_executable()
+    if not executable:
+        return {"ok": False, "error": "tailscale non installato o non nel PATH"}
+    return _run([executable, "up"], timeout=20)
 
 
 def action_tailscale_down(_params: dict) -> dict:
-    return _run(["tailscale", "down"], timeout=15)
+    executable = _tailscale_executable()
+    if not executable:
+        return {"ok": False, "error": "tailscale non installato o non nel PATH"}
+    return _run([executable, "down"], timeout=15)
 
 
 def _wg_interface() -> str:
-    iface = os.getenv("WIREGUARD_INTERFACE", "wg0")
+    iface = config_value("WIREGUARD_INTERFACE", "wg0")
     return iface if _IFACE_RE.match(iface) else "wg0"
 
 
 def action_wg_status(_params: dict) -> dict:
-    if not shutil.which("wg"):
+    executable = _wg_executable()
+    if not executable:
         return {"ok": True, "installed": False, "active": False}
-    result = _run(["wg", "show"], timeout=5)
+    result = _run([executable, "show"], timeout=5)
     active = bool(result.get("stdout"))
     return {"ok": True, "installed": True, "active": active, "raw": result.get("stdout", "")}
 
 
 def action_wg_up(_params: dict) -> dict:
+    if _is_windows():
+        executable = _wireguard_windows_executable()
+        config = config_value("WIREGUARD_CONFIG", "").strip()
+        if not executable:
+            return {"ok": False, "error": "wireguard.exe non trovato"}
+        if not config:
+            return {"ok": False, "error": "WIREGUARD_CONFIG non impostato"}
+        config_path = Path(config).expanduser().resolve()
+        if not config_path.is_file():
+            return {"ok": False, "error": f"config WireGuard non trovata: {config_path}"}
+        return _run([executable, "/installtunnelservice", str(config_path)], timeout=20)
     return _run(["sudo", "-n", "wg-quick", "up", _wg_interface()], timeout=15)
 
 
 def action_wg_down(_params: dict) -> dict:
+    if _is_windows():
+        executable = _wireguard_windows_executable()
+        if not executable:
+            return {"ok": False, "error": "wireguard.exe non trovato"}
+        return _run([executable, "/uninstalltunnelservice", _wg_interface()], timeout=20)
     return _run(["sudo", "-n", "wg-quick", "down", _wg_interface()], timeout=15)
+
+
+def _wireguard_windows_executable() -> str | None:
+    configured = config_value("WIREGUARD_EXECUTABLE", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return str(path) if path.is_file() else None
+    discovered = shutil.which("wireguard.exe") or shutil.which("wireguard")
+    if discovered:
+        return discovered
+    return _windows_program_file("WireGuard", "wireguard.exe")
 
 
 def action_ble_scan(params: dict) -> dict:
@@ -235,7 +360,7 @@ def action_ble_scan(params: dict) -> dict:
         return {"ok": False, "error": "bleak non installato — pip install bleak (opzionale, "
                 "solo questa azione ne ha bisogno)"}
     try:
-        seconds = float(params.get("seconds", os.getenv("BLE_SCAN_SECONDS", "6")))
+        seconds = float(params.get("seconds", config_value("BLE_SCAN_SECONDS", "6")))
         seconds = max(1.0, min(seconds, 30.0))  # tetto: uno scan non deve poter appendere il server a lungo
     except (TypeError, ValueError):
         seconds = 6.0
@@ -308,9 +433,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > MAX_REQUEST_BYTES:
+                self._json({"error": "corpo della richiesta troppo grande"}, 413)
+                return
             payload = json.loads(self.rfile.read(length)) if length else {}
         except (ValueError, OSError):
             self._json({"error": "corpo della richiesta non valido"}, 400)
+            return
+        if not isinstance(payload, dict):
+            self._json({"error": "il corpo della richiesta deve essere un oggetto JSON"}, 400)
             return
 
         action = payload.get("action")
@@ -337,21 +468,36 @@ def main():
     args = parser.parse_args()
 
     if args.generate_token:
-        generate_token(ENV_PATH)
+        generated = generate_missing_tokens(ENV_PATH)
+        if generated:
+            print("I token sono distinti: HOSTCTL_TOKEN resta server-to-server;")
+            print("NETWORK_ADMIN_TOKEN va inserito nella tab Network della dashboard.")
         return
 
-    env = {**load_env(ENV_PATH), **os.environ}  # os.environ vince se sovrapposto
+    env = apply_file_env(ENV_PATH)  # os.environ vince se sovrapposto
     token = env.get("HOSTCTL_TOKEN", "")
-    if not token:
-        print("HOSTCTL_TOKEN non impostato — l'agent resta disattivato.")
+    if len(token) < 32:
+        print("HOSTCTL_TOKEN assente o troppo corto — l'agent resta disattivato.")
         print(f"Esegui prima: python3 {sys.argv[0]} --generate-token")
         sys.exit(1)
 
-    port = args.port or int(env.get("HOSTCTL_PORT", "8765"))
+    try:
+        port = args.port or int(env.get("HOSTCTL_PORT", "8765"))
+    except (TypeError, ValueError):
+        print("HOSTCTL_PORT deve essere un numero intero.")
+        sys.exit(1)
+    if not 1 <= port <= 65535:
+        print("HOSTCTL_PORT deve essere compresa fra 1 e 65535.")
+        sys.exit(1)
+    try:
+        bind = validate_bind_address(env.get("HOSTCTL_BIND", "127.0.0.1"))
+    except ValueError as error:
+        print(error)
+        sys.exit(1)
     Handler.token = token
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"hostctl in ascolto su http://127.0.0.1:{port} (solo loopback)")
+    server = ThreadingHTTPServer((bind, port), Handler)
+    print(f"hostctl in ascolto su http://{bind}:{port}")
     print("azioni disponibili:", ", ".join(sorted(ACTIONS)))
     try:
         server.serve_forever()

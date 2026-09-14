@@ -26,8 +26,11 @@ import hashlib
 import json
 import time
 
+from shared.network_security import normalize_http_base
+
 DEFAULT_DIFFICULTY_BITS = 20
 DEFAULT_MAX_AGE_S = 3600
+MAX_BOTTLE_BYTES = 16 * 1024
 
 
 def _canonical(payload: dict) -> bytes:
@@ -76,6 +79,7 @@ def make_bottle(pubkey_hex: str, endpoint: str, private_key,
     """Crea e firma una bottiglia. Blocca per il tempo del mining — vedi
     docs/network-panel.md per i tempi misurati a diverse difficolta'."""
     from shared.identity import sign_message
+    endpoint = normalize_http_base(endpoint)
     base = {"pubkey": pubkey_hex, "endpoint": endpoint, "ts": int(time.time())}
     nonce = find_nonce(base, difficulty_bits)
     return sign_message({**base, "nonce": nonce}, private_key)
@@ -88,7 +92,24 @@ def verify_bottle(bottle: dict, difficulty_bits: int = DEFAULT_DIFFICULTY_BITS,
     from shared.identity import verify_message
     if not isinstance(bottle, dict):
         return False, "non e' un oggetto"
+    try:
+        if len(_canonical(bottle)) > MAX_BOTTLE_BYTES:
+            return False, "bottiglia troppo grande"
+    except (TypeError, ValueError):
+        return False, "contenuto non serializzabile"
+    pubkey = bottle.get("pubkey")
+    signature = bottle.get("signature")
+    if not isinstance(pubkey, str) or len(pubkey) not in {66, 130}:
+        return False, "pubkey mancante o non valida"
+    if not isinstance(signature, str) or not (16 <= len(signature) <= 256):
+        return False, "firma mancante o non valida"
     if not isinstance(bottle.get("endpoint"), str) or not bottle["endpoint"]:
+        return False, "endpoint mancante o non valido"
+    if len(bottle["endpoint"]) > 2048:
+        return False, "endpoint mancante o non valido"
+    try:
+        normalize_http_base(bottle["endpoint"])
+    except ValueError:
         return False, "endpoint mancante o non valido"
     ts = bottle.get("ts")
     if not isinstance(ts, (int, float)) or isinstance(ts, bool):

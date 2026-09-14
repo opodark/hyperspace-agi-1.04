@@ -80,7 +80,7 @@ class VerifyBottleTests(unittest.TestCase):
         self.addCleanup(sys.modules.pop, "shared.identity", None)
 
     def _bottle(self, difficulty_bits=10, **overrides):
-        b = bottle.make_bottle("pk-di-prova", "http://100.81.234.102:8081", self.key,
+        b = bottle.make_bottle("04" + "11" * 64, "http://100.81.234.102:8081", self.key,
                                 difficulty_bits=difficulty_bits)
         b.update(overrides)
         return b
@@ -95,6 +95,11 @@ class VerifyBottleTests(unittest.TestCase):
         ok, reason = bottle.verify_bottle(b, difficulty_bits=10)
         self.assertFalse(ok)
         self.assertIn("endpoint", reason)
+
+    def test_non_http_endpoint_rejected(self):
+        with self.assertRaises(ValueError):
+            bottle.make_bottle("pk-di-prova", "file:///tmp/peer", self.key,
+                               difficulty_bits=4)
 
     def test_expired_rejected(self):
         b = self._bottle()
@@ -129,6 +134,29 @@ class VerifyBottleTests(unittest.TestCase):
         ok, reason = bottle.verify_bottle("non e' un dict")
         self.assertFalse(ok)
         self.assertIn("oggetto", reason)
+
+    def test_oversized_payload_rejected_before_crypto(self):
+        b = self._bottle(extra="x" * bottle.MAX_BOTTLE_BYTES)
+        ok, reason = bottle.verify_bottle(b, difficulty_bits=10)
+        self.assertFalse(ok)
+        self.assertIn("grande", reason)
+
+
+class RealIdentityIntegrationTests(unittest.TestCase):
+    def test_round_trip_with_real_secp256k1_signature(self):
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        except ImportError:
+            self.skipTest("cryptography non installato")
+        key = ec.generate_private_key(ec.SECP256K1())
+        pubkey = key.public_key().public_bytes(
+            Encoding.X962, PublicFormat.CompressedPoint
+        ).hex()
+        signed = bottle.make_bottle(pubkey, "https://relay.example:8085", key,
+                                    difficulty_bits=8)
+        ok, reason = bottle.verify_bottle(signed, difficulty_bits=8)
+        self.assertTrue(ok, reason)
 
 
 if __name__ == "__main__":

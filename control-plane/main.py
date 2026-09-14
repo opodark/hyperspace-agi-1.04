@@ -58,7 +58,12 @@ from shared.identity import (
     verify_request_headers,
 )
 from shared.engine_profiles import all_backend_type_scores as _all_backend_scores
-from shared.bottle import verify_bottle, DEFAULT_DIFFICULTY_BITS as _BOTTLE_DIFFICULTY_BITS
+from shared.bottle import (
+    verify_bottle,
+    DEFAULT_DIFFICULTY_BITS as _BOTTLE_DIFFICULTY_BITS,
+    MAX_BOTTLE_BYTES as _MAX_BOTTLE_BYTES,
+)
+from shared.network_security import normalize_http_base, token_authorized
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -2251,21 +2256,38 @@ def _run_doctor_checks() -> list:
 # l'host-agent non e' configurato invece di provare a indovinare un URL.
 HOSTCTL_URL   = os.getenv("HOSTCTL_URL", "http://host.docker.internal:8765").rstrip("/")
 HOSTCTL_TOKEN = os.getenv("HOSTCTL_TOKEN", "")
+NETWORK_ADMIN_TOKEN = os.getenv("NETWORK_ADMIN_TOKEN", "")
+_NETWORK_ADMIN_HEADER = "X-Hyperspace-Network-Token"
 
 
 def _hostctl_configured() -> bool:
-    return bool(HOSTCTL_TOKEN)
+    return len(HOSTCTL_TOKEN) >= 32
 
 
 def _hostctl_headers() -> dict:
     return {"Authorization": f"Bearer {HOSTCTL_TOKEN}"}
 
 
+def _network_admin_error():
+    """Restituisce una risposta Flask se la route admin non è autorizzata."""
+    if len(NETWORK_ADMIN_TOKEN) < 32:
+        return jsonify({"ok": False, "configured": False,
+                        "error": "NETWORK_ADMIN_TOKEN assente o troppo corto — azioni di rete disabilitate"}), 503
+    provided = request.headers.get(_NETWORK_ADMIN_HEADER, "")
+    if not token_authorized(provided, NETWORK_ADMIN_TOKEN):
+        return jsonify({"ok": False, "configured": True,
+                        "error": "token amministrativo di rete mancante o non valido"}), 401
+    return None
+
+
 @app.route('/network/status')
 def network_status():
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
     if not _hostctl_configured():
         return jsonify({"configured": False,
-                        "error": "HOSTCTL_TOKEN non impostato — host-agent non configurato su questa macchina"}), 503
+                        "error": "HOSTCTL_TOKEN assente o troppo corto — host-agent non configurato su questa macchina"}), 503
     try:
         r = requests.get(f"{HOSTCTL_URL}/status", headers=_hostctl_headers(), timeout=5)
         if r.status_code == 401:
@@ -2278,9 +2300,14 @@ def network_status():
 
 @app.route('/network/action', methods=['POST'])
 def network_action():
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
     if not _hostctl_configured():
-        return jsonify({"ok": False, "error": "HOSTCTL_TOKEN non impostato — host-agent non configurato su questa macchina"}), 503
-    data   = request.get_json(force=True, silent=True) or {}
+        return jsonify({"ok": False, "error": "HOSTCTL_TOKEN assente o troppo corto — host-agent non configurato su questa macchina"}), 503
+    data = request.get_json(force=True, silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "il corpo deve essere un oggetto JSON"}), 400
     action = data.get("action", "")
     try:
         r = requests.post(f"{HOSTCTL_URL}/action", headers=_hostctl_headers(), json=data, timeout=25)
@@ -2310,20 +2337,40 @@ def network_action():
 # riavvii, un nodo che rivuole essere trovato ripubblica.
 _bottles: dict = {}
 _bottles_lock = threading.Lock()
-_BOTTLE_MAX_COUNT = int(os.getenv("BOTTLE_MAX_COUNT", "500"))
-_BOTTLE_MAX_AGE_S = int(os.getenv("BOTTLE_MAX_AGE_S", "3600"))
+_bottle_announce_lock = threading.Lock()
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(os.getenv(name, str(default))), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+_BOTTLE_MAX_COUNT = _bounded_env_int("BOTTLE_MAX_COUNT", 500, 1, 10_000)
+_BOTTLE_MAX_AGE_S = _bounded_env_int("BOTTLE_MAX_AGE_S", 3600, 60, 86_400)
 
 # Rate limit per IP: il PoW rende costoso spammare, ma non lo impedisce a
 # chi ha CPU da spendere — difesa in profondità, non l'unica barriera.
 _bottle_rate: dict = {}
 _bottle_rate_lock = threading.Lock()
-_BOTTLE_RATE_MAX = int(os.getenv("BOTTLE_RATE_MAX_PER_HOUR", "20"))
+_BOTTLE_RATE_MAX = _bounded_env_int("BOTTLE_RATE_MAX_PER_HOUR", 20, 1, 10_000)
+_BOTTLE_RATE_MAX_IPS = _bounded_env_int("BOTTLE_RATE_MAX_IPS", 4096, 1, 100_000)
 
 
 def _bottle_rate_check(ip: str) -> bool:
     now = time.time()
     with _bottle_rate_lock:
+        # Evita crescita permanente della mappa quando nel tempo cambiano IP.
+        for old_ip in list(_bottle_rate):
+            kept = [t for t in _bottle_rate[old_ip] if now - t < 3600]
+            if kept:
+                _bottle_rate[old_ip] = kept
+            else:
+                _bottle_rate.pop(old_ip, None)
         recent = [t for t in _bottle_rate.get(ip, []) if now - t < 3600]
+        if ip not in _bottle_rate and len(_bottle_rate) >= _BOTTLE_RATE_MAX_IPS:
+            return False
         if len(recent) >= _BOTTLE_RATE_MAX:
             _bottle_rate[ip] = recent
             return False
@@ -2343,6 +2390,8 @@ def bottles_publish():
     ip = request.remote_addr or "?"
     if not _bottle_rate_check(ip):
         return jsonify({"ok": False, "error": "troppe pubblicazioni da questo IP, riprova più tardi"}), 429
+    if request.content_length is not None and request.content_length > _MAX_BOTTLE_BYTES:
+        return jsonify({"ok": False, "error": "bottiglia troppo grande"}), 413
     bottle = request.get_json(force=True, silent=True) or {}
     valid, reason = verify_bottle(bottle, difficulty_bits=_BOTTLE_DIFFICULTY_BITS, max_age_s=_BOTTLE_MAX_AGE_S)
     if not valid:
@@ -2373,15 +2422,41 @@ def bottles_announce():
     solo qui lato server (_cp_private_key, mai esposta al browser) — è per
     questo che l'annuncio è un'azione server-side e non qualcosa che la
     dashboard potrebbe fare da sola in JS."""
-    data     = request.get_json(force=True, silent=True) or {}
-    endpoint = data.get("endpoint") or os.getenv("PUBLIC_ENDPOINT", "") or _LOCAL_NODE_ENDPOINT
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    data = request.get_json(force=True, silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "il corpo deve essere un oggetto JSON"}), 400
+    if "endpoint" in data or "relay_url" in data:
+        return jsonify({"ok": False, "error": "endpoint e relay_url sono configurazione server-side; "
+                        "usa PUBLIC_ENDPOINT e BOTTLE_RELAY_URL nel .env"}), 400
+
+    endpoint = os.getenv("PUBLIC_ENDPOINT", "") or _LOCAL_NODE_ENDPOINT
     if not endpoint:
         return jsonify({"ok": False, "error": "nessun endpoint da annunciare — imposta PUBLIC_ENDPOINT "
-                        "nel .env o passa 'endpoint' esplicitamente"}), 400
-    relay_url = (data.get("relay_url") or os.getenv("BOTTLE_RELAY_URL", "")).rstrip("/") or None
+                        "nel .env"}), 400
+    try:
+        endpoint = normalize_http_base(endpoint)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": f"PUBLIC_ENDPOINT non valido: {error}"}), 400
+
+    relay_config = os.getenv("BOTTLE_RELAY_URL", "").strip()
+    try:
+        relay_url = normalize_http_base(relay_config) if relay_config else None
+    except ValueError as error:
+        return jsonify({"ok": False, "error": f"BOTTLE_RELAY_URL non valido: {error}"}), 400
 
     from shared.bottle import make_bottle
-    bottle = make_bottle(CP_PUBKEY, endpoint, _cp_private_key, difficulty_bits=_BOTTLE_DIFFICULTY_BITS)
+    # Una sola operazione di mining per processo: impedisce che doppi click o
+    # richieste concorrenti saturino tutti i core del control-plane.
+    if not _bottle_announce_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "annuncio già in elaborazione"}), 429
+    try:
+        bottle = make_bottle(CP_PUBKEY, endpoint, _cp_private_key,
+                             difficulty_bits=_BOTTLE_DIFFICULTY_BITS)
+    finally:
+        _bottle_announce_lock.release()
 
     if relay_url is None:
         # nessun relay esterno configurato: pubblica su se stesso, cosi'
