@@ -198,10 +198,36 @@ del control-plane come signing oracle né provocare richieste SSRF.
 Storage in memoria (non su disco: sono annunci con TTL, non dati da
 conservare), al più una bottiglia per pubkey — una nuova sostituisce la
 precedente dello stesso nodo — con un tetto massimo di bottiglie distinte e
-rate-limit per IP come difesa in profondità oltre al PoW. Il federation
-gateway non espone ancora queste route: nella fase corrente i relay devono
-essere raggiunti sulla rete privata/Tailscale. Una futura esposizione pubblica
-richiede rate-limit nel gateway e propagazione autenticata dell'IP client.
+rate-limit per IP come difesa in profondità oltre al PoW.
+
+### Esposizione pubblica: bootstrap indipendente per nodi isolati
+
+`/bottles/publish` e `/bottles/list` sono ora nella whitelist del federation
+gateway (`federation-gateway/main.py`): un nodo che non ha ancora accesso
+alla rete privata/Tailscale può pubblicare o leggere annunci passando da lì,
+senza bisogno di un relay già raggiungibile — è il bootstrap pubblico
+indipendente che mancava. `/bottles/announce` resta fuori dalla whitelist di
+proposito: è un'azione admin (richiede `NETWORK_ADMIN_TOKEN` lato CP),
+pensata per la dashboard interna, non per chiamanti pubblici anonimi.
+
+Due cose in più rispetto alle route "nude": un rate-limit di soglia nel
+gateway stesso (`GATEWAY_BOTTLE_PUBLISH_MAX_PER_HOUR`,
+`GATEWAY_BOTTLE_LIST_MAX_PER_MINUTE` — oltre al PoW e al rate-limit per-IP
+già nel CP), e la propagazione **autenticata** dell'IP pubblico reale del
+chiamante: senza, il CP vedrebbe solo l'IP Docker interno del gateway per
+ogni richiesta pubblica, e il suo rate-limit per-IP collasserebbe su un
+unico contatore condiviso da tutto il traffico esterno. Il gateway firma
+`(ip, ts)` con `BOTTLE_GATEWAY_SECRET` (HMAC-SHA256, `shared/network_security.py:
+sign_client_ip`); il CP verifica quella firma (`verify_client_ip`) prima di
+fidarsi dell'IP dichiarato — senza `BOTTLE_GATEWAY_SECRET` configurato (o
+sotto i 32 caratteri) il CP ricade su `request.remote_addr`, degradando alla
+precisione precedente ma senza aprire una via di spoofing.
+
+Limite che resta: la propagazione dell'IP assume che il gateway sia il primo
+salto pubblico, oppure — con `TRUST_PROXY_HEADERS=true` — che ci sia
+esattamente UN reverse proxy fidato davanti (es. Caddy). Più di un proxy in
+catena richiederebbe un conteggio degli hop che qui non c'è: non abilitare
+`TRUST_PROXY_HEADERS` finché la topologia reale non è esattamente quella.
 
 ## Esplorato ma non costruito: WiFi mesh, Bluetooth peripheral, ham radio
 

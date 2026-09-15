@@ -1,0 +1,80 @@
+import importlib.util
+import os
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from shared.network_security import verify_client_ip
+
+
+SOURCE = Path(__file__).parents[1] / "federation-gateway" / "main.py"
+SPEC = importlib.util.spec_from_file_location("federation_gateway_main", SOURCE)
+gateway = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(gateway)
+
+
+class FederationGatewayTests(unittest.TestCase):
+    def setUp(self):
+        gateway._rate_hits.clear()
+        self.client = gateway.app.test_client()
+
+    def test_public_surface_includes_only_safe_bottle_routes(self):
+        self.assertIn(("POST", "/bottles/publish"), gateway.ALLOWED_ROUTES)
+        self.assertIn(("GET", "/bottles/list"), gateway.ALLOWED_ROUTES)
+        self.assertNotIn(("POST", "/bottles/announce"), gateway.ALLOWED_ROUTES)
+        response = self.client.post("/bottles/announce")
+        self.assertEqual(response.status_code, 404)
+
+    def test_spoofed_attestation_is_replaced_with_gateway_signature(self):
+        secret = "g" * 32
+        upstream = Mock(
+            content=b'{}', status_code=200,
+            headers={"Content-Type": "application/json"},
+        )
+        with patch.dict(os.environ, {"BOTTLE_GATEWAY_SECRET": secret}), \
+             patch.object(gateway, "_rate_check", return_value=True), \
+             patch.object(gateway.time, "time", return_value=1000.0), \
+             patch.object(gateway.requests, "request", return_value=upstream) as request_call:
+            response = self.client.post(
+                "/bottles/publish",
+                headers={
+                    "X-Hs-Client-Ip": "198.51.100.99",
+                    "X-Hs-Client-Ts": "1",
+                    "X-Hs-Client-Sig": "forged",
+                },
+                environ_base={"REMOTE_ADDR": "203.0.113.7"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        headers = request_call.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-Hs-Client-Ip"], "203.0.113.7")
+        self.assertTrue(verify_client_ip(
+            secret,
+            headers["X-Hs-Client-Ip"],
+            headers["X-Hs-Client-Ts"],
+            headers["X-Hs-Client-Sig"],
+            now=1000,
+        ))
+
+    def test_rate_limits_are_independent_and_keep_their_own_windows(self):
+        old_limits = gateway._RATE_LIMITS
+        gateway._RATE_LIMITS = {
+            "/bottles/publish": (1, 3600),
+            "/bottles/list": (1, 60),
+        }
+        try:
+            with patch.object(gateway.time, "time", return_value=1000):
+                self.assertTrue(gateway._rate_check("/bottles/publish", "client"))
+            with patch.object(gateway.time, "time", return_value=1100):
+                self.assertTrue(gateway._rate_check("/bottles/list", "client"))
+                self.assertFalse(gateway._rate_check("/bottles/publish", "client"))
+            with patch.object(gateway.time, "time", return_value=1161):
+                self.assertTrue(gateway._rate_check("/bottles/list", "client"))
+                self.assertFalse(gateway._rate_check("/bottles/publish", "client"))
+        finally:
+            gateway._RATE_LIMITS = old_limits
+            gateway._rate_hits.clear()
+
+
+if __name__ == "__main__":
+    unittest.main()

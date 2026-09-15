@@ -124,8 +124,10 @@ services:
   # docker-compose.yml — vedi il commento li' per i dettagli.
   hyperspace-federation-gateway:
     build:
-      context: ./federation-gateway
-      dockerfile: Dockerfile
+      # Context alla radice (non ./federation-gateway): il Dockerfile deve
+      # poter copiare shared/ (sign_client_ip, vedi federation-gateway/main.py).
+      context: .
+      dockerfile: federation-gateway/Dockerfile
     container_name: hyperspace-federation-gateway
     restart: ${RESTART_POLICY}
     depends_on:

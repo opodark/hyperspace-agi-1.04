@@ -63,7 +63,7 @@ from shared.bottle import (
     DEFAULT_DIFFICULTY_BITS as _BOTTLE_DIFFICULTY_BITS,
     MAX_BOTTLE_BYTES as _MAX_BOTTLE_BYTES,
 )
-from shared.network_security import normalize_http_base, token_authorized
+from shared.network_security import normalize_http_base, token_authorized, verify_client_ip
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -2385,9 +2385,28 @@ def _bottles_prune_expired() -> None:
         _bottles.pop(pubkey, None)
 
 
+def _bottle_client_ip() -> str:
+    """IP da usare per il rate-limit dei bottle endpoint.
+
+    Quando la richiesta arriva dal federation-gateway (esposizione pubblica,
+    vedi federation-gateway/main.py), request.remote_addr qui sarebbe l'IP
+    Docker interno del gateway per OGNI chiamante — collasserebbe il
+    rate-limit per-IP sotto su un unico contatore condiviso. Se il gateway
+    ha allegato l'attestazione firmata (X-Hs-Client-*, verificata con lo
+    stesso BOTTLE_GATEWAY_SECRET), usa quella; altrimenti (rete privata
+    diretta, o gateway senza secret configurato) usa la connessione TCP
+    reale, corretta in entrambi i casi."""
+    ip = request.headers.get("X-Hs-Client-Ip", "")
+    ts = request.headers.get("X-Hs-Client-Ts", "")
+    sig = request.headers.get("X-Hs-Client-Sig", "")
+    if verify_client_ip(os.getenv("BOTTLE_GATEWAY_SECRET", ""), ip, ts, sig):
+        return ip
+    return request.remote_addr or "?"
+
+
 @app.route('/bottles/publish', methods=['POST'])
 def bottles_publish():
-    ip = request.remote_addr or "?"
+    ip = _bottle_client_ip()
     if not _bottle_rate_check(ip):
         return jsonify({"ok": False, "error": "troppe pubblicazioni da questo IP, riprova più tardi"}), 429
     if request.content_length is not None and request.content_length > _MAX_BOTTLE_BYTES:

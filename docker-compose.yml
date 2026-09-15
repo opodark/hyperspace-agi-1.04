@@ -441,8 +441,10 @@ services:
   # sul control-plane deve puntare all'URL pubblico di QUESTO servizio, non al CP.
   federation-gateway:
     build:
-      context: ./federation-gateway
-      dockerfile: Dockerfile
+      # Context alla radice (non ./federation-gateway): il Dockerfile deve
+      # poter copiare shared/ (sign_client_ip, vedi federation-gateway/main.py).
+      context: .
+      dockerfile: federation-gateway/Dockerfile
     container_name: hyperspace_federation_gateway
     env_file:
       - path: ./.env

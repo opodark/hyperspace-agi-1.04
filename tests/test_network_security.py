@@ -1,6 +1,11 @@
 import unittest
 
-from shared.network_security import normalize_http_base, token_authorized
+from shared.network_security import (
+    normalize_http_base,
+    sign_client_ip,
+    token_authorized,
+    verify_client_ip,
+)
 
 
 class TokenAuthorizationTests(unittest.TestCase):
@@ -30,6 +35,35 @@ class HttpBaseValidationTests(unittest.TestCase):
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_http_base(value)
+
+
+class ClientIpAttestationTests(unittest.TestCase):
+    def setUp(self):
+        self.secret = "s" * 32
+        self.ip = "203.0.113.7"
+        self.ts = "1000"
+        self.signature = sign_client_ip(self.secret, self.ip, self.ts)
+
+    def test_accepts_valid_recent_signature(self):
+        self.assertTrue(verify_client_ip(
+            self.secret, self.ip, self.ts, self.signature, now=1010,
+        ))
+
+    def test_rejects_tampering_stale_timestamp_and_short_secret(self):
+        self.assertFalse(verify_client_ip(
+            self.secret, "203.0.113.8", self.ts, self.signature, now=1010,
+        ))
+        self.assertFalse(verify_client_ip(
+            self.secret, self.ip, self.ts, self.signature, now=1031,
+        ))
+        self.assertFalse(verify_client_ip(
+            "too-short", self.ip, self.ts, self.signature, now=1010,
+        ))
+
+    def test_rejects_invalid_timestamp_without_raising(self):
+        self.assertFalse(verify_client_ip(
+            self.secret, self.ip, "not-a-time", self.signature, now=1010,
+        ))
 
 
 if __name__ == "__main__":
