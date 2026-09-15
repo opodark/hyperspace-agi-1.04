@@ -1,9 +1,43 @@
-"""Idle-only reflections. Outputs are hypotheses, never source memories."""
+"""Idle-only reflections and their manual review lifecycle.
+
+Dreams are untrusted hypotheses. Only an explicit review can promote one to a
+derived insight, and every decision remains attributable and reversible.
+"""
 import asyncio
 import hashlib
 import json
+import math
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+SCHEMA_VERSION = 1
+PROMPT_VERSION = "dream-json-v1"
+KINDS = {"connection", "contradiction", "summary", "open_question"}
+ACTIONS = {
+    "promote": "promoted",
+    "reject": "rejected",
+    "defer": "deferred",
+    "reopen": "hypothesis",
+    "revoke": "revoked",
+}
+ALLOWED_ACTIONS = {
+    "hypothesis": {"promote", "reject", "defer"},
+    "deferred": {"promote", "reject", "reopen"},
+    "promoted": {"revoke"},
+    "rejected": {"reopen"},
+    "revoked": {"promote", "reject", "reopen"},
+}
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _iso_timestamp(timestamp):
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def source_memories(entries, node_id):
@@ -13,12 +47,195 @@ def source_memories(entries, node_id):
             and (e.get("prompt") or e.get("response") or e.get("content"))][-12:]
 
 
+def source_reference(entry):
+    digest = hashlib.sha256(_canonical(entry).encode()).hexdigest()
+    memory_id = next((str(entry[key]) for key in
+                      ("memory_id", "id", "interaction_id", "task_id")
+                      if entry.get(key)), f"memory-{digest[:20]}")
+    return {
+        "id": memory_id,
+        "sha256": digest,
+        "type": str(entry.get("type", "memory")),
+        "timestamp": entry.get("timestamp", entry.get("ts")),
+    }
+
+
+def parse_reflection(text):
+    """Parse constrained model output, retaining a structured safe fallback."""
+    raw = (text or "").strip()
+    candidate = raw
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        candidate = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    try:
+        payload = json.loads(candidate)
+        if not isinstance(payload, dict) or not str(payload.get("summary", "")).strip():
+            raise ValueError("missing summary")
+        kind = payload.get("kind") if payload.get("kind") in KINDS else "open_question"
+        confidence = payload.get("confidence")
+        if confidence is not None:
+            confidence = float(confidence)
+            if not math.isfinite(confidence):
+                raise ValueError("confidence must be finite")
+            confidence = max(0.0, min(1.0, confidence))
+        questions = payload.get("open_questions", [])
+        if not isinstance(questions, list):
+            questions = []
+        return {
+            "kind": kind,
+            "summary": str(payload["summary"]).strip()[:2000],
+            "confidence": confidence,
+            "open_questions": [str(q).strip()[:500] for q in questions if str(q).strip()][:3],
+            "format_error": "",
+        }
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        return {
+            "kind": "open_question",
+            "summary": raw[:2000],
+            "confidence": None,
+            "open_questions": [],
+            "format_error": f"Unstructured model output: {error}",
+        }
+
+
+class DreamJournal:
+    def __init__(self, directory):
+        base = Path(directory)
+        self.path = base / "dreams.jsonl"
+        self.insights_path = base / "dream_insights.jsonl"
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _read(path):
+        if not path.exists():
+            return []
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    rows.append(value)
+            except (ValueError, OSError):
+                continue
+        return rows
+
+    @staticmethod
+    def _write(path, rows):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text("".join(_canonical(row) + "\n" for row in rows), encoding="utf-8")
+        temporary.replace(path)
+
+    @staticmethod
+    def _normalize_dream(row):
+        """Make pre-D1 text-only records reviewable without destructive migration."""
+        normalized = dict(row)
+        if not normalized.get("id"):
+            seed = "|".join(str(normalized.get(key, "")) for key in
+                            ("node_id", "fingerprint", "timestamp", "response"))
+            normalized["id"] = "dream-legacy-" + hashlib.sha256(seed.encode()).hexdigest()[:20]
+        normalized.setdefault("schema_version", SCHEMA_VERSION)
+        normalized.setdefault("prompt_version", "legacy-free-text")
+        normalized.setdefault("status", "hypothesis")
+        normalized.setdefault("kind", "open_question")
+        normalized.setdefault("summary", normalized.get("response", ""))
+        normalized.setdefault("confidence", None)
+        normalized.setdefault("open_questions", [])
+        normalized.setdefault("source_memory_ids", [])
+        normalized.setdefault("source_refs", [])
+        normalized.setdefault("reviews", [])
+        return normalized
+
+    def append(self, report):
+        with self._lock:
+            rows = self._read(self.path)
+            rows.append(report)
+            self._write(self.path, rows[-100:])
+
+    def list(self, status="", limit=100):
+        with self._lock:
+            rows = [self._normalize_dream(row) for row in self._read(self.path)]
+        if status:
+            rows = [row for row in rows if row.get("status") == status]
+        return list(reversed(rows[-max(1, min(int(limit), 100)):]))
+
+    def insights(self, active_only=True):
+        with self._lock:
+            rows = self._read(self.insights_path)
+        if active_only:
+            rows = [row for row in rows if row.get("status") == "active"]
+        return list(reversed(rows))
+
+    def review(self, dream_id, action, reviewer, rationale, timestamp=None):
+        action = str(action or "").strip().lower()
+        reviewer = str(reviewer or "operator").strip()[:120] or "operator"
+        rationale = str(rationale or "").strip()[:2000]
+        if action not in ACTIONS:
+            raise ValueError("Unknown review action")
+        if not rationale:
+            raise ValueError("Review rationale is required")
+        now = time.time() if timestamp is None else timestamp
+        with self._lock:
+            rows = [self._normalize_dream(row) for row in self._read(self.path)]
+            index = next((i for i, row in enumerate(rows) if row.get("id") == dream_id), None)
+            if index is None:
+                raise KeyError(dream_id)
+            dream = rows[index]
+            old_status = dream.get("status", "hypothesis")
+            if action not in ALLOWED_ACTIONS.get(old_status, set()):
+                raise ValueError(f"Action {action} is not allowed from {old_status}")
+            review = {
+                "action": action,
+                "from_status": old_status,
+                "to_status": ACTIONS[action],
+                "reviewer": reviewer,
+                "rationale": rationale,
+                "created_at": _iso_timestamp(now),
+            }
+            dream["status"] = ACTIONS[action]
+            dream["updated_at"] = review["created_at"]
+            dream.setdefault("reviews", []).append(review)
+            rows[index] = dream
+            self._write(self.path, rows)
+
+            insights = self._read(self.insights_path)
+            insight_id = f"insight-{dream_id}"
+            insight = next((row for row in insights if row.get("id") == insight_id), None)
+            if action == "promote":
+                promoted = {
+                    "schema_version": SCHEMA_VERSION,
+                    "id": insight_id,
+                    "type": "dream_insight",
+                    "status": "active",
+                    "node_id": dream.get("node_id"),
+                    "content": dream.get("summary", dream.get("response", "")),
+                    "dream_id": dream_id,
+                    "source_memory_ids": dream.get("source_memory_ids", []),
+                    "source_refs": dream.get("source_refs", []),
+                    "confidence": dream.get("confidence"),
+                    "review": review,
+                    "created_at": review["created_at"],
+                }
+                if insight:
+                    insights[insights.index(insight)] = promoted
+                else:
+                    insights.append(promoted)
+                insight = promoted
+            elif insight:
+                insight["status"] = "revoked"
+                insight["review"] = review
+            if insight is not None:
+                self._write(self.insights_path, insights)
+            return dream, insight
+
+
 class DreamWorker:
     def __init__(self, directory, node_id, model, read_memory, idle, acquire,
                  release, generate, publish, enabled=False, idle_seconds=120,
-                 interval=900, clock=time.time):
+                 interval=900, clock=time.time, journal=None):
         self.path = Path(directory) / "dream_state.json"
-        self.output = Path(directory) / "dreams.jsonl"
+        self.journal = journal or DreamJournal(directory)
+        self.output = self.journal.path
         self.node_id, self.model = node_id, model
         self.read_memory, self.idle, self.acquire = read_memory, idle, acquire
         self.release, self.generate, self.publish = release, generate, publish
@@ -47,7 +264,8 @@ class DreamWorker:
     def status(self):
         return {**self.state, "enabled": self.enabled, "running": bool(self.generation),
                 "model": self.model, "node_id": self.node_id,
-                "idle_seconds": self.idle_seconds, "interval_seconds": self.interval}
+                "idle_seconds": self.idle_seconds, "interval_seconds": self.interval,
+                "pending_review": len(self.journal.list("hypothesis"))}
 
     async def tick(self):
         now = self.clock()
@@ -75,13 +293,30 @@ class DreamWorker:
             reflection = await asyncio.wait_for(self.generation, timeout=60)
             if not reflection.strip():
                 raise ValueError("Empty reflection")
-            report = {"type": "dream", "status": "hypothesis", "node_id": self.node_id,
-                      "timestamp": now, "model": self.model, "fingerprint": fingerprint,
-                      "source_count": len(entries), "response": reflection}
-            existing = self.output.read_text(encoding="utf-8").splitlines() if self.output.exists() else []
-            temporary = self.output.with_suffix(".tmp")
-            temporary.write_text("\n".join(existing[-99:] + [json.dumps(report, ensure_ascii=False)]) + "\n", encoding="utf-8")
-            temporary.replace(self.output)
+            structured = parse_reflection(reflection)
+            refs = [source_reference(entry) for entry in entries]
+            dream_id = "dream-" + hashlib.sha256(
+                f"{self.node_id}|{fingerprint}|{reflection}".encode()
+            ).hexdigest()[:24]
+            report = {
+                "schema_version": SCHEMA_VERSION,
+                "prompt_version": PROMPT_VERSION,
+                "id": dream_id,
+                "type": "dream",
+                "status": "hypothesis",
+                "node_id": self.node_id,
+                "created_at": _iso_timestamp(now),
+                "timestamp": now,
+                "model": self.model,
+                "fingerprint": fingerprint,
+                "source_count": len(entries),
+                "source_memory_ids": [ref["id"] for ref in refs],
+                "source_refs": refs,
+                "response": reflection,
+                "reviews": [],
+                **structured,
+            }
+            self.journal.append(report)
             self.state.update(fingerprint=fingerprint, last_dream=now)
             self.save()
         except asyncio.CancelledError:

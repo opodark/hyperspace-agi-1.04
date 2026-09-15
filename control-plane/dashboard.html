@@ -171,6 +171,7 @@ main{padding:18px 20px;display:grid}
 /* diag */
 .diag-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
 .diag-out{margin-top:8px;padding:9px;border-radius:var(--radius);background:var(--surface2);font-family:var(--font-mono);font-size:.68rem;color:var(--text-muted);white-space:pre-wrap;min-height:44px;border:1px solid var(--divider);max-height:220px;overflow-y:auto}
+.dream-inbox{display:grid;gap:8px;margin-top:10px}.dream-review-item{padding:10px;border:1px solid var(--divider);border-radius:var(--radius);background:var(--surface2)}.dream-review-meta{font:600 .66rem var(--font-mono);color:var(--text-muted);margin-bottom:6px}.dream-review-summary{font-size:.78rem;line-height:1.45;white-space:pre-wrap}.dream-review-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .mx-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
 .mx-tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px}
 .mx-tile-key{font-size:.62rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:5px}
@@ -255,6 +256,7 @@ main{padding:18px 20px;display:grid}
     <button onclick="showPanel('logs',this)">&#128203; Logs</button>
     <button onclick="showPanel('metrics',this)">&#9889; Metrics</button>
     <button onclick="showPanel('diag',this)">&#128295; Diagnostics</button>
+    <button onclick="showPanel('network',this)">&#128225; Network</button>
     <button onclick="showPanel('setup',this)">&#9881;&#65039; Setup</button>
   </nav>
   <div class="hdr-right">
@@ -424,6 +426,11 @@ main{padding:18px 20px;display:grid}
       <div class="diag-node-fields"><label class="fg">Nodo<select id="drNode" class="inp" aria-label="Nodo del sogno"></select></label><input id="drText" class="inp" placeholder="Dream text..." style="flex:1"/></div>
       <button class="btn btn-dream btn-sm" id="sendDreamButton" onclick="sendDream()">Simula evento Dream</button><div class="diag-out" id="dDream"></div><button class="btn btn-ghost btn-sm" onclick="checkDreamWorker()">Stato sogni automatici del nodo</button><div class="diag-out" id="dDreamWorker"></div>
     </div>
+    <div class="card"><div class="card-title">&#128269; Dream Review Inbox</div><p class="hint">Le ipotesi non entrano nella memoria finch&eacute; un operatore non le promuove con una motivazione.</p>
+      <div class="diag-node-fields"><label class="fg">Nodo<select id="dreamReviewNode" class="inp" aria-label="Nodo da revisionare"></select></label><label class="fg">Stato<select id="dreamReviewStatus" class="inp"><option value="hypothesis">Da revisionare</option><option value="deferred">Rimandati</option><option value="promoted">Promossi</option><option value="rejected">Rifiutati</option><option value="revoked">Revocati</option><option value="">Tutti</option></select></label><label class="fg">Revisore<input id="dreamReviewer" class="inp" value="operator" maxlength="120"/></label><label class="fg">Token revisione<input id="dreamReviewToken" class="inp" type="password" autocomplete="off" placeholder="DREAM_REVIEW_TOKEN"/></label></div>
+      <button class="btn btn-dream btn-sm" id="loadDreamInboxButton" onclick="loadDreamInbox()">Carica inbox</button>
+      <div id="dreamInbox" class="dream-inbox"><div class="hint">Seleziona un nodo e carica le ipotesi.</div></div>
+    </div>
     <div class="card"><div class="card-title">&#128172; Simulate Chat</div><p class="hint">Inserisce un evento di prova: non invia una richiesta al modello.</p>
       <div class="diag-node-fields"><label class="fg">From<select id="chFrom" class="inp" aria-label="Nodo mittente"></select></label><label class="fg">To<select id="chTo" class="inp" aria-label="Nodo destinatario"></select></label><input id="chMsg" class="inp" placeholder="Message..." style="flex:1"/></div>
       <button class="btn btn-chat btn-sm" id="sendChatButton" onclick="sendChat()">Simula evento Chat</button><div class="diag-out" id="dChat"></div>
@@ -431,6 +438,86 @@ main{padding:18px 20px;display:grid}
     <div class="card"><div class="card-title">&#9881;&#65039; HB Status</div><button class="btn btn-ghost btn-sm" onclick="checkHb()">Refresh</button><div class="diag-out" id="dHb"></div></div>
     <div class="card"><div class="card-title">&#128202; Ping All Nodes</div><button class="btn btn-ghost btn-sm" onclick="pingAll()">Ping All</button><div class="diag-out" id="dPing"></div></div>
     <div class="card"><div class="card-title">&#9878;&#65039; Routing Weights</div><button class="btn btn-ghost btn-sm" onclick="diagRoutingWeights()">Fetch</button><div class="diag-out" id="dRoutingWeights"></div></div>
+  </div>
+</div>
+
+<!-- NETWORK -->
+<div id="panel-network" class="panel">
+  <div class="sec-title">Network</div>
+  <p class="hint">
+    WireGuard/Tailscale/ngrok girano sull'host, non in questo container: questo
+    pannello parla con <code>hostctl/agent.py</code>, un processo separato che
+    va avviato a parte sulla stessa macchina. Vedi <code>docs/network-panel.md</code>.
+  </p>
+  <div class="card">
+    <div class="card-title">Autorizzazione amministrativa</div>
+    <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <label class="fg" style="flex:1;min-width:220px">Network admin token
+        <input id="netAdminToken" class="inp" type="password" autocomplete="off"
+               placeholder="NETWORK_ADMIN_TOKEN" style="margin-top:4px"/>
+      </label>
+      <button class="btn btn-primary btn-sm" onclick="saveNetworkToken()">Salva per questa scheda</button>
+      <button class="btn btn-ghost btn-sm" onclick="clearNetworkToken()">Dimentica</button>
+    </div>
+    <p class="hint" style="margin-top:6px">Il token resta in <code>sessionStorage</code> e non viene inserito nell'URL o nei log.</p>
+  </div>
+  <div class="card" id="netUnconfigured" hidden>
+    <div class="card-title">&#9888;&#65039; Host-agent non configurato</div>
+    <p class="hint">
+      <span id="netUnconfiguredText">Configurazione di rete incompleta.</span>
+    </p>
+  </div>
+  <div class="card" id="netError" style="border-color:var(--error)" hidden></div>
+  <div class="diag-grid" id="netCards" hidden>
+    <div class="card">
+      <div class="card-title"><span class="node-status-dot unknown" id="netNgrokDot"></span> ngrok</div>
+      <div id="netNgrokBody" class="hint">Caricamento&hellip;</div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="netNgrokStart()">&#9654; Avvia tunnel</button>
+        <button class="btn btn-danger btn-sm" onclick="netAction('ngrok_stop')">&#9632; Ferma</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="node-status-dot unknown" id="netTsDot"></span> Tailscale</div>
+      <div id="netTsBody" class="hint">Caricamento&hellip;</div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="netAction('tailscale_up')">&#9654; Up</button>
+        <button class="btn btn-danger btn-sm" onclick="netAction('tailscale_down')">&#9632; Down</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="node-status-dot unknown" id="netWgDot"></span> WireGuard</div>
+      <div id="netWgBody" class="hint">Caricamento&hellip;</div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="netAction('wg_up')">&#9654; Up</button>
+        <button class="btn btn-danger btn-sm" onclick="netAction('wg_down')">&#9632; Down</button>
+      </div>
+      <p class="hint" style="margin-top:6px">Serve una regola <code>sudoers</code> dedicata — vedi <code>docs/network-panel.md</code>.</p>
+    </div>
+    <div class="card">
+      <div class="card-title">&#128246; BLE (scansione)</div>
+      <p class="hint">Solo scansione: nessuna libreria seria annuncia in BLE su tutte e tre le piattaforme — vedi <code>docs/network-panel.md</code>.</p>
+      <button class="btn btn-primary btn-sm" onclick="netAction('ble_scan',{seconds:6})">&#128269; Scansiona (6s)</button>
+    </div>
+  </div>
+  <div class="diag-out" id="netActionOut" style="margin-top:10px"></div>
+
+  <div class="sec-title" style="margin-top:20px">Bottiglie (discovery firmato)</div>
+  <p class="hint">
+    Annuncio di rendez-vous firmato con l'identità di questo nodo, con un
+    costo computazionale (proof-of-work, modello Bitmessage) invece di
+    bacheche pubbliche — vedi <code>docs/network-panel.md</code>. Funziona
+    a prescindere dall'host-agent qui sopra.
+  </p>
+  <div class="card">
+    <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <button class="btn btn-success btn-sm" onclick="btlAnnounce()">&#9993; Annuncia questo nodo</button>
+      <button class="btn btn-ghost btn-sm" onclick="refreshBottles()">&#8634; Aggiorna lista</button>
+    </div>
+    <p class="hint" style="margin-top:6px">Endpoint e relay vengono letti da <code>PUBLIC_ENDPOINT</code> e <code>BOTTLE_RELAY_URL</code> sul server.</p>
+    <div class="diag-out" id="btlActionOut" style="margin-top:8px"></div>
+    <div class="card-title" style="margin-top:10px">Bottiglie note (<span id="btlCount">0</span>)</div>
+    <div id="btlList" class="hint">Caricamento&hellip;</div>
   </div>
 </div>
 
@@ -526,6 +613,151 @@ function showPanel(name,btn){
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
   if(name==='setup'){loadCfg();loadEnv();}
+  if(name==='network'){
+    document.getElementById('netAdminToken').value=networkToken();
+    refreshNetwork();refreshBottles();
+  }
+}
+
+// ── NETWORK: stato/azioni su ngrok, Tailscale, WireGuard via host-agent ────
+// Il control-plane gira in un container e non puo' toccare direttamente la
+// rete dell'host: /network/status e /network/action proxano verso
+// hostctl/agent.py, che gira nativo sull'host (vedi docs/network-panel.md).
+function networkToken(){return sessionStorage.getItem('hyperspaceNetworkAdminToken')||'';}
+function networkHeaders(json){
+  var h={'X-Hyperspace-Network-Token':networkToken()};
+  if(json)h['Content-Type']='application/json';
+  return h;
+}
+function saveNetworkToken(){
+  var token=document.getElementById('netAdminToken').value.trim();
+  if(token)sessionStorage.setItem('hyperspaceNetworkAdminToken',token);
+  refreshNetwork();
+}
+function clearNetworkToken(){
+  sessionStorage.removeItem('hyperspaceNetworkAdminToken');
+  document.getElementById('netAdminToken').value='';
+  refreshNetwork();
+}
+async function refreshNetwork(){
+  var out;
+  try{
+    var response=await fetch('/network/status',{headers:networkHeaders(false)});
+    out=await response.json();
+  }catch(e){
+    document.getElementById('netUnconfigured').hidden=true;
+    document.getElementById('netError').hidden=false;
+    document.getElementById('netError').textContent='Errore: '+e.message;
+    document.getElementById('netCards').hidden=true;
+    return;
+  }
+  if(!out.configured){
+    document.getElementById('netUnconfigured').hidden=false;
+    document.getElementById('netUnconfiguredText').textContent=out.error||'Configurazione di rete incompleta.';
+    document.getElementById('netError').hidden=true;
+    document.getElementById('netCards').hidden=true;
+    return;
+  }
+  document.getElementById('netUnconfigured').hidden=true;
+  if(out.error){
+    document.getElementById('netError').hidden=false;
+    document.getElementById('netError').textContent='Errore: '+out.error;
+    document.getElementById('netCards').hidden=true;
+    return;
+  }
+  document.getElementById('netError').hidden=true;
+  document.getElementById('netCards').hidden=false;
+  renderNgrokCard(out.ngrok);
+  renderTailscaleCard(out.tailscale);
+  renderWgCard(out.wireguard);
+}
+
+function renderNgrokCard(n){
+  var dot=document.getElementById('netNgrokDot'), body=document.getElementById('netNgrokBody');
+  if(!n){dot.className='node-status-dot unknown';body.textContent='Nessun dato.';return;}
+  dot.className='node-status-dot '+(n.running?'active':'unreachable');
+  if(!n.running){
+    body.innerHTML='Non in esecuzione.<br><label class="fg" style="margin-top:6px;display:block">Porta locale da esporre'
+      +'<input id="netNgrokPort" class="inp" type="number" min="1" max="65535" placeholder="es. 8085" style="margin-top:4px"/></label>';
+  }else{
+    body.innerHTML=(n.tunnels||[]).map(function(t){
+      return '<div style="margin-bottom:4px"><a href="'+escH(t.public_url)+'" target="_blank" rel="noopener">'+escH(t.public_url)+'</a>'
+        +' &rarr; '+escH(t.addr||'?')+'</div>';
+    }).join('')||'In esecuzione, nessun tunnel elencato.';
+  }
+}
+
+function renderTailscaleCard(t){
+  var dot=document.getElementById('netTsDot'), body=document.getElementById('netTsBody');
+  if(!t||!t.ok){dot.className='node-status-dot unreachable';body.textContent=(t&&t.error)||'Tailscale non raggiungibile su questo host.';return;}
+  var running=t.backend_state==='Running';
+  dot.className='node-status-dot '+(running?'active':'unreachable');
+  var peers=(t.peers||[]).map(function(p){
+    return '<div style="display:flex;gap:6px;align-items:center;margin-top:3px">'
+      +'<span class="node-status-dot '+(p.online?'active':'unreachable')+'"></span>'
+      +'<span>'+escH(p.hostname||'?')+'</span>'
+      +'<span style="color:var(--text-muted);font-size:.7rem">'+escH((p.ips||[])[0]||'')+'</span></div>';
+  }).join('');
+  body.innerHTML='<div><strong>'+escH((t.self||{}).hostname||'questa macchina')+'</strong> — '+escH(t.backend_state||'?')+'</div>'
+    +'<div style="margin-top:4px;color:var(--text-muted);font-size:.7rem">Peer</div>'+(peers||'<span style="color:var(--text-muted)">nessun peer</span>');
+}
+
+function renderWgCard(w){
+  var dot=document.getElementById('netWgDot'), body=document.getElementById('netWgBody');
+  if(!w||!w.installed){dot.className='node-status-dot unknown';body.textContent='WireGuard non installato su questo host.';return;}
+  dot.className='node-status-dot '+(w.active?'active':'unreachable');
+  body.innerHTML=w.active?('<pre style="white-space:pre-wrap;margin:0;font-size:.7rem">'+escH(w.raw)+'</pre>'):'Nessuna interfaccia attiva.';
+}
+
+async function netAction(action,extra){
+  var out=document.getElementById('netActionOut');
+  out.textContent='In corso: '+action+'…';
+  try{
+    var body=Object.assign({action:action},extra||{});
+    var r=await fetch('/network/action',{method:'POST',headers:networkHeaders(true),body:JSON.stringify(body)});
+    var d=await r.json();
+    out.textContent=(d.ok?'OK — ':'Errore — ')+JSON.stringify(d);
+  }catch(e){out.textContent='Errore: '+e.message;}
+  refreshNetwork();
+}
+function netNgrokStart(){
+  var port=parseInt(document.getElementById('netNgrokPort').value,10);
+  if(!port){document.getElementById('netActionOut').textContent='Inserisci una porta valida.';return;}
+  netAction('ngrok_start',{port:port});
+}
+setInterval(function(){
+  var p=document.getElementById('panel-network');
+  if(p&&p.classList.contains('active')){refreshNetwork();refreshBottles();}
+},10000);
+
+// ── BOTTIGLIE: discovery firmato + proof-of-work, indipendente dall'host-agent ──
+async function refreshBottles(){
+  // /bottles/list legge solo le bottiglie note a QUESTO nodo; il campo
+  // "relay" qui sopra serve solo a /bottles/announce (dove pubblicare),
+  // interrogare un relay remoto specifico è un miglioramento futuro.
+  try{
+    var d=await(await fetch('/bottles/list')).json();
+    document.getElementById('btlCount').textContent=d.count;
+    var list=document.getElementById('btlList');
+    if(!d.bottles||!d.bottles.length){list.innerHTML='Nessuna bottiglia nota.';return;}
+    list.innerHTML=d.bottles.map(function(b){
+      var age=Math.max(0,Math.round(Date.now()/1000-b.ts));
+      return '<div style="padding:5px 0;border-bottom:1px solid var(--divider)">'
+        +'<div><code style="font-size:.68rem">'+escH((b.pubkey||'').slice(0,20))+'&hellip;</code></div>'
+        +'<div>'+escH(b.endpoint||'?')+'</div>'
+        +'<div style="color:var(--text-muted);font-size:.68rem">'+age+'s fa</div></div>';
+    }).join('');
+  }catch(e){document.getElementById('btlList').textContent='Errore: '+e.message;}
+}
+async function btlAnnounce(){
+  var out=document.getElementById('btlActionOut');
+  out.textContent='Calcolo proof-of-work e firmo… (qualche secondo)';
+  try{
+    var r=await fetch('/bottles/announce',{method:'POST',headers:networkHeaders(true),body:'{}'});
+    var d=await r.json();
+    out.textContent=(d.ok?'OK — pubblicata su ':'Errore — ')+(d.relay||d.error||JSON.stringify(d));
+  }catch(e){out.textContent='Errore: '+e.message;}
+  refreshBottles();
 }
 
 // ── METRICS: live/summary (sessione) + telemetria nodi (/metrics/nodes) ──
@@ -1285,7 +1517,7 @@ function updateDiagnosticNodes(nodes){
     if(!n.node_id||!n.endpoint||n.status!=='active'||seen.has(n.node_id))return false;
     seen.add(n.node_id);return true;
   });
-  ['drNode','chFrom','chTo'].forEach(function(id){
+  ['drNode','dreamReviewNode','chFrom','chTo'].forEach(function(id){
     var select=document.getElementById(id), old=select.value;
     select.replaceChildren();
     if(!available.length)select.add(new Option('Nessun nodo raggiungibile',''));
@@ -1298,6 +1530,7 @@ function updateDiagnosticNodes(nodes){
   function validate(){document.getElementById('sendChatButton').disabled=!from.value||!to.value||from.value===to.value;}
   from.onchange=to.onchange=validate;validate();
   document.getElementById('sendDreamButton').disabled=!available.length;
+  document.getElementById('loadDreamInboxButton').disabled=!available.length;
 }
 async function diagMeshNodes(){document.getElementById('dMesh').textContent='...';var d=await(await fetch('/mesh/nodes')).json();document.getElementById('dMesh').textContent=JSON.stringify(d,null,2);}
 async function diagTopology(){document.getElementById('dTopo').textContent='...';var d=await(await fetch('/mesh/topology')).json();document.getElementById('dTopo').textContent=JSON.stringify(d,null,2);}
@@ -1309,6 +1542,39 @@ async function checkDreamWorker(){
   var id=document.getElementById('drNode').value;if(!id)return;
   var out=document.getElementById('dDreamWorker');out.textContent='Caricamento...';
   try{var response=await fetch('/dreams/status?node_id='+encodeURIComponent(id));out.textContent=JSON.stringify(await response.json(),null,2);}catch(e){out.textContent=e.message;}
+}
+function dreamActionButton(label,action,dreamId){
+  var button=document.createElement('button');
+  button.className='btn btn-ghost btn-sm';button.textContent=label;
+  button.addEventListener('click',function(){reviewDream(dreamId,action);});
+  return button;
+}
+function renderDreamInbox(dreams){
+  var inbox=document.getElementById('dreamInbox');inbox.replaceChildren();
+  if(!dreams.length){var empty=document.createElement('div');empty.className='hint';empty.textContent='Nessuna ipotesi per questo filtro.';inbox.appendChild(empty);return;}
+  dreams.forEach(function(dream){
+    var item=document.createElement('div');item.className='dream-review-item';
+    var meta=document.createElement('div');meta.className='dream-review-meta';
+    var confidence=dream.confidence==null?'n/d':Math.round(Number(dream.confidence)*100)+'%';
+    meta.textContent=(dream.kind||'open_question')+' · '+(dream.status||'hypothesis')+' · confidenza '+confidence+' · '+(dream.source_count||0)+' fonti';
+    var summary=document.createElement('div');summary.className='dream-review-summary';summary.textContent=dream.summary||dream.response||'';
+    var actions=document.createElement('div');actions.className='dream-review-actions';
+    var allowed={hypothesis:[['Promuovi','promote'],['Rifiuta','reject'],['Rimanda','defer']],deferred:[['Promuovi','promote'],['Rifiuta','reject'],['Riapri','reopen']],promoted:[['Revoca','revoke']],rejected:[['Riapri','reopen']],revoked:[['Promuovi','promote'],['Rifiuta','reject'],['Riapri','reopen']]};
+    (allowed[dream.status]||[]).forEach(function(spec){actions.appendChild(dreamActionButton(spec[0],spec[1],dream.id));});
+    item.appendChild(meta);item.appendChild(summary);item.appendChild(actions);inbox.appendChild(item);
+  });
+}
+async function loadDreamInbox(){
+  var node=document.getElementById('dreamReviewNode').value,status=document.getElementById('dreamReviewStatus').value;
+  if(!node)return;
+  var inbox=document.getElementById('dreamInbox');inbox.textContent='Caricamento...';
+  try{var response=await fetch('/dreams?node_id='+encodeURIComponent(node)+'&status='+encodeURIComponent(status));var data=await response.json();if(!response.ok)throw new Error(data.error||'Errore inbox');renderDreamInbox(data.dreams||[]);}catch(error){inbox.textContent='Errore: '+error.message;}
+}
+async function reviewDream(dreamId,action){
+  var rationale=window.prompt('Motivazione obbligatoria per '+action+':','');if(!rationale||!rationale.trim())return;
+  var payload={node_id:document.getElementById('dreamReviewNode').value,action:action,reviewer:document.getElementById('dreamReviewer').value||'operator',rationale:rationale.trim()};
+  var token=document.getElementById('dreamReviewToken').value;
+  try{var response=await fetch('/dreams/'+encodeURIComponent(dreamId)+'/review',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload)});var data=await response.json();if(!response.ok)throw new Error(data.detail||data.error||'Revisione fallita');await loadDreamInbox();}catch(error){window.alert('Errore: '+error.message);}
 }
 async function sendDream(){
   var node=document.getElementById('drNode').value;

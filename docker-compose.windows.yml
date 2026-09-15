@@ -126,8 +126,10 @@ services:
   # docker-compose.yml — vedi il commento li' per i dettagli.
   hyperspace-federation-gateway:
     build:
-      context: ./federation-gateway
-      dockerfile: Dockerfile
+      # Context alla radice (non ./federation-gateway): il Dockerfile deve
+      # poter copiare shared/ (sign_client_ip, vedi federation-gateway/main.py).
+      context: .
+      dockerfile: federation-gateway/Dockerfile
     container_name: hyperspace-federation-gateway
     restart: ${RESTART_POLICY}
     depends_on:
@@ -154,6 +156,12 @@ services:
       ENABLE_OLLAMA_API: "false"
       WEBUI_AUTH: "false"
       WEBUI_NAME: "HyperSpace Control"
+      # Il nodo mesh serve i modelli in sequenza (model_manager, capacita' 1):
+      # la generazione automatica del titolo raddoppia le richieste per ogni
+      # chat sullo stesso slot, causando "Server disconnected" quando il
+      # modello e' lento (es. varianti "abliterated"/reasoning). Disattivata
+      # per non competere con la risposta vera.
+      ENABLE_TITLE_GENERATION: "false"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

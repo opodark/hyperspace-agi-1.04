@@ -58,6 +58,12 @@ from shared.identity import (
     verify_request_headers,
 )
 from shared.engine_profiles import all_backend_type_scores as _all_backend_scores
+from shared.bottle import (
+    verify_bottle,
+    DEFAULT_DIFFICULTY_BITS as _BOTTLE_DIFFICULTY_BITS,
+    MAX_BOTTLE_BYTES as _MAX_BOTTLE_BYTES,
+)
+from shared.network_security import normalize_http_base, token_authorized, verify_client_ip
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -1195,6 +1201,17 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
     all_tools    = client_tools + [t for t in BUILTIN_TOOLS if t["function"]["name"] not in client_names]
     last_resp    = None
 
+    def _retry_without_tools(reason):
+        push_log('system', f'tool_loop fallback no-tools: {str(reason)[:120]}', status='warn')
+        plain = {**data, "messages": messages, "stream": False}
+        plain.pop("tools", None)
+        try:
+            return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
+        except NodeBusyError:
+            raise
+        except Exception as e2:
+            return {"error": {"message": str(e2), "type": "server_error"}}
+
     for iteration in range(max_iterations):
         payload = {**data, "messages": messages, "tools": all_tools, "stream": False}
         try:
@@ -1202,19 +1219,20 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
         except NodeBusyError:
             raise
         except ValueError as e:
-            push_log('system', f'tool_loop fallback no-tools: {str(e)[:120]}', status='warn')
             if iteration == 0:
-                plain = {**data, "messages": messages, "stream": False}
-                plain.pop("tools", None)
-                try:
-                    return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
-                except NodeBusyError:
-                    raise
-                except Exception as e2:
-                    return {"error": {"message": str(e2), "type": "server_error"}}
+                return _retry_without_tools(e)
             return last_resp or {"error": {"message": str(e), "type": "server_error"}}
         except Exception as e:
             return {"error": {"message": str(e), "type": "server_error"}}
+
+        # Un modello non tool-capable non sempre fa fallire la richiesta HTTP
+        # (niente ValueError sopra): spesso Ollama risponde 200 con un body
+        # JSON {"error": ...} valido, es. "<modello> does not support tools".
+        # Stesso fallback del ramo ValueError: ritenta UNA volta senza tools.
+        if resp.get("error"):
+            if iteration == 0:
+                return _retry_without_tools(resp["error"])
+            return last_resp or resp
 
         last_resp = resp
         choice    = resp.get("choices", [{}])[0]
@@ -1805,6 +1823,77 @@ def dream_node_status():
         return jsonify({"error": str(error)}), 502
 
 
+def _reachable_dream_node(node_id):
+    node = next((n for n in _node_list() if n.get("node_id") == node_id), None)
+    if not node or node.get("status") != "active" or not _best_endpoint(node):
+        return None
+    return node
+
+
+DREAM_REVIEW_TOKEN = os.getenv("DREAM_REVIEW_TOKEN", "")
+
+
+def _dream_review_auth_error():
+    if len(DREAM_REVIEW_TOKEN) < 32:
+        return jsonify({"error": "DREAM_REVIEW_TOKEN assente o troppo corto — revisione disabilitata"}), 503
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not token_authorized(provided, DREAM_REVIEW_TOKEN):
+        return jsonify({"error": "Token revisione sogni non valido"}), 401
+    return None
+
+
+@app.route('/dreams')
+def dream_node_list():
+    node = _reachable_dream_node(request.args.get("node_id", ""))
+    if not node:
+        return jsonify({"error": "Nodo non raggiungibile"}), 404
+    try:
+        response = requests.get(
+            f"{_best_endpoint(node)}/dreams",
+            params={"status": request.args.get("status", ""),
+                    "limit": request.args.get("limit", "100")},
+            timeout=8,
+        )
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+
+@app.route('/dreams/insights')
+def dream_node_insights():
+    node = _reachable_dream_node(request.args.get("node_id", ""))
+    if not node:
+        return jsonify({"error": "Nodo non raggiungibile"}), 404
+    try:
+        response = requests.get(f"{_best_endpoint(node)}/dreams/insights", timeout=8)
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+
+@app.route('/dreams/<dream_id>/review', methods=['POST'])
+def dream_node_review(dream_id):
+    auth_error = _dream_review_auth_error()
+    if auth_error:
+        return auth_error
+    data = request.get_json(force=True, silent=True) or {}
+    node = _reachable_dream_node(data.pop("node_id", ""))
+    if not node:
+        return jsonify({"error": "Nodo non raggiungibile"}), 404
+    try:
+        response = requests.post(
+            f"{_best_endpoint(node)}/dreams/{dream_id}/review",
+            json=data,
+            headers={"Authorization": f"Bearer {DREAM_REVIEW_TOKEN}"},
+            timeout=8,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+
 @app.route('/logs/clear', methods=['POST'])
 def clear_logs():
     db.clear_logs()
@@ -2228,6 +2317,253 @@ def _run_doctor_checks() -> list:
                                      f"last_memory_sync={last_sync or 'n/d (meno di 2 nodi attivi)'}"))
 
     return checks
+
+# ── NETWORK PANEL (proxy verso l'host-agent) ────────────────────────────────
+# WireGuard/Tailscale/ngrok girano sull'HOST, non nel container: il CP non
+# puo' lanciare `tailscale status` o `wg show` da qui dentro. hostctl/agent.py
+# gira nativo sull'host ed espone questo stato via HTTP; lo raggiungiamo con
+# host.docker.internal. Disattivato finche' HOSTCTL_TOKEN non e' impostato —
+# nessun default silenzioso: se manca, il pannello dice esplicitamente che
+# l'host-agent non e' configurato invece di provare a indovinare un URL.
+HOSTCTL_URL   = os.getenv("HOSTCTL_URL", "http://host.docker.internal:8765").rstrip("/")
+HOSTCTL_TOKEN = os.getenv("HOSTCTL_TOKEN", "")
+NETWORK_ADMIN_TOKEN = os.getenv("NETWORK_ADMIN_TOKEN", "")
+_NETWORK_ADMIN_HEADER = "X-Hyperspace-Network-Token"
+
+
+def _hostctl_configured() -> bool:
+    return len(HOSTCTL_TOKEN) >= 32
+
+
+def _hostctl_headers() -> dict:
+    return {"Authorization": f"Bearer {HOSTCTL_TOKEN}"}
+
+
+def _network_admin_error():
+    """Restituisce una risposta Flask se la route admin non è autorizzata."""
+    if len(NETWORK_ADMIN_TOKEN) < 32:
+        return jsonify({"ok": False, "configured": False,
+                        "error": "NETWORK_ADMIN_TOKEN assente o troppo corto — azioni di rete disabilitate"}), 503
+    provided = request.headers.get(_NETWORK_ADMIN_HEADER, "")
+    if not token_authorized(provided, NETWORK_ADMIN_TOKEN):
+        return jsonify({"ok": False, "configured": True,
+                        "error": "token amministrativo di rete mancante o non valido"}), 401
+    return None
+
+
+@app.route('/network/status')
+def network_status():
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    if not _hostctl_configured():
+        return jsonify({"configured": False,
+                        "error": "HOSTCTL_TOKEN assente o troppo corto — host-agent non configurato su questa macchina"}), 503
+    try:
+        r = requests.get(f"{HOSTCTL_URL}/status", headers=_hostctl_headers(), timeout=5)
+        if r.status_code == 401:
+            return jsonify({"configured": True, "error": "token rifiutato dall'host-agent — HOSTCTL_TOKEN non allineato"}), 502
+        r.raise_for_status()
+        return jsonify({"configured": True, **r.json()})
+    except requests.RequestException as error:
+        return jsonify({"configured": True, "error": f"host-agent non raggiungibile: {error}"}), 502
+
+
+@app.route('/network/action', methods=['POST'])
+def network_action():
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    if not _hostctl_configured():
+        return jsonify({"ok": False, "error": "HOSTCTL_TOKEN assente o troppo corto — host-agent non configurato su questa macchina"}), 503
+    data = request.get_json(force=True, silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "il corpo deve essere un oggetto JSON"}), 400
+    action = data.get("action", "")
+    try:
+        r = requests.post(f"{HOSTCTL_URL}/action", headers=_hostctl_headers(), json=data, timeout=25)
+        result = r.json() if r.content else {"ok": False, "error": "risposta vuota dall'host-agent"}
+        status_code = r.status_code
+    except requests.RequestException as error:
+        result, status_code = {"ok": False, "error": f"host-agent non raggiungibile: {error}"}, 502
+    push_log('system', f'Network action: {action}', json.dumps(result, default=str),
+             status='success' if result.get('ok') else 'error')
+    return jsonify(result), status_code
+
+
+# ── BOTTIGLIE (discovery firmato + proof-of-work) ──────────────────────────
+# Alternativa a pubblicare annunci su Pastebin/bacheche pubbliche generiche
+# (scartato: assomiglia troppo a un dead-drop resolver da C2, rischio ban/
+# ToS/finire in una IOC feed). Qui il "relay" è questo stesso endpoint,
+# pensato apposta per questo scopo: chi pubblica deve firmare con la propria
+# identità di nodo (shared/identity.py, stessa chiave usata per firmare le
+# richieste inter-nodo) e risolvere un proof-of-work (shared/bottle.py,
+# modello Bitmessage) — rende costoso inondare il relay di annunci falsi
+# senza bisogno di un elenco di peer fidati a priori.
+#
+# Storage: al più una bottiglia per pubkey (una nuova sostituisce la
+# precedente dello stesso nodo, non si accumula), tetto massimo di bottiglie
+# distinte — oltre il tetto si scarta la più vecchia. In memoria, non su
+# disco: sono annunci di rendez-vous con TTL, non memoria da preservare fra
+# riavvii, un nodo che rivuole essere trovato ripubblica.
+_bottles: dict = {}
+_bottles_lock = threading.Lock()
+_bottle_announce_lock = threading.Lock()
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(os.getenv(name, str(default))), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+_BOTTLE_MAX_COUNT = _bounded_env_int("BOTTLE_MAX_COUNT", 500, 1, 10_000)
+_BOTTLE_MAX_AGE_S = _bounded_env_int("BOTTLE_MAX_AGE_S", 3600, 60, 86_400)
+
+# Rate limit per IP: il PoW rende costoso spammare, ma non lo impedisce a
+# chi ha CPU da spendere — difesa in profondità, non l'unica barriera.
+_bottle_rate: dict = {}
+_bottle_rate_lock = threading.Lock()
+_BOTTLE_RATE_MAX = _bounded_env_int("BOTTLE_RATE_MAX_PER_HOUR", 20, 1, 10_000)
+_BOTTLE_RATE_MAX_IPS = _bounded_env_int("BOTTLE_RATE_MAX_IPS", 4096, 1, 100_000)
+
+
+def _bottle_rate_check(ip: str) -> bool:
+    now = time.time()
+    with _bottle_rate_lock:
+        # Evita crescita permanente della mappa quando nel tempo cambiano IP.
+        for old_ip in list(_bottle_rate):
+            kept = [t for t in _bottle_rate[old_ip] if now - t < 3600]
+            if kept:
+                _bottle_rate[old_ip] = kept
+            else:
+                _bottle_rate.pop(old_ip, None)
+        recent = [t for t in _bottle_rate.get(ip, []) if now - t < 3600]
+        if ip not in _bottle_rate and len(_bottle_rate) >= _BOTTLE_RATE_MAX_IPS:
+            return False
+        if len(recent) >= _BOTTLE_RATE_MAX:
+            _bottle_rate[ip] = recent
+            return False
+        recent.append(now)
+        _bottle_rate[ip] = recent
+        return True
+
+
+def _bottles_prune_expired() -> None:
+    now = time.time()
+    for pubkey in [k for k, b in _bottles.items() if now - b.get("ts", 0) > _BOTTLE_MAX_AGE_S]:
+        _bottles.pop(pubkey, None)
+
+
+def _bottle_client_ip() -> str:
+    """IP da usare per il rate-limit dei bottle endpoint.
+
+    Quando la richiesta arriva dal federation-gateway (esposizione pubblica,
+    vedi federation-gateway/main.py), request.remote_addr qui sarebbe l'IP
+    Docker interno del gateway per OGNI chiamante — collasserebbe il
+    rate-limit per-IP sotto su un unico contatore condiviso. Se il gateway
+    ha allegato l'attestazione firmata (X-Hs-Client-*, verificata con lo
+    stesso BOTTLE_GATEWAY_SECRET), usa quella; altrimenti (rete privata
+    diretta, o gateway senza secret configurato) usa la connessione TCP
+    reale, corretta in entrambi i casi."""
+    ip = request.headers.get("X-Hs-Client-Ip", "")
+    ts = request.headers.get("X-Hs-Client-Ts", "")
+    sig = request.headers.get("X-Hs-Client-Sig", "")
+    if verify_client_ip(os.getenv("BOTTLE_GATEWAY_SECRET", ""), ip, ts, sig):
+        return ip
+    return request.remote_addr or "?"
+
+
+@app.route('/bottles/publish', methods=['POST'])
+def bottles_publish():
+    ip = _bottle_client_ip()
+    if not _bottle_rate_check(ip):
+        return jsonify({"ok": False, "error": "troppe pubblicazioni da questo IP, riprova più tardi"}), 429
+    if request.content_length is not None and request.content_length > _MAX_BOTTLE_BYTES:
+        return jsonify({"ok": False, "error": "bottiglia troppo grande"}), 413
+    bottle = request.get_json(force=True, silent=True) or {}
+    valid, reason = verify_bottle(bottle, difficulty_bits=_BOTTLE_DIFFICULTY_BITS, max_age_s=_BOTTLE_MAX_AGE_S)
+    if not valid:
+        return jsonify({"ok": False, "error": reason}), 400
+    with _bottles_lock:
+        _bottles_prune_expired()
+        pubkey = bottle["pubkey"]
+        if pubkey not in _bottles and len(_bottles) >= _BOTTLE_MAX_COUNT:
+            oldest = min(_bottles, key=lambda k: _bottles[k].get("ts", 0))
+            _bottles.pop(oldest, None)
+        _bottles[pubkey] = bottle
+    push_log('system', 'Bottle published', f"pubkey={pubkey[:16]}… endpoint={bottle.get('endpoint')}")
+    return jsonify({"ok": True})
+
+
+@app.route('/bottles/list')
+def bottles_list():
+    with _bottles_lock:
+        _bottles_prune_expired()
+        bottles = list(_bottles.values())
+    return jsonify({"count": len(bottles), "difficulty_bits": _BOTTLE_DIFFICULTY_BITS,
+                    "max_age_s": _BOTTLE_MAX_AGE_S, "bottles": bottles})
+
+
+@app.route('/bottles/announce', methods=['POST'])
+def bottles_announce():
+    """Crea e pubblica una bottiglia per QUESTO nodo. La chiave privata vive
+    solo qui lato server (_cp_private_key, mai esposta al browser) — è per
+    questo che l'annuncio è un'azione server-side e non qualcosa che la
+    dashboard potrebbe fare da sola in JS."""
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    data = request.get_json(force=True, silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "il corpo deve essere un oggetto JSON"}), 400
+    if "endpoint" in data or "relay_url" in data:
+        return jsonify({"ok": False, "error": "endpoint e relay_url sono configurazione server-side; "
+                        "usa PUBLIC_ENDPOINT e BOTTLE_RELAY_URL nel .env"}), 400
+
+    endpoint = os.getenv("PUBLIC_ENDPOINT", "") or _LOCAL_NODE_ENDPOINT
+    if not endpoint:
+        return jsonify({"ok": False, "error": "nessun endpoint da annunciare — imposta PUBLIC_ENDPOINT "
+                        "nel .env"}), 400
+    try:
+        endpoint = normalize_http_base(endpoint)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": f"PUBLIC_ENDPOINT non valido: {error}"}), 400
+
+    relay_config = os.getenv("BOTTLE_RELAY_URL", "").strip()
+    try:
+        relay_url = normalize_http_base(relay_config) if relay_config else None
+    except ValueError as error:
+        return jsonify({"ok": False, "error": f"BOTTLE_RELAY_URL non valido: {error}"}), 400
+
+    from shared.bottle import make_bottle
+    # Una sola operazione di mining per processo: impedisce che doppi click o
+    # richieste concorrenti saturino tutti i core del control-plane.
+    if not _bottle_announce_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "annuncio già in elaborazione"}), 429
+    try:
+        bottle = make_bottle(CP_PUBKEY, endpoint, _cp_private_key,
+                             difficulty_bits=_BOTTLE_DIFFICULTY_BITS)
+    finally:
+        _bottle_announce_lock.release()
+
+    if relay_url is None:
+        # nessun relay esterno configurato: pubblica su se stesso, cosi'
+        # il pulsante funziona anche in locale senza altre macchine.
+        with _bottles_lock:
+            _bottles_prune_expired()
+            _bottles[bottle["pubkey"]] = bottle
+        return jsonify({"ok": True, "relay": "self", "bottle": bottle})
+
+    try:
+        r = requests.post(f"{relay_url}/bottles/publish", json=bottle, timeout=10)
+        result = r.json() if r.content else {}
+        return jsonify({"ok": bool(result.get("ok")), "relay": relay_url, "bottle": bottle,
+                        "relay_response": result}), r.status_code
+    except requests.RequestException as error:
+        return jsonify({"ok": False, "error": f"relay non raggiungibile: {error}", "bottle": bottle}), 502
+
 
 @app.route('/doctor')
 def doctor():

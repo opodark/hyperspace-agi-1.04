@@ -1,6 +1,6 @@
 # Web Node — Technical Specification
 
-The **Web Node** is the browser-first execution path for Hyperspace AGI 1.03.
+The **Web Node** is the browser-first execution path for HyperSpace-AGI.
 
 It allows devices that cannot run Docker or heavy local runtimes to participate in the mesh by executing lightweight, safe tasks directly in the browser.
 
@@ -84,25 +84,20 @@ POST /register
 
 ## Folder Structure
 
+Target layout above is not built yet. What actually exists today (2026-09):
+
 ```
 web-node/
 ├── README.md
-├── package.json
+├── index.html
 ├── src/
-│   ├── index.js              # Main entry / registration
-│   ├── task-runner.js        # Task execution engine
-│   ├── capabilities.js       # Declared capabilities
-│   └── protocol/
-│       ├── register.js
-│       └── task-handler.js
-├── extension/
-│   ├── manifest.json
-│   ├── background.js
-│   └── popup/
-├── docs/
-│   └── technical-spec.md
-└── tests/
+│   └── index.js               # registerWebNode()/handleTask() stubs, both TODO
+└── apps/
+    └── extension/
+        └── manifest.json       # bare MV3 manifest, name only — no background/popup
 ```
+
+No `package.json`, no `task-runner.js`/`capabilities.js`/`protocol/`, no `tests/`. Treat everything below this point as the design target, not a status report.
 
 ## Security & Constraints
 
@@ -120,11 +115,10 @@ web-node/
 4. Browser Extension packaging
 5. Capability declaration UI (for user consent)
 
-## Status (as of 1.03)
+## Status (as of 2026-09)
 
-- Folder structure created
-- Basic manifest present
-- Technical specification defined
-- Implementation pending
+- Technical specification defined (this document)
+- Bare skeleton only: stub `registerWebNode()`/`handleTask()` (both TODO, no real logic), a two-key manifest
+- No registration, task envelope handling, runtime integration, or extension packaging implemented yet
 
 This component is intentionally kept small and optional. It is an **addition** to the mesh, not a core dependency.

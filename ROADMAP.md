@@ -28,6 +28,14 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Prevedere policy di garbage collection e summarization per evitare deriva del contesto.
 - Collegare la memoria agli agenti come capability esplicita, non come side effect implicito.
 
+### Dreaming e consolidamento
+- Eseguire cicli automatici solo quando il nodo è libero, interrompendoli appena arriva lavoro prioritario.
+- Trattare ogni sogno come **ipotesi candidata** separata dai fatti e dalla memoria operativa.
+- Conservare provenienza, memorie sorgenti, modello, prompt, timestamp e metriche di esecuzione per rendere ogni risultato verificabile.
+- Introdurre un ciclo esplicito `hypothesis → reviewed → promoted/rejected`; soltanto i risultati promossi possono entrare nella memoria persistente o nel retrieval degli agenti.
+- Valutare utilità, novità, correttezza e costo prima di abilitare condivisione tra nodi o forme di consolidamento automatico.
+- Mantenere disabilitati tool e azioni esterne durante i sogni; eventuali capacità operative richiederanno una decisione architetturale separata.
+
 ### Ops e deployment
 - Consolidare il profilo **Windows Primary Brain** con Ollama su host, HyperSpace in Docker e accesso remoto via Tailscale.
 - Preparare il profilo **Linux Primary Brain** come target successivo, con path nativi, systemd e maggiore efficienza operativa.
@@ -59,6 +67,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Implementare task dispatcher con routing per tipo di lavoro e modello.
 - Aggiungere memoria operativa, log strutturati e tracciamento esecuzioni.
 - Definire protocolli di handoff tra agenti.
+- Portare il worker dei sogni dalla prima implementazione al ciclo revisionabile descritto in [docs/dreams.md](docs/dreams.md): output strutturato, provenienza, revisione e promozione controllata.
 
 ### Fase 3 — Tooling e collaboration layer
 - Integrare ufficialmente Claude Code come agente-collaboratore di sviluppo sul repository Windows.
@@ -89,9 +98,11 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 | P0 | `docker-compose.windows.yml` | Stack standard per nodo Asus Windows | ✅ fatto |
 | P1 | `.claude/CLAUDE.md` | Regole operative per Claude Code teammate | da fare |
 | P1 | `agents/registry.yml` | Catalogo ruoli, modelli e capability agenti | da fare |
+| P1 | Dream review lifecycle | Revisione, promozione o rifiuto delle ipotesi generate nei periodi di inattività | fondazione implementata |
 | P1 | `profiles/linux-primary/` | Base del futuro target Linux production | da fare |
 | P2 | `benchmarks/` | Misure comparabili su modelli, RAM e latenza | da fare |
 | P2 | `memory/schema/` | Contratti per memoria breve e persistente | da fare |
+| P2 | Dream evaluation | Dataset e metriche per utilità, novità, correttezza e costo dei sogni | da fare |
 | P2 | `ops/bootstrap/` | Script di setup e recovery nodo | da fare |
 
 ## Decisioni immediate
@@ -100,6 +111,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Adottare una coppia iniziale di modelli 14B: un generalista uncensored e un coder dedicato.
 - Usare **Tailscale** come soluzione di accesso remoto e collegamento sicuro in attesa della mesh completa.
 - Inserire **Claude Code con Sonnet 5** come teammate di sviluppo che opera sui file locali del repository sotto policy di progetto.
+- Mantenere i sogni locali, inattivi per default e separati dalla memoria autorevole finché il ciclo di revisione non è validato.
 
 ## Rischi principali
 - Ambiguità tra "framework di sviluppo" e "runtime operativo", con conseguente dispersione architetturale.
@@ -107,11 +119,14 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Crescita non controllata della complessità agentica senza capability boundaries e regole di handoff.
 - Assenza iniziale di benchmark strutturati per capire il limite reale dell'hardware consumer.
 - Confusione tra agenti runtime interni e agenti-collaboratori esterni al runtime.
+- Promozione di ipotesi plausibili ma errate nella memoria persistente, con contaminazione delle decisioni successive.
+- Consumo di risorse o latenza sul lavoro interattivo causati da cicli in background non correttamente interrotti.
 
 ## Criteri di successo
 - Un nodo Primary Brain avviabile in modo ripetibile su Windows con setup documentato.
 - Almeno due agenti specializzati funzionanti con routing modello distinto.
 - Memoria e logging sufficienti a ricostruire una run end-to-end.
+- Sogni ricostruibili dalle fonti, revisionabili e incapaci di modificare la memoria autorevole senza promozione esplicita.
 - Workflow collaborativo stabile tra sviluppo umano, Claude Code e runtime locale.
 - Profilo Linux già disegnato, anche se non ancora target primario di produzione.
 

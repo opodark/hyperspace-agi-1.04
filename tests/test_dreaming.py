@@ -36,6 +36,9 @@ class DreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.generated, 1)
         self.assertEqual(self.released, 1)
         self.assertEqual(self.published[0]["status"], "hypothesis")
+        self.assertEqual(self.published[0]["schema_version"], 1)
+        self.assertEqual(self.published[0]["source_memory_ids"], ["task1"])
+        self.assertTrue(self.published[0]["id"].startswith("dream-"))
         self.assertFalse((Path(self.temp.name)/"memory.jsonl").exists())
         self.now += 100
         await self.worker.tick()
@@ -117,5 +120,97 @@ class DreamTests(unittest.IsolatedAsyncioTestCase):
             {"node_id":"node", "content":"imported", "_received_from":"other"},
             {"node_id":"node", "task_id":"title-abc", "content":"title"}]
         self.assertEqual(mod.source_memories(entries, "node"), self.entries)
+
+
+class StructuredDreamTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.journal = mod.DreamJournal(self.temp.name)
+        self.dream = {
+            "schema_version": 1,
+            "id": "dream-1",
+            "type": "dream",
+            "status": "hypothesis",
+            "node_id": "node",
+            "summary": "Due eventi potrebbero essere collegati.",
+            "kind": "connection",
+            "confidence": 0.6,
+            "source_memory_ids": ["memory-1", "memory-2"],
+            "source_refs": [{"id": "memory-1"}, {"id": "memory-2"}],
+            "reviews": [],
+        }
+        self.journal.append(self.dream)
+
+    def test_parses_json_and_clamps_self_reported_confidence(self):
+        parsed = mod.parse_reflection(
+            '{"kind":"connection","summary":"legame",'
+            '"confidence":1.5,"open_questions":["perché?"]}'
+        )
+        self.assertEqual(parsed["kind"], "connection")
+        self.assertEqual(parsed["confidence"], 1.0)
+        self.assertEqual(parsed["open_questions"], ["perché?"])
+        self.assertEqual(parsed["format_error"], "")
+
+    def test_unstructured_output_remains_a_reviewable_hypothesis(self):
+        parsed = mod.parse_reflection("IPOTESI: forse esiste un legame")
+        self.assertEqual(parsed["kind"], "open_question")
+        self.assertIsNone(parsed["confidence"])
+        self.assertIn("Unstructured", parsed["format_error"])
+
+    def test_non_finite_confidence_uses_safe_fallback(self):
+        parsed = mod.parse_reflection(
+            '{"kind":"summary","summary":"x","confidence":"NaN"}'
+        )
+        self.assertIsNone(parsed["confidence"])
+        self.assertIn("finite", parsed["format_error"])
+
+    def test_review_requires_rationale_and_valid_transition(self):
+        with self.assertRaises(ValueError):
+            self.journal.review("dream-1", "promote", "alice", "")
+        with self.assertRaises(ValueError):
+            self.journal.review("dream-1", "reopen", "alice", "non ancora")
+
+    def test_promote_and_revoke_are_attributed_and_reversible(self):
+        promoted, insight = self.journal.review(
+            "dream-1", "promote", "alice", "Fonti sufficienti", timestamp=1000,
+        )
+        self.assertEqual(promoted["status"], "promoted")
+        self.assertEqual(promoted["reviews"][0]["reviewer"], "alice")
+        self.assertEqual(insight["status"], "active")
+        self.assertEqual(insight["source_memory_ids"], ["memory-1", "memory-2"])
+        self.assertEqual(self.journal.insights(), [insight])
+
+        revoked, revoked_insight = self.journal.review(
+            "dream-1", "revoke", "alice", "Nuova evidenza contraria", timestamp=1010,
+        )
+        self.assertEqual(revoked["status"], "revoked")
+        self.assertEqual(revoked_insight["status"], "revoked")
+        self.assertEqual(self.journal.insights(), [])
+        self.assertEqual(len(self.journal.insights(active_only=False)), 1)
+
+    def test_reject_defer_and_reopen_preserve_history(self):
+        deferred, _ = self.journal.review(
+            "dream-1", "defer", "bob", "Servono altre fonti", timestamp=1000,
+        )
+        self.assertEqual(deferred["status"], "deferred")
+        reopened, _ = self.journal.review(
+            "dream-1", "reopen", "bob", "Fonti aggiunte", timestamp=1010,
+        )
+        self.assertEqual(reopened["status"], "hypothesis")
+        self.assertEqual(len(reopened["reviews"]), 2)
+
+    def test_legacy_free_text_dreams_receive_stable_reviewable_ids(self):
+        legacy = {"type": "dream", "node_id": "node", "timestamp": 50,
+                  "status": "hypothesis", "response": "vecchia ipotesi"}
+        self.journal._write(self.journal.path, [legacy])
+        first = self.journal.list()[0]
+        second = self.journal.list()[0]
+        self.assertEqual(first["id"], second["id"])
+        self.assertTrue(first["id"].startswith("dream-legacy-"))
+        reviewed, _ = self.journal.review(
+            first["id"], "reject", "alice", "non supportata", timestamp=100,
+        )
+        self.assertEqual(reviewed["status"], "rejected")
 
 if __name__ == "__main__": unittest.main()
