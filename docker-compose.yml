@@ -365,6 +365,39 @@ services:
     restart: unless-stopped
 
   # -- Control Plane --------------------------------------------------------------------
+  code-sandbox:
+    build:
+      context: .
+      dockerfile: sandbox/Dockerfile
+    container_name: hyperspace_code_sandbox
+    environment:
+      SANDBOX_EXCHANGE_DIR: /exchange
+      SANDBOX_WORKSPACE_DIR: /workspaces
+      SANDBOX_MAX_WORKSPACES: "${SANDBOX_MAX_WORKSPACES:-6}"
+      SANDBOX_MAX_TIMEOUT: "${SANDBOX_MAX_TIMEOUT:-120}"
+      SANDBOX_MAX_FILE_BYTES: "${SANDBOX_MAX_FILE_BYTES:-1048576}"
+    volumes:
+      - sandbox_exchange:/exchange
+      - sandbox_workspaces:/workspaces
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pathlib,time; p=pathlib.Path('/exchange/heartbeat'); raise SystemExit(0 if p.exists() and time.time()-float(p.read_text())<5 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
   control-plane:
     build:
       context: .
@@ -380,6 +413,8 @@ services:
         condition: service_started
       searxng:
         condition: service_started
+      code-sandbox:
+        condition: service_started
     ports:
       - "8085:8085"
     volumes:
@@ -387,6 +422,7 @@ services:
       # dalla tab Setup: le modifiche alle env var vengono applicate a runtime
       # e persistite qui, così sopravvivono al riavvio del container.
       - .:/repo
+      - sandbox_exchange:/sandbox-exchange
     environment:
       PYTHONUNBUFFERED: "1"
       ENV_FILE_PATH:    /repo/.env
@@ -409,6 +445,9 @@ services:
       PROMPT_COMPRESSION_ENABLED: "${PROMPT_COMPRESSION_ENABLED:-false}"
       PROMPT_COMPRESSION_MODE: "${PROMPT_COMPRESSION_MODE:-standard}"
       PROMPT_COMPRESSION_MIN_CHARS: "${PROMPT_COMPRESSION_MIN_CHARS:-200}"
+      CODE_SANDBOX_ENABLED: "${CODE_SANDBOX_ENABLED:-false}"
+      SANDBOX_EXCHANGE_DIR: /sandbox-exchange
+      SANDBOX_JOB_TIMEOUT: "${SANDBOX_JOB_TIMEOUT:-140}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -512,3 +551,5 @@ volumes:
   open_webui_data:
   obsidian_config:
   omniroute_data:
+  sandbox_exchange:
+  sandbox_workspaces:

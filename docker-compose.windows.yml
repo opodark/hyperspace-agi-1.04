@@ -52,6 +52,39 @@ version: '3.9'
 # ============================================================
 
 services:
+  code-sandbox:
+    build:
+      context: .
+      dockerfile: sandbox/Dockerfile
+    container_name: hyperspace-code-sandbox
+    restart: ${RESTART_POLICY}
+    environment:
+      SANDBOX_EXCHANGE_DIR: /exchange
+      SANDBOX_WORKSPACE_DIR: /workspaces
+      SANDBOX_MAX_WORKSPACES: "${SANDBOX_MAX_WORKSPACES:-6}"
+      SANDBOX_MAX_TIMEOUT: "${SANDBOX_MAX_TIMEOUT:-120}"
+      SANDBOX_MAX_FILE_BYTES: "${SANDBOX_MAX_FILE_BYTES:-1048576}"
+    volumes:
+      - sandbox_exchange:/exchange
+      - sandbox_workspaces:/workspaces
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pathlib,time; p=pathlib.Path('/exchange/heartbeat'); raise SystemExit(0 if p.exists() and time.time()-float(p.read_text())<5 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
   hyperspace-core:
     build:
       context: .
@@ -64,6 +97,8 @@ services:
       hyperspace-node-1:
         condition: service_started
       hyperspace-searxng:
+        condition: service_started
+      code-sandbox:
         condition: service_started
     env_file:
       - ./.env
@@ -95,6 +130,9 @@ services:
       HS_ENABLE_TOOL_USE: ${HS_ENABLE_TOOL_USE}
       OLLAMA_REQUEST_TIMEOUT: ${OLLAMA_REQUEST_TIMEOUT}
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH}
+      CODE_SANDBOX_ENABLED: "${CODE_SANDBOX_ENABLED:-false}"
+      SANDBOX_EXCHANGE_DIR: /sandbox-exchange
+      SANDBOX_JOB_TIMEOUT: "${SANDBOX_JOB_TIMEOUT:-140}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -102,6 +140,7 @@ services:
       - ${HS_DATA_DIR}:/app/data
       - ${HS_MEMORY_DIR}:/app/memory
       - ${HS_LOG_DIR}:/app/logs
+      - sandbox_exchange:/sandbox-exchange
     ports:
       - "${MESH_BIND_IP:-127.0.0.1}:8088:8085"
 
@@ -333,3 +372,5 @@ services:
 volumes:
   obsidian_config:
   omniroute_data:
+  sandbox_exchange:
+  sandbox_workspaces:

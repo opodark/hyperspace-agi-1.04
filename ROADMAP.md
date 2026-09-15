@@ -47,6 +47,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Definire convenzioni condivise per editing file, naming, commit, changelog e modifiche infrastrutturali.
 - Trattare Claude Code come teammate di sviluppo, non come provider runtime del cervello locale.
 - Documentare chiaramente i confini: cosa può essere modificato in autonomia, cosa richiede approvazione, cosa è vietato toccare.
+- Eseguire sviluppo e test agentici soltanto nel Code Sandbox offline; il checkout operativo riceve modifiche esclusivamente dopo review separata.
 
 ## Roadmap per fasi
 
@@ -98,6 +99,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 | P0 | `docker-compose.windows.yml` | Stack standard per nodo Asus Windows | ✅ fatto |
 | P1 | `.claude/CLAUDE.md` | Regole operative per Claude Code teammate | da fare |
 | P1 | `agents/registry.yml` | Catalogo ruoli, modelli e capability agenti | da fare |
+| P1 | Code Sandbox | Workspace offline, diff e test senza write-back sul repository operativo | prima versione implementata |
 | P1 | Dream review lifecycle | Revisione, promozione o rifiuto delle ipotesi generate nei periodi di inattività | fondazione implementata |
 | P1 | `profiles/linux-primary/` | Base del futuro target Linux production | da fare |
 | P2 | `benchmarks/` | Misure comparabili su modelli, RAM e latenza | da fare |

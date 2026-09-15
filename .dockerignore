@@ -1,0 +1,17 @@
+.git
+.worktrees
+.agents
+.codex
+.env*
+!.env.example
+.acl-backup-*
+data
+**/__pycache__
+**/*.pyc
+node_modules
+**/node_modules
+.pytest_cache
+.mypy_cache
+.ruff_cache
+dist
+build

@@ -64,6 +64,7 @@ from shared.bottle import (
     MAX_BOTTLE_BYTES as _MAX_BOTTLE_BYTES,
 )
 from shared.network_security import normalize_http_base, token_authorized, verify_client_ip
+from shared.code_sandbox import CodeSandboxClient, SandboxUnavailable
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -344,6 +345,7 @@ print(f"[CP] Federation identity: {CP_ID[:20]}... (federation={'ON' if FEDERATIO
 # (BaseConnector.enabled -> is_available()); quelli senza credenziali non
 # finiscono nel tool loop. I loro tool vengono aggiunti a BUILTIN_TOOLS piu' sotto.
 connector_manager = ConnectorManager()
+code_sandbox = CodeSandboxClient()
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def _normalize_endpoint(ep: str) -> str:
@@ -1044,6 +1046,31 @@ def _tool_get_mesh_status(args: dict) -> str:
         )
     return "\n".join(lines)
 
+
+def _tool_code_sandbox(args: dict) -> str:
+    """Operate only on an offline disposable workspace, never on the live repo."""
+    action = str(args.get("action", "status")).strip().lower()
+    allowed = {"status", "create", "list", "read", "write", "replace", "run", "diff", "discard"}
+    if action not in allowed:
+        return f"Sandbox error: unsupported action '{action}'."
+    if action == "status" and not code_sandbox.enabled:
+        return json.dumps(code_sandbox.status(), ensure_ascii=False)
+    payload_keys = {
+        "workspace_id", "label", "path", "content", "old", "new",
+        "expected_occurrences", "argv", "cwd", "timeout", "pattern", "limit",
+    }
+    payload = {key: value for key, value in args.items() if key in payload_keys}
+    try:
+        wait_timeout = min(max(int(payload.get("timeout", 30)) + 15, 20),
+                           code_sandbox.default_timeout)
+        result = code_sandbox.call(action, payload, timeout=wait_timeout)
+        push_log("system", f"Code sandbox: {action}",
+                 detail=f"workspace={payload.get('workspace_id', result.get('workspace_id', ''))} ok={result.get('ok')}",
+                 status="success" if result.get("ok") else "warn")
+        return json.dumps(result, ensure_ascii=False)
+    except (SandboxUnavailable, TimeoutError, ValueError) as error:
+        return f"Sandbox error: {error}"
+
 # ── TOOL DEFINITIONS ─────────────────────────────────────────────────────────
 BUILTIN_TOOLS = [
     {
@@ -1099,6 +1126,32 @@ BUILTIN_TOOLS = [
             "description": "Stato della rete HyperSpace: nodi attivi, modelli, heartbeat.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "code_sandbox",
+            "description": "Sviluppa e testa codice in un workspace offline e usa-e-getta. Non modifica mai il repository operativo, non ha rete, Docker socket, push o deploy. Prima usa create, poi read/list/write/replace/run/diff; restituisci sempre il diff per revisione umana.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["status", "create", "list", "read", "write", "replace", "run", "diff", "discard"]},
+                    "workspace_id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                    "expected_occurrences": {"type": "integer", "default": 1},
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                    "cwd": {"type": "string", "default": "."},
+                    "timeout": {"type": "integer", "default": 30},
+                    "pattern": {"type": "string", "default": "*"},
+                    "limit": {"type": "integer", "default": 200}
+                },
+                "required": ["action"]
+            }
+        }
     }
 ] + connector_manager.get_all_tools()
 
@@ -1114,6 +1167,7 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         "omega_query":     _omega_query,
         "omega_store":     _omega_store,
         "get_mesh_status": _tool_get_mesh_status,
+        "code_sandbox":    _tool_code_sandbox,
     }
     handler = handlers.get(tool_name)
     if handler:
@@ -1143,6 +1197,20 @@ def tools_execute():
         return jsonify({"error": "missing tool_name"}), 400
     result = _execute_tool_call(tool_name, tool_args)
     return jsonify({"result": result})
+
+
+@app.route('/sandbox/status')
+def sandbox_status():
+    status = code_sandbox.status()
+    if status.get("enabled") and status.get("available"):
+        try:
+            status["runner"] = code_sandbox.call("status", {}, timeout=3)
+        except Exception as error:
+            status.update(available=False, error=str(error))
+    # Disabled is a valid configured state; 503 only means an enabled runner
+    # has disappeared or is unhealthy.
+    response_code = 200 if not status.get("enabled") or status.get("available") else 503
+    return jsonify(status), response_code
 
 # ── TOOL CALLING LOOP ─────────────────────────────────────────────────────────
 def _call_ollama(ollama_base: str, payload: dict, sign: bool = False, node_id: str = "") -> dict:
