@@ -1823,6 +1823,77 @@ def dream_node_status():
         return jsonify({"error": str(error)}), 502
 
 
+def _reachable_dream_node(node_id):
+    node = next((n for n in _node_list() if n.get("node_id") == node_id), None)
+    if not node or node.get("status") != "active" or not _best_endpoint(node):
+        return None
+    return node
+
+
+DREAM_REVIEW_TOKEN = os.getenv("DREAM_REVIEW_TOKEN", "")
+
+
+def _dream_review_auth_error():
+    if len(DREAM_REVIEW_TOKEN) < 32:
+        return jsonify({"error": "DREAM_REVIEW_TOKEN assente o troppo corto — revisione disabilitata"}), 503
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not token_authorized(provided, DREAM_REVIEW_TOKEN):
+        return jsonify({"error": "Token revisione sogni non valido"}), 401
+    return None
+
+
+@app.route('/dreams')
+def dream_node_list():
+    node = _reachable_dream_node(request.args.get("node_id", ""))
+    if not node:
+        return jsonify({"error": "Nodo non raggiungibile"}), 404
+    try:
+        response = requests.get(
+            f"{_best_endpoint(node)}/dreams",
+            params={"status": request.args.get("status", ""),
+                    "limit": request.args.get("limit", "100")},
+            timeout=8,
+        )
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+
+@app.route('/dreams/insights')
+def dream_node_insights():
+    node = _reachable_dream_node(request.args.get("node_id", ""))
+    if not node:
+        return jsonify({"error": "Nodo non raggiungibile"}), 404
+    try:
+        response = requests.get(f"{_best_endpoint(node)}/dreams/insights", timeout=8)
+        response.raise_for_status()
+        return jsonify(response.json())
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+
+@app.route('/dreams/<dream_id>/review', methods=['POST'])
+def dream_node_review(dream_id):
+    auth_error = _dream_review_auth_error()
+    if auth_error:
+        return auth_error
+    data = request.get_json(force=True, silent=True) or {}
+    node = _reachable_dream_node(data.pop("node_id", ""))
+    if not node:
+        return jsonify({"error": "Nodo non raggiungibile"}), 404
+    try:
+        response = requests.post(
+            f"{_best_endpoint(node)}/dreams/{dream_id}/review",
+            json=data,
+            headers={"Authorization": f"Bearer {DREAM_REVIEW_TOKEN}"},
+            timeout=8,
+        )
+        return jsonify(response.json()), response.status_code
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+
+
 @app.route('/logs/clear', methods=['POST'])
 def clear_logs():
     db.clear_logs()

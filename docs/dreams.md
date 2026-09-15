@@ -44,7 +44,7 @@ Un sogno non deve influenzare risposte, decisioni o altri cicli soltanto perché
 6. **Autonomia guidata da misure.** Frequenza, modello e ampiezza del contesto si
    aumentano solo dopo aver misurato valore prodotto e impatto sulle risorse.
 
-## Stato attuale: fondazione implementata
+## Stato attuale: fondazione e revisione implementate
 
 Il worker Ollama supporta già una prima versione prudente:
 
@@ -58,9 +58,16 @@ Il worker Ollama supporta già una prima versione prudente:
 - interrompe il lavoro in background quando arriva una richiesta;
 - salva il risultato localmente con stato `hypothesis` e pubblica un evento
   diagnostico, senza modificare la memoria originale.
+- richiede al modello un artefatto JSON versionato con categoria, sintesi,
+  autovalutazione di confidenza e domande aperte;
+- conserva ID e hash SHA-256 delle memorie sorgenti, senza duplicarne il
+  contenuto nel record del sogno;
+- espone una inbox di revisione manuale con decisioni motivate e attribuite;
+- promuove soltanto su richiesta esplicita una nota derivata in memoria e usa
+  una tombstone per escluderla dal retrieval in caso di revoca.
 
-Questa fondazione dimostra scheduling e isolamento. Non dimostra ancora che le
-ipotesi siano utili, affidabili o adatte a entrare nella memoria.
+La promozione manuale dimostra il ciclo tecnico, non che le ipotesi siano utili
+o affidabili. Questa evidenza deve ancora arrivare dalla fase di valutazione.
 
 ## Attivazione per nodo
 
@@ -71,12 +78,19 @@ DREAM_ENABLED=true
 DREAM_MODEL=qwen2.5-coder:14b-instruct
 DREAM_IDLE_SECONDS=120
 DREAM_INTERVAL_SECONDS=900
+DREAM_REVIEW_TOKEN=<segreto-casuale-di-almeno-32-caratteri>
 ```
 
 Il modello deve essere già installato sul nodo. Il primo controllo avviene dopo
 almeno 120 secondi senza lavoro; il worker ricontrolla ogni 10 secondi e separa
 due tentativi di almeno 900 secondi. Per backend diversi da Ollama il worker
 resta disabilitato.
+
+`DREAM_REVIEW_TOKEN` abilita esclusivamente le azioni che cambiano lo stato di
+un sogno o della memoria derivata. La dashboard lo invia al control-plane, che
+lo verifica e lo sostituisce con la propria copia prima di inoltrare la richiesta
+al nodo. Se manca o è più corto di 32 caratteri, la revisione è disabilitata in
+modo sicuro; lettura e diagnostica restano disponibili.
 
 L'arresto effettivo della computazione dopo la disconnessione HTTP dipende dal
 backend. Il limiter non osserva lavoro avviato direttamente su Ollama al di
@@ -90,8 +104,8 @@ successiva.
 | Fase | Obiettivo | Uscita verificabile | Stato |
 |---|---|---|---|
 | D0 — Fondazione sicura | Scheduling idle-only, interruzione, isolamento e diagnostica | Nessuna regressione sul lavoro interattivo; risultati separati dalla memoria | Implementata, da misurare |
-| D1 — Artefatto strutturato | Sostituire il testo libero con categorie e provenienza | Ogni ipotesi cita le memorie sorgenti ed espone tipo, sintesi, confidenza e domande aperte | Da fare |
-| D2 — Revisione | Aggiungere inbox e azioni `promote`, `reject`, `defer` | Ogni cambio di stato è attribuito, datato e reversibile | Da fare |
+| D1 — Artefatto strutturato | Sostituire il testo libero con categorie e provenienza | Ogni ipotesi cita le memorie sorgenti ed espone tipo, sintesi, confidenza e domande aperte | Implementata |
+| D2 — Revisione | Aggiungere inbox e azioni `promote`, `reject`, `defer` | Ogni cambio di stato è attribuito, datato e reversibile | Implementata, da validare con uso reale |
 | D3 — Valutazione | Costruire un piccolo dataset reale e confrontare prompt/modelli | Metriche disponibili per utilità, novità, correttezza, costo e interruzione | Da fare |
 | D4 — Consolidamento | Permettere ai risultati promossi di produrre note o collegamenti persistenti | Nessuna scrittura autorevole senza promozione; provenienza preservata | Da fare |
 | D5 — Mesh | Condividere tra nodi soltanto artefatti promossi e autorizzati | Policy privacy, deduplicazione globale e revoca testate end-to-end | Futuro |
@@ -136,6 +150,13 @@ La promozione deve creare un nuovo record di memoria e non riscrivere le fonti.
 Una revoca successiva deve poter escludere il record dal retrieval senza perdere
 la cronologia della decisione.
 
+L'implementazione usa gli stati `hypothesis`, `deferred`, `promoted`,
+`rejected` e `revoked`. Le azioni valide dipendono dallo stato corrente e ogni
+azione richiede una motivazione non vuota. La nota promossa ha ID deterministico
+`insight-<dream-id>`; promozioni e revoche vengono appese a `memory.jsonl`, dove
+il retrieval considera soltanto l'ultima versione di ogni ID. Questo mantiene
+la cronologia su disco senza rendere visibile una nota revocata.
+
 ### D3 — Metriche e criteri di avanzamento
 
 Prima del consolidamento automatico misureremo:
@@ -168,11 +189,19 @@ retention, revoca e autorizzazione tra nodi.
 ## Risultati e diagnostica correnti
 
 - `GET /dreams/status` sul worker mostra configurazione, stato e ultimo
-  ciclo/errore.
+  ciclo/errore, incluso il numero di ipotesi in attesa.
+- `GET /dreams?status=hypothesis&limit=100` restituisce la inbox del nodo.
+- `POST /dreams/{id}/review` applica `promote`, `reject`, `defer`, `reopen` o
+  `revoke`; richiede `reviewer` e `rationale`.
+- `GET /dreams/insights` restituisce le note derivate attive.
 - In Dashboard Diagnostics si sceglie il nodo in Simulate Dream e si usa
   **Stato sogni automatici del nodo**.
-- `data/dreams.jsonl` contiene le ultime 100 riflessioni con stato, modello,
-  timestamp, impronta e numero di memorie sorgenti.
+- La **Dream Review Inbox** della dashboard filtra per stato e presenta solo le
+  transizioni ammesse.
+- `data/dreams.jsonl` contiene le ultime 100 riflessioni strutturate e l'audit
+  delle revisioni. I vecchi record testuali ricevono a lettura un ID stabile e
+  restano revisionabili senza migrazione distruttiva.
+- `data/dream_insights.jsonl` contiene le note derivate e il loro stato.
 - `data/dream_state.json` conserva deduplicazione e cooldown ai riavvii.
 - L'evento `dream` appare nel control-plane e nella vista Live.
 
