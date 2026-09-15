@@ -100,6 +100,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 | P1 | `.claude/CLAUDE.md` | Regole operative per Claude Code teammate | da fare |
 | P1 | `agents/registry.yml` | Catalogo ruoli, modelli e capability agenti | da fare |
 | P1 | Code Sandbox | Workspace offline, diff e test senza write-back sul repository operativo | prima versione implementata |
+| P1 | Nightly Development Dream | Esperimento notturno con microVM preferita, fallback offline, doppia verifica e review senza auto-apply | implementato |
 | P1 | Dream review lifecycle | Revisione, promozione o rifiuto delle ipotesi generate nei periodi di inattività | fondazione implementata |
 | P1 | `profiles/linux-primary/` | Base del futuro target Linux production | da fare |
 | P2 | `benchmarks/` | Misure comparabili su modelli, RAM e latenza | da fare |

@@ -143,7 +143,10 @@ def _write(job: dict) -> dict:
     if path.exists() and path.is_symlink():
         raise ValueError("refusing to write through symlink")
     temporary = path.with_suffix(path.suffix + ".sandbox-tmp")
-    temporary.write_text(content, encoding="utf-8")
+    # Preserve the supplied line endings byte-for-byte.  In particular, a
+    # unified diff may contain CRLF context from a Windows checkout; implicit
+    # text-mode conversion would turn it into CRCRLF and make git apply fail.
+    temporary.write_text(content, encoding="utf-8", newline="")
     temporary.replace(path)
     return {"ok": True, "path": path.relative_to(repo).as_posix(), "bytes": len(encoded)}
 

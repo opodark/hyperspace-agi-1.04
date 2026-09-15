@@ -431,6 +431,13 @@ main{padding:18px 20px;display:grid}
       <button class="btn btn-dream btn-sm" id="loadDreamInboxButton" onclick="loadDreamInbox()">Carica inbox</button>
       <div id="dreamInbox" class="dream-inbox"><div class="hint">Seleziona un nodo e carica le ipotesi.</div></div>
     </div>
+    <div class="card"><div class="card-title">&#128736; Nightly Development Dream</div><p class="hint">Proposte di codice create di notte in una sandbox isolata. La revisione registra la decisione, ma non applica mai il codice.</p>
+      <div class="diag-node-fields"><label class="fg">Stato<select id="developmentDreamStatusFilter" class="inp"><option value="candidate">Da revisionare</option><option value="deferred">Rimandati</option><option value="approved">Approvati</option><option value="rejected">Rifiutati</option><option value="failed">Falliti</option><option value="">Tutti</option></select></label><label class="fg">Obiettivo prova<input id="developmentDreamObjective" class="inp" maxlength="1000" placeholder="Piccolo miglioramento a basso rischio"/></label></div>
+      <button class="btn btn-dream btn-sm" onclick="loadDevelopmentDreams()">Aggiorna</button>
+      <button class="btn btn-ghost btn-sm" onclick="runDevelopmentDream()">Avvia prova isolata</button>
+      <div class="diag-out" id="developmentDreamEngine">Stato non caricato.</div>
+      <div id="developmentDreamInbox" class="dream-inbox"><div class="hint">Carica le proposte di sviluppo.</div></div>
+    </div>
     <div class="card"><div class="card-title">&#128172; Simulate Chat</div><p class="hint">Inserisce un evento di prova: non invia una richiesta al modello.</p>
       <div class="diag-node-fields"><label class="fg">From<select id="chFrom" class="inp" aria-label="Nodo mittente"></select></label><label class="fg">To<select id="chTo" class="inp" aria-label="Nodo destinatario"></select></label><input id="chMsg" class="inp" placeholder="Message..." style="flex:1"/></div>
       <button class="btn btn-chat btn-sm" id="sendChatButton" onclick="sendChat()">Simula evento Chat</button><div class="diag-out" id="dChat"></div>
@@ -1575,6 +1582,39 @@ async function reviewDream(dreamId,action){
   var payload={node_id:document.getElementById('dreamReviewNode').value,action:action,reviewer:document.getElementById('dreamReviewer').value||'operator',rationale:rationale.trim()};
   var token=document.getElementById('dreamReviewToken').value;
   try{var response=await fetch('/dreams/'+encodeURIComponent(dreamId)+'/review',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload)});var data=await response.json();if(!response.ok)throw new Error(data.detail||data.error||'Revisione fallita');await loadDreamInbox();}catch(error){window.alert('Errore: '+error.message);}
+}
+function developmentDreamActionButton(label,action,dreamId){
+  var button=document.createElement('button');button.className='btn btn-ghost btn-sm';button.textContent=label;
+  button.addEventListener('click',function(){reviewDevelopmentDream(dreamId,action);});return button;
+}
+function renderDevelopmentDreams(dreams){
+  var inbox=document.getElementById('developmentDreamInbox');inbox.replaceChildren();
+  if(!dreams.length){var empty=document.createElement('div');empty.className='hint';empty.textContent='Nessuna proposta per questo filtro.';inbox.appendChild(empty);return;}
+  dreams.forEach(function(dream){
+    var item=document.createElement('div');item.className='dream-review-item';
+    var meta=document.createElement('div');meta.className='dream-review-meta';
+    meta.textContent=(dream.status||'unknown')+' · '+(dream.backend||'sandbox')+' · '+((dream.changed_files||[]).length)+' file · '+(dream.created_at||'');
+    var summary=document.createElement('div');summary.className='dream-review-summary';summary.textContent=dream.agent_summary||dream.objective||dream.error||'';
+    var files=document.createElement('div');files.className='hint';files.textContent=(dream.changed_files||[]).join(', ');
+    var details=document.createElement('details');var title=document.createElement('summary');title.textContent='Mostra diff';var diff=document.createElement('pre');diff.className='diag-out';diff.textContent=dream.diff||'Diff non disponibile.';details.appendChild(title);details.appendChild(diff);
+    var actions=document.createElement('div');actions.className='dream-review-actions';
+    var allowed={candidate:[['Approva','approve'],['Rifiuta','reject'],['Rimanda','defer']],deferred:[['Approva','approve'],['Rifiuta','reject'],['Riapri','reopen']],approved:[['Riapri','reopen']],rejected:[['Riapri','reopen']],failed:[['Riapri','reopen'],['Rifiuta','reject']],no_changes:[['Rifiuta','reject']]};
+    (allowed[dream.status]||[]).forEach(function(spec){actions.appendChild(developmentDreamActionButton(spec[0],spec[1],dream.id));});
+    item.appendChild(meta);item.appendChild(summary);item.appendChild(files);item.appendChild(details);item.appendChild(actions);inbox.appendChild(item);
+  });
+}
+async function loadDevelopmentDreams(){
+  var status=document.getElementById('developmentDreamStatusFilter').value,inbox=document.getElementById('developmentDreamInbox');inbox.textContent='Caricamento...';
+  try{var results=await Promise.all([fetch('/development-dreams/status'),fetch('/development-dreams?status='+encodeURIComponent(status))]);var engine=await results[0].json(),data=await results[1].json();if(!results[1].ok)throw new Error(data.error||'Errore inbox sviluppo');document.getElementById('developmentDreamEngine').textContent=JSON.stringify(engine,null,2);renderDevelopmentDreams(data.dreams||[]);}catch(error){inbox.textContent='Errore: '+error.message;}
+}
+async function reviewDevelopmentDream(dreamId,action){
+  var rationale=window.prompt('Motivazione obbligatoria per '+action+':','');if(!rationale||!rationale.trim())return;
+  var token=document.getElementById('dreamReviewToken').value,payload={action:action,reviewer:document.getElementById('dreamReviewer').value||'operator',rationale:rationale.trim()};
+  try{var response=await fetch('/development-dreams/'+encodeURIComponent(dreamId)+'/review',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload)});var data=await response.json();if(!response.ok)throw new Error(data.error||'Revisione fallita');await loadDevelopmentDreams();}catch(error){window.alert('Errore: '+error.message);}
+}
+async function runDevelopmentDream(){
+  var token=document.getElementById('dreamReviewToken').value,objective=document.getElementById('developmentDreamObjective').value.trim();
+  try{var response=await fetch('/development-dreams/run',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({objective:objective})});var data=await response.json();if(!response.ok)throw new Error(data.error||'Avvio fallito');document.getElementById('developmentDreamEngine').textContent='Prova avviata nella sandbox. Aggiorna tra qualche minuto.';}catch(error){window.alert('Errore: '+error.message);}
 }
 async function sendDream(){
   var node=document.getElementById('drNode').value;

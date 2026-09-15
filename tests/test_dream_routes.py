@@ -37,10 +37,25 @@ class DreamRouteSecurityTests(unittest.TestCase):
                           and any(isinstance(target, ast.Name) and target.id == "ALLOWED_ROUTES"
                                   for target in node.targets))
         self.assertNotIn("/dreams", ast.unparse(assignment))
+        self.assertNotIn("/development-dreams", ast.unparse(assignment))
+
+    def test_development_review_and_manual_run_require_operator_token(self):
+        review_source = ast.unparse(self.control_plane["development_dream_review"])
+        run_source = ast.unparse(self.control_plane["development_dream_run"])
+        self.assertIn("_dream_review_auth_error", review_source)
+        self.assertIn("_dream_review_auth_error", run_source)
+        self.assertIn("'applied': False", review_source)
+
+    def test_nightly_agent_only_receives_code_sandbox_tool(self):
+        source = ast.unparse(self.control_plane["_run_nightly_development_agent"])
+        self.assertIn("builtin_tools=[CODE_SANDBOX_TOOL]", source)
 
     def test_dashboard_uses_password_field_and_authorization_header(self):
         self.assertIn('id="dreamReviewToken"', self.dashboard)
         self.assertIn("'Authorization':'Bearer '+token", self.dashboard)
+        self.assertIn('id="developmentDreamInbox"', self.dashboard)
+        self.assertIn("Review recorded; code was not applied.",
+                      (ROOT / "control-plane" / "main.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

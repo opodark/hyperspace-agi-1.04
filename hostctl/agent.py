@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-agent HyperSpace — stato/controllo di ngrok, Tailscale e WireGuard.
+"""Host-agent HyperSpace — rete host e broker ristretto Docker Sandboxes.
 
 Perche' esiste: il control-plane gira dentro un container Docker e non puo'
 lanciare `tailscale status` o `wg show` sull'host che lo ospita. Questo
@@ -68,7 +68,9 @@ STATE_PATH = Path(os.getenv("HOSTCTL_STATE_PATH", Path.home() / ".hyperspace" / 
 _IFACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _ngrok_lock = threading.Lock()
 _file_env: dict[str, str] = {}
-MAX_REQUEST_BYTES = 16 * 1024
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
+_SBX_NAME_RE = re.compile(r"^hyperspace-[a-z0-9-]{8,48}$")
+_SBX_ALLOWED_EXECUTABLES = {"python", "python3", "node", "npm", "npx", "pytest", "git"}
 
 
 # ── config: letta da .env, mai inventata a runtime ─────────────────────────
@@ -376,6 +378,142 @@ def action_ble_scan(params: dict) -> dict:
     return {"ok": True, "seconds": seconds, "count": len(found), "devices": found}
 
 
+def _sbx_executable() -> str | None:
+    configured = config_value("SBX_EXECUTABLE", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return str(path) if path.is_file() else None
+    discovered = shutil.which("sbx.exe") or shutil.which("sbx")
+    if discovered:
+        return discovered
+    if _is_windows():
+        local_app_data = os.getenv("LOCALAPPDATA", "")
+        candidate = Path(local_app_data) / "DockerSandboxes" / "bin" / "sbx.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _sbx_name(value: object) -> str:
+    name = str(value or "")
+    if not _SBX_NAME_RE.fullmatch(name):
+        raise ValueError("invalid HyperSpace sandbox name")
+    return name
+
+
+def _sbx_exec(executable: str, name: str, argv: list[str], timeout: int = 120,
+              input_text: str | None = None) -> dict:
+    try:
+        proc = subprocess.run([executable, "exec", name, *argv], input=input_text,
+                              capture_output=True, text=True, timeout=timeout)
+        stdout, stderr = proc.stdout[-262144:], proc.stderr[-262144:]
+        return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
+                "stdout": stdout, "stderr": stderr,
+                "output": (proc.stdout + proc.stderr)[-262144:],
+                "truncated": len(proc.stdout) + len(proc.stderr) > 262144}
+    except subprocess.TimeoutExpired as error:
+        output = ((error.stdout or "") + (error.stderr or ""))[-262144:]
+        return {"ok": False, "error": "command timed out", "output": output}
+
+
+def _sbx_json(executable: str, name: str, code: str, args: list[str], *,
+              timeout: int = 30, input_text: str | None = None) -> dict:
+    result = _sbx_exec(executable, name, ["python", "-c", code, *args], timeout, input_text)
+    if not result.get("ok"):
+        return result
+    try:
+        return json.loads(result.get("stdout", ""))
+    except ValueError:
+        return {"ok": False, "error": "sandbox returned invalid JSON",
+                "output": result.get("output", "")[:1000]}
+
+
+def action_sbx_sandbox(params: dict) -> dict:
+    """Narrow broker for Docker Sandboxes; arbitrary commands stay inside its microVM."""
+    executable = _sbx_executable()
+    operation = str(params.get("operation", "status")).lower()
+    if not executable:
+        return {"ok": False, "ready": False, "installed": False,
+                "error": "sbx is not installed or not in PATH"}
+    if operation == "status":
+        version = _run([executable, "version"], timeout=8)
+        listing = _run([executable, "ls", "--json"], timeout=8)
+        return {"ok": bool(version.get("ok") and listing.get("ok")),
+                "ready": bool(version.get("ok") and listing.get("ok")), "installed": True,
+                "version": version.get("stdout", ""),
+                "sandboxes": json.loads(listing.get("stdout") or "[]") if listing.get("ok") else [],
+                "error": listing.get("stderr") or version.get("stderr") or ""}
+    if operation == "create":
+        source = Path(config_value("SBX_SOURCE_DIR", str(BASE_DIR))).expanduser().resolve()
+        if not source.is_dir() or not (source / ".git").exists():
+            return {"ok": False, "error": "SBX_SOURCE_DIR is not a Git repository"}
+        name = "hyperspace-" + secrets.token_hex(8)
+        argv = [executable, "create", "shell", str(source), "--clone", "--name", name,
+                "--cpus", config_value("SBX_CPUS", "2"),
+                "--memory", config_value("SBX_MEMORY", "4g"),
+                "--deny-network", "**", "--quiet"]
+        result = _run(argv, timeout=180)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("stderr") or result.get("error") or "sbx create failed"}
+        return {"ok": True, "workspace_id": name, "label": str(params.get("label", ""))[:120],
+                "network": "deny-all", "clone": "private-readonly-source"}
+
+    name = _sbx_name(params.get("workspace_id"))
+    if operation == "discard":
+        result = _run([executable, "rm", name, "--force"], timeout=60)
+        return {"ok": result.get("ok", False), "discarded": name,
+                "error": result.get("stderr") or result.get("error", "")}
+    if operation == "run":
+        argv = params.get("argv")
+        if not isinstance(argv, list) or not argv or len(argv) > 32:
+            raise ValueError("argv must contain 1-32 items")
+        argv = [str(item)[:1000] for item in argv]
+        command = Path(argv[0]).name
+        if argv[0] != command or command not in _SBX_ALLOWED_EXECUTABLES:
+            raise ValueError("executable is not allowed")
+        timeout = max(1, min(int(params.get("timeout", 30)), 120))
+        return _sbx_exec(executable, name, argv, timeout)
+    if operation == "diff":
+        staged = _sbx_exec(executable, name, ["git", "add", "-N", "--all"], 30)
+        if not staged.get("ok"):
+            return staged
+        changed = _sbx_exec(executable, name, ["git", "status", "--porcelain"], 30)
+        diff = _sbx_exec(executable, name, ["git", "diff", "--no-ext-diff", "--binary", "--"], 30)
+        files = [line[3:].strip() for line in changed.get("stdout", "").splitlines() if len(line) > 3]
+        return {"ok": bool(changed.get("ok") and diff.get("ok")), "changed_files": files,
+                "diff": diff.get("stdout", ""), "truncated": diff.get("truncated", False),
+                "warnings": (changed.get("stderr", "") + diff.get("stderr", ""))[-4000:]}
+
+    path_code = (
+        "import json,pathlib,sys; root=pathlib.Path.cwd().resolve(); "
+        "p=(root/sys.argv[1]).resolve(); "
+        "assert p==root or root in p.parents, 'path escapes workspace'; "
+    )
+    relative = str(params.get("path", "."))
+    if len(relative) > 500 or Path(relative).is_absolute():
+        raise ValueError("invalid relative path")
+    if operation == "read":
+        code = path_code + "assert p.is_file(), 'not a file'; print(json.dumps({'ok':True,'path':sys.argv[1],'content':p.read_text(encoding='utf-8',errors='replace')}))"
+        return _sbx_json(executable, name, code, [relative])
+    if operation == "write":
+        content = str(params.get("content", ""))
+        if len(content.encode("utf-8")) > 1048576:
+            raise ValueError("content exceeds write limit")
+        code = path_code + "p.parent.mkdir(parents=True,exist_ok=True); data=sys.stdin.read(); p.write_text(data,encoding='utf-8'); print(json.dumps({'ok':True,'path':sys.argv[1],'bytes':len(data.encode())}))"
+        return _sbx_json(executable, name, code, [relative], input_text=content)
+    if operation == "replace":
+        payload = json.dumps({"old": str(params.get("old", "")), "new": str(params.get("new", "")),
+                              "expected": int(params.get("expected_occurrences", 1))})
+        code = path_code + "d=json.loads(sys.stdin.read()); s=p.read_text(encoding='utf-8'); n=s.count(d['old']); assert d['old'] and n==d['expected'], f'expected {d[\"expected\"]}, found {n}'; p.write_text(s.replace(d['old'],d['new'],d['expected']),encoding='utf-8'); print(json.dumps({'ok':True,'path':sys.argv[1],'replacements':n}))"
+        return _sbx_json(executable, name, code, [relative], input_text=payload)
+    if operation == "list":
+        pattern = str(params.get("pattern", "*"))[:200]
+        limit = max(1, min(int(params.get("limit", 200)), 1000))
+        code = "import fnmatch,json,pathlib,sys; r=pathlib.Path.cwd(); pat=sys.argv[1]; lim=int(sys.argv[2]); f=[str(p.relative_to(r)).replace('\\\\','/') for p in r.rglob('*') if p.is_file() and (fnmatch.fnmatch(str(p.relative_to(r)).replace('\\\\','/'),pat) or fnmatch.fnmatch(p.name,pat))][:lim]; print(json.dumps({'ok':True,'files':f,'truncated':len(f)>=lim}))"
+        return _sbx_json(executable, name, code, [pattern, str(limit)])
+    raise ValueError(f"unsupported sbx sandbox operation: {operation}")
+
+
 ACTIONS = {
     "ngrok_status": action_ngrok_status,
     "ngrok_start": action_ngrok_start,
@@ -387,6 +525,7 @@ ACTIONS = {
     "wg_up": action_wg_up,
     "wg_down": action_wg_down,
     "ble_scan": action_ble_scan,
+    "sbx_sandbox": action_sbx_sandbox,
 }
 
 READ_ONLY_ACTIONS = {"ngrok_status", "tailscale_status", "wg_status", "ble_scan"}

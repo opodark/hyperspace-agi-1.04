@@ -5,6 +5,12 @@ accesso in scrittura al checkout operativo. Il sandbox è un runner separato e
 offline che lavora soltanto su copie usa-e-getta del codice incluso nella sua
 immagine.
 
+Il backend preferito è Docker Sandboxes (`sbx`), eseguito dall'host-agent in
+una microVM con clone privato della repository sorgente montata in sola
+lettura. Se `sbx` non è installato, autenticato o disponibile, la creazione di
+un nuovo workspace ricade automaticamente sul runner container offline. Un
+workspace già creato resta sempre vincolato al proprio backend.
+
 ## Confine di sicurezza
 
 ```text
@@ -20,6 +26,11 @@ code-sandbox container
     ├── limiti CPU, RAM, PID, timeout e output
     └── workspace persistenti su volume dedicato
 ```
+
+Il control-plane non riceve il socket Docker né la possibilità di eseguire
+comandi sull'host. Per `sbx` chiama la sola azione `sbx_sandbox` della whitelist
+di `hostctl`; nomi, percorsi, operazioni ed eseguibili sono validati prima di
+invocare la CLI. Solo il comando richiesto viene eseguito dentro la microVM.
 
 Il codice sorgente viene copiato nell'immagine durante la build. `.env*`,
 `.git`, `data/`, worktree, cache e dipendenze locali sono esclusi dal build
@@ -37,11 +48,16 @@ Nel `.env`:
 
 ```dotenv
 CODE_SANDBOX_ENABLED=true
+SBX_SANDBOX_ENABLED=true
 SANDBOX_MAX_WORKSPACES=6
 SANDBOX_MAX_TIMEOUT=120
 SANDBOX_MAX_FILE_BYTES=1048576
-SANDBOX_JOB_TIMEOUT=140
+SANDBOX_JOB_TIMEOUT=240
 ```
+
+Sul computer host, installare `sbx`, completare `sbx login`, avviare il daemon
+e riavviare `hostctl/agent.py`. `SBX_SOURCE_DIR` può sovrascrivere la repository
+da clonare; per default hostctl usa la root di HyperSpace.
 
 Ricostruire `control-plane` e `code-sandbox`. Lo stato è disponibile su
 `GET /sandbox/status`; il tool `code_sandbox` compare anche via MCP.
@@ -73,3 +89,5 @@ un essere umano o da un futuro gate di review separato.
 - Il runner è sequenziale e applica limiti a livello di container; non è ancora
   un pool di microVM per task ostili multi-tenant.
 - Nessun merge automatico: è deliberatamente fuori dal perimetro iniziale.
+
+Il ciclo notturno è documentato in [nightly-development-dream.md](nightly-development-dream.md).

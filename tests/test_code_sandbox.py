@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
-from shared.code_sandbox import CodeSandboxClient, SandboxUnavailable
+from shared.code_sandbox import CodeSandboxClient, HybridCodeSandboxClient, SandboxUnavailable
 
 
 ROOT = Path(__file__).parents[1]
@@ -70,6 +70,34 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("-print('old')", diff["diff"])
         self.assertIn("+print('new')", diff["diff"])
 
+    def test_generated_patch_applies_to_a_clean_workspace(self):
+        proposal_id = self.create()
+        runner._replace({
+            "workspace_id": proposal_id,
+            "path": "app.py",
+            "old": "old",
+            "new": "verified",
+            "expected_occurrences": 1,
+        })
+        runner._write({"workspace_id": proposal_id, "path": "new_file.py",
+                       "content": "VALUE = 42\n"})
+        proposal = runner._diff({"workspace_id": proposal_id})
+
+        verifier_id = self.create()
+        runner._write({"workspace_id": verifier_id, "path": ".proposal.patch",
+                       "content": proposal["diff"]})
+        checked = runner._run({"workspace_id": verifier_id,
+                               "argv": ["git", "apply", "--check", ".proposal.patch"]})
+        self.assertTrue(checked["ok"], checked.get("output"))
+        applied = runner._run({"workspace_id": verifier_id,
+                               "argv": ["git", "apply", ".proposal.patch"]})
+        self.assertTrue(applied["ok"], applied.get("output"))
+        repo = self.workspaces / verifier_id / "repo"
+        self.assertEqual((repo / "app.py").read_text(encoding="utf-8"),
+                         "print('verified')\n")
+        self.assertEqual((repo / "new_file.py").read_text(encoding="utf-8"),
+                         "VALUE = 42\n")
+
     def test_command_allowlist_rejects_shells(self):
         workspace_id = self.create()
         with self.assertRaises(ValueError):
@@ -128,6 +156,39 @@ class ClientTests(unittest.TestCase):
         thread.join()
         self.assertTrue(result["ok"])
         self.assertEqual(list((self.exchange / "results").iterdir()), [])
+
+
+class FakeBackend:
+    default_timeout = 30
+
+    def __init__(self, name, available):
+        self.name, self.available = name, available
+        self.calls = []
+
+    def status(self):
+        return {"enabled": True, "available": self.available, "backend": self.name}
+
+    def call(self, action, arguments=None, timeout=None):
+        self.calls.append((action, dict(arguments or {})))
+        return {"ok": True, "workspace_id": "workspace-1"}
+
+
+class HybridClientTests(unittest.TestCase):
+    def test_prefers_sbx_and_routes_tagged_workspace_back_to_it(self):
+        primary, fallback = FakeBackend("sbx", True), FakeBackend("docker", True)
+        client = HybridCodeSandboxClient(primary, fallback, enabled=True)
+        created = client.call("create", {"label": "nightly"})
+        self.assertEqual(created["workspace_id"], "sbx:workspace-1")
+        client.call("diff", {"workspace_id": created["workspace_id"]})
+        self.assertEqual(primary.calls[-1][1]["workspace_id"], "workspace-1")
+        self.assertEqual(fallback.calls, [])
+
+    def test_falls_back_when_creating_a_new_workspace(self):
+        primary, fallback = FakeBackend("sbx", False), FakeBackend("docker", True)
+        client = HybridCodeSandboxClient(primary, fallback, enabled=True)
+        created = client.call("create", {})
+        self.assertEqual(created["workspace_id"], "docker:workspace-1")
+        self.assertEqual(len(fallback.calls), 1)
 
 
 class ComposeIsolationTests(unittest.TestCase):
