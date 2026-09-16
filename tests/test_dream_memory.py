@@ -1,6 +1,4 @@
 import ast
-import json
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,7 +6,30 @@ from pathlib import Path
 SOURCE = Path(__file__).parents[1] / "node" / "main.py"
 
 
-class DerivedMemoryVisibilityTests(unittest.TestCase):
+class FakeResponse:
+    def __init__(self, payload, error=None):
+        self.payload = payload
+        self.error = error
+
+    def raise_for_status(self):
+        if self.error:
+            raise self.error
+
+    def json(self):
+        return self.payload
+
+
+class FakeHttpx:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
+
+
+class HermesMemoryVisibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
@@ -18,42 +39,27 @@ class DerivedMemoryVisibilityTests(unittest.TestCase):
             ast.Module(body=[function], type_ignores=[]), "node-memory", "exec",
         )
 
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / "memory.jsonl"
-
-    def read(self, rows):
-        self.path.write_text(
-            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
-        )
-        scope = {"_MEMORY_FILE": self.path, "_json": json}
+    def invoke(self, response, limit=100, control_plane="http://control-plane:8085"):
+        httpx = FakeHttpx(response)
+        scope = {"CONTROL_PLANE_URL": control_plane, "httpx": httpx}
         exec(self.function_code, scope)
-        return scope["_read_memory"](100)
+        return scope["_read_memory"](limit), httpx
 
-    def test_latest_revision_of_derived_memory_is_visible(self):
-        rows = [
-            {"task_id": "ordinary", "content": "original memory"},
-            {"id": "insight-1", "type": "dream_insight", "status": "active", "content": "first"},
-            {"id": "insight-1", "type": "dream_insight", "status": "active", "content": "re-promoted"},
-        ]
-        visible = self.read(rows)
-        self.assertEqual([row.get("content") for row in visible],
-                         ["original memory", "re-promoted"])
+    def test_reads_authoritative_memory_from_control_plane(self):
+        expected = [{"id": "m1", "content": "Hermes owns this"}]
+        rows, httpx = self.invoke(FakeResponse({"entries": expected}), limit=12)
+        self.assertEqual(rows, expected)
+        self.assertEqual(httpx.calls[0][0], "http://control-plane:8085/memory")
+        self.assertEqual(httpx.calls[0][1]["params"], {"limit": 12})
 
-    def test_revocation_tombstone_excludes_insight_without_erasing_log(self):
-        rows = [
-            {"id": "insight-1", "type": "dream_insight", "status": "active", "content": "candidate"},
-            {"id": "insight-1", "type": "dream_insight", "status": "revoked", "content": "candidate"},
-        ]
-        self.assertEqual(self.read(rows), [])
-        self.assertEqual(len(self.path.read_text(encoding="utf-8").splitlines()), 2)
+    def test_unavailable_backend_fails_closed_without_local_fallback(self):
+        rows, _ = self.invoke(FakeResponse({}, RuntimeError("offline")))
+        self.assertEqual(rows, [])
 
-    def test_corrupt_line_does_not_hide_valid_memories(self):
-        self.path.write_text('{bad json}\n{"content":"valid"}\n', encoding="utf-8")
-        scope = {"_MEMORY_FILE": self.path, "_json": json}
-        exec(self.function_code, scope)
-        self.assertEqual(scope["_read_memory"](100), [{"content": "valid"}])
+    def test_missing_control_plane_has_no_node_local_memory(self):
+        rows, httpx = self.invoke(FakeResponse({"entries": [{"content": "unused"}]}), control_plane="")
+        self.assertEqual(rows, [])
+        self.assertEqual(httpx.calls, [])
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@
 #        queued_requests/max_concurrent così il control-plane può pesare il
 #        carico reale nello scoring, non solo tier/vram/uptime statici.
 # fix: heartbeat try/except+retry, endpoint normalizzato, peer TTL configurabile
-# fix: /execute accetta campo 'task', salva in memory.jsonl, propaga al CP
+# fix: /execute accetta campo 'task' e persiste tramite il backend Hermes del CP
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -337,37 +337,19 @@ def prune_stale_peers(max_age_s: int = None):
             _peers[nid]["status"] = "stale"
 
 # ── MEMORIA ────────────────────────────────────────────────
-import json as _json
-from pathlib import Path
-
-_MEMORY_FILE = Path(DATA_DIR) / "memory.jsonl"
-
 def _read_memory(limit: int = 50) -> list:
-    if not _MEMORY_FILE.exists():
+    """Compatibility view backed by the authoritative control-plane/Hermes."""
+    if not CONTROL_PLANE_URL:
         return []
-    rows = []
-    for line in _MEMORY_FILE.read_text(encoding="utf-8").splitlines():
-        try:
-            value = _json.loads(line)
-            if isinstance(value, dict):
-                rows.append(value)
-        except ValueError:
-            continue
-    # Derived memories use an append-only status log. Only the latest version
-    # of an ID is visible; a revoked tombstone therefore removes it from
-    # retrieval without erasing the audit trail on disk.
-    latest = {}
-    for index, row in enumerate(rows):
-        if row.get("id"):
-            latest[str(row["id"])] = index
-    visible = [row for index, row in enumerate(rows)
-               if (not row.get("id") or latest[str(row["id"])] == index)
-               and row.get("status") != "revoked"]
-    return visible[-max(1, limit):]
-
-def _save_memory(entry: dict):
-    with _MEMORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        response = httpx.get(
+            f"{CONTROL_PLANE_URL}/memory", params={"limit": max(1, min(limit, 5000))}, timeout=4.0,
+        )
+        response.raise_for_status()
+        entries = response.json().get("entries", [])
+        return entries if isinstance(entries, list) else []
+    except Exception:
+        return []
 
 async def _push_memory_to_cp(entry: dict):
     if not CONTROL_PLANE_URL:
@@ -375,7 +357,8 @@ async def _push_memory_to_cp(entry: dict):
     try:
         payload = {"node_id": NODE_ID, "entry": entry}
         async with httpx.AsyncClient(timeout=8.0) as client:
-            await client.post(f"{CONTROL_PLANE_URL}/memory/push", json=payload)
+            response = await client.post(f"{CONTROL_PLANE_URL}/memory/push", json=payload)
+            response.raise_for_status()
     except Exception as e:
         print(f"[NODE:{NODE_ID[:10]}] memory push to CP failed: {e}")
 
@@ -667,7 +650,7 @@ async def review_dream(dream_id: str, payload: dict, request: Request):
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error))
     if insight is not None:
-        _save_memory(insight)
+        await _push_memory_to_cp(insight)
     return {"ok": True, "dream": dream, "insight": insight}
 
 
@@ -813,15 +796,13 @@ def get_peers():
 
 @app.get("/memory")
 def get_memory(limit: int = 50):
-    return {"node_id": NODE_ID, "entries": _read_memory(limit)}
+    return {"node_id": NODE_ID, "entries": _read_memory(limit), "backend": "hermes"}
 
 @app.post("/memory/push")
 async def receive_memory(payload: dict):
-    entry = payload.get("entry", {})
-    if entry and entry.get("node_id") != NODE_ID:
-        entry["_received_from"] = payload.get("node_id", "unknown")
-        _save_memory(entry)
-    return {"ok": True}
+    # Compatibility endpoint only. Hermes is authoritative and the CP already
+    # owns the entry, so nodes must not create a second local memory copy.
+    return {"ok": True, "stored": False, "backend": "hermes"}
 
 @app.get("/identity")
 def get_identity():
@@ -884,7 +865,7 @@ async def execute_task(task: dict):
     finally:
         await _release_slot(model)
 
-    # Salva in memoria locale e propaga al CP, solo se non sono dei task per i
+    # Salva in Hermes tramite il CP, solo se non sono dei task per i
     # titoli (task_id con prefisso "title-"), altrimenti si genera un loop
     # infinito: la generazione del titolo per una entry finirebbe a sua
     # volta in memoria come nuova entry da titolare.
@@ -898,7 +879,6 @@ async def execute_task(task: dict):
             "model":     model,
             "timestamp": time.time(),
         }
-        _save_memory(entry)
         await _push_memory_to_cp(entry)
 
     return {"node_id": NODE_ID, "task_id": task_id, "status": "done", "model": model, "response": response_text}

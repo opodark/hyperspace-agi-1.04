@@ -66,6 +66,7 @@ from shared.bottle import (
 from shared.network_security import normalize_http_base, token_authorized, verify_client_ip
 from shared.code_sandbox import HybridCodeSandboxClient, SandboxUnavailable
 from shared.development_dream import NightlyDevelopmentDream
+from shared.hermes_memory import HermesMemoryClient, HermesMemoryError
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -85,6 +86,8 @@ UI_BRIDGE_URL      = os.getenv("UI_BRIDGE_URL", "http://localhost:8099")
 MEMORY_FILE_GZ     = os.path.join(BASE_DIR, "memory.json.gz")
 MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
 MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
+MEMORY_BACKEND     = os.getenv("MEMORY_BACKEND", "hermes").strip().lower()
+_hermes_memory     = HermesMemoryClient()
 
 # SearXNG — motore di ricerca self-hosted (container searxng nella stessa rete Docker)
 # Override via env: SEARXNG_URL=http://searxng:8080
@@ -484,6 +487,10 @@ def _notify_bridge(event_type: str, payload: dict):
 
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 def _load_memory() -> list:
+    if MEMORY_BACKEND == "hermes":
+        return _hermes_memory.entries(MEMORY_MAX_ENTRIES)
+    if MEMORY_BACKEND != "legacy":
+        raise RuntimeError(f"unsupported MEMORY_BACKEND: {MEMORY_BACKEND}")
     if not os.path.exists(MEMORY_FILE_GZ):
         return []
     try:
@@ -494,6 +501,8 @@ def _load_memory() -> list:
         return []
 
 def _save_memory(entries: list) -> None:
+    if MEMORY_BACKEND != "legacy":
+        raise RuntimeError("legacy memory writes are disabled; Hermes is authoritative")
     with gzip.open(MEMORY_FILE_GZ, "wt", encoding="utf-8") as f:
         json.dump(_prune_memory(entries), f, ensure_ascii=False)
 
@@ -517,6 +526,10 @@ def _prune_memory(entries: list) -> list:
 def _memory_append(entry: dict):
     if "ts" not in entry and "timestamp" in entry:
         entry["ts"] = _ts_to_iso(entry["timestamp"])
+    if MEMORY_BACKEND == "hermes":
+        return _hermes_memory.store(entry)
+    if MEMORY_BACKEND != "legacy":
+        raise RuntimeError(f"unsupported MEMORY_BACKEND: {MEMORY_BACKEND}")
     entries = _load_memory()
     ts_key      = entry.get("ts") or entry.get("timestamp", "")
     content_key = str(entry.get("content", "") or entry.get("prompt", ""))[:64]
@@ -899,7 +912,13 @@ def _omega_query(args: dict) -> str:
     limit      = int(args.get("limit", 10))
     event_type = str(args.get("event_type", "")).lower()
     mode       = str(args.get("mode", "semantic"))
-    entries    = _load_memory()
+    if MEMORY_BACKEND == "hermes":
+        try:
+            entries = _hermes_memory.query(query, limit, event_type, mode)
+        except HermesMemoryError as exc:
+            return f"Hermes memory unavailable: {exc}"
+    else:
+        entries = _load_memory()
     results    = []
     for e in entries:
         content = str(e.get("content") or e.get("prompt") or e.get("summary") or e.get("detail") or "").lower()
@@ -3375,7 +3394,10 @@ def get_tasks():
 @app.route('/memory')
 def get_memory():
     limit   = int(request.args.get("limit", MEMORY_MAX_ENTRIES))
-    entries = _load_memory()
+    try:
+        entries = (_hermes_memory.entries(limit) if MEMORY_BACKEND == "hermes" else _load_memory())
+    except HermesMemoryError as exc:
+        return jsonify({"error": str(exc), "backend": "hermes"}), 503
     return jsonify({"entries": entries[:limit], "total": len(entries)})
 
 @app.route('/memory/push', methods=['POST'])
@@ -3384,11 +3406,19 @@ def push_memory():
     entry = data.get("entry")
     if not entry or not isinstance(entry, dict):
         return jsonify({"ok": False, "error": "missing entry"}), 400
-    _memory_append(entry)
+    try:
+        _memory_append(entry)
+    except HermesMemoryError as exc:
+        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
     return jsonify({"ok": True})
 
 @app.route('/memory/stats')
 def memory_stats():
+    if MEMORY_BACKEND == "hermes":
+        try:
+            return jsonify(_hermes_memory.stats())
+        except HermesMemoryError as exc:
+            return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
     entries    = _load_memory()
     size_bytes = os.path.getsize(MEMORY_FILE_GZ) if os.path.exists(MEMORY_FILE_GZ) else 0
     return jsonify({
@@ -3513,6 +3543,10 @@ def federate_execute():
 
 # ── MEMORY SYNC ───────────────────────────────────────────────────────────────
 def _sync_memory_across_nodes():
+    if MEMORY_BACKEND == "hermes":
+        # Hermes is the single shared store. Replicating its view back into
+        # node-local files would reintroduce dual-write and sync loops.
+        return
     active_nodes = [n for n in _node_list() if n.get("status") == "active"]
     if len(active_nodes) < 2:
         return
