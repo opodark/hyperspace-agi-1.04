@@ -52,7 +52,8 @@ import httpx
 
 # ── CONFIG ───────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
-MEMORY_FILE = Path(DATA_DIR) / "memory.jsonl"
+INTERACTION_LOG_FILE = Path(DATA_DIR) / "interactions.jsonl"
+LEGACY_INTERACTION_LOG_FILE = Path(DATA_DIR) / "memory.jsonl"
 
 # Cache della risposta: il control-plane fa pull periodico, ma senza questa
 # cache ogni poll ricontatterebbe il backend (Ollama /api/ps, vLLM /metrics)
@@ -62,7 +63,7 @@ METRICS_CACHE_TTL_S = float(os.getenv("METRICS_CACHE_TTL_S", "8"))
 # modello tiene le ultime METRICS_EWMA_MODEL_WINDOW interazioni osservate,
 # così un modello molto usato non "ruba" la finestra a quelli usati raramente.
 # I campioni vengono letti dalle ultime METRICS_EWMA_READ_MAX righe di
-# memory.jsonl (limite di I/O; METRICS_EWMA_WINDOW resta come alias
+# interactions.jsonl (limite di I/O; METRICS_EWMA_WINDOW resta come alias
 # retrocompatibile di READ_MAX).
 # Il DECAY temporale pesa i campioni per età (0.5^(age/half_life)): i dati
 # recenti contano di più, ma quelli vecchi NON vengono scartati (restano
@@ -134,13 +135,12 @@ def capability_profile(engine: str) -> dict:
 
 # ── HELPERS ──────────────────────────────────────────────
 def _read_memory(limit: int) -> list:
-    """Ultime `limit` interazioni dalla memoria collettiva locale
-    (data/memory.jsonl), scritta dal proxy (ollama_proxy.py) e condivisa con
-    il node agent — stessi processi, stesso DATA_DIR."""
-    if not MEMORY_FILE.exists():
+    """Ultime interazioni dal log operativo, non dalla memoria cognitiva."""
+    path = INTERACTION_LOG_FILE if INTERACTION_LOG_FILE.exists() else LEGACY_INTERACTION_LOG_FILE
+    if not path.exists():
         return []
     try:
-        lines = MEMORY_FILE.read_text(encoding="utf-8").strip().splitlines()
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
     except Exception:
         return []
     return [json.loads(l) for l in lines[-limit:] if l.strip()]
@@ -235,7 +235,7 @@ class OllamaMetricsProvider:
     """Legge stato e telemetria da un Ollama nativo (OLLAMA_URL).
     - /api/ps    : modelli caricati + VRAM occupata (snapshot live)
     - /api/tags  : tutti i modelli disponibili
-    - memory.jsonl : EWMA per modello di tok/s e latenza (dati osservati)"""
+    - interactions.jsonl : EWMA per modello di tok/s e latenza (dati osservati)"""
 
     def __init__(self, ollama_url: str):
         self.base = ollama_url.rstrip("/")
@@ -245,11 +245,9 @@ class OllamaMetricsProvider:
 
         loaded = {m.get("name"): m for m in ps if m.get("name")}
 
-        # EWMA per modello dai log della memoria condivisa.
-        # ATTENZIONE: memory.jsonl contiene anche entry PROPAGATE dagli altri
-        # nodi via /memory/push (memory sync inter-nodo). Quelle portano sempre
-        # il marker _received_from, le entry locali mai: senza questo filtro la
-        # telemetria del nodo risulterebbe inquinata dai campioni dei peer.
+        # EWMA per modello dal log operativo locale.
+        # Il filtro sui record propagati resta per compatibilita' durante la
+        # lettura del vecchio memory.jsonl, ora sorgente read-only.
         # Finestra PER MODELLO: ogni modello tiene le ultime
         # METRICS_EWMA_MODEL_WINDOW interazioni (un modello molto usato non
         # ruba la finestra agli altri). Il peso di ogni campione decade con

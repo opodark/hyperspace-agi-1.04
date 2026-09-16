@@ -80,6 +80,10 @@ services:
       SEARXNG_URL: http://hyperspace-searxng:8080
       MEMORY_TTL_DAYS: "${MEMORY_TTL_DAYS:-7}"
       MEMORY_MAX_ENTRIES: "${MEMORY_MAX_ENTRIES:-200}"
+      MEMORY_BACKEND: "${MEMORY_BACKEND:-hermes}"
+      HERMES_MEMORY_URL: "${HERMES_MEMORY_URL:-http://host.docker.internal:8098}"
+      HERMES_MEMORY_TOKEN: "${HERMES_MEMORY_TOKEN:-}"
+      HERMES_MEMORY_TOKEN_FILE: "${HERMES_MEMORY_TOKEN_FILE:-/app/data/hermes-memory.token}"
       # nuovo schema 1.04 — predisposto, non ancora consumato da main.py
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
       OLLAMA_CHAT_BASE_URL: ${OLLAMA_CHAT_BASE_URL}

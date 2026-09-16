@@ -13,8 +13,8 @@
 # Ogni richiesta viene:
 #   1. Inoltrata al vero Ollama (OLLAMA_URL)
 #   2. Loggata nel control-plane come "webui_interaction"
-#   3. Appesa a data/memory.jsonl (memoria collettiva locale)
-#   4. Propagata agli hub peer via /memory/push (se PUBLIC_ENDPOINT noto)
+#   3. Appesa a data/interactions.jsonl come telemetria operativa locale
+#   4. Persistita nella memoria Hermes tramite il control-plane
 
 import asyncio
 import json
@@ -36,7 +36,7 @@ PUBLIC_ENDPOINT   = os.getenv("PUBLIC_ENDPOINT", "").rstrip("/")
 PROXY_PORT        = int(os.getenv("PROXY_PORT", 11435))
 
 DATA_DIR   = Path(os.getenv("DATA_DIR", "/app/data"))
-MEMORY_FILE = DATA_DIR / "memory.jsonl"
+INTERACTION_LOG_FILE = DATA_DIR / "interactions.jsonl"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # NODE_ID condiviso con node/main.py: entrambi i processi girano nello
@@ -54,16 +54,16 @@ except Exception:
 app = FastAPI(title="HyperSpace Ollama Proxy", version="1.03.0")
 
 # ── MEMORIA COLLETTIVA ────────────────────────────────────
-def save_memory(entry: dict):
-    """Appende un'interazione a memory.jsonl (una riga JSON per entry)."""
-    with MEMORY_FILE.open("a", encoding="utf-8") as f:
+def save_interaction(entry: dict):
+    """Appende telemetria locale; non e' una seconda memoria cognitiva."""
+    with INTERACTION_LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-def read_memory(limit: int = 100) -> list:
-    """Legge le ultime `limit` righe di memoria."""
-    if not MEMORY_FILE.exists():
+def read_interactions(limit: int = 100) -> list:
+    """Legge le ultime `limit` righe di telemetria operativa."""
+    if not INTERACTION_LOG_FILE.exists():
         return []
-    lines = MEMORY_FILE.read_text(encoding="utf-8").strip().splitlines()
+    lines = INTERACTION_LOG_FILE.read_text(encoding="utf-8").strip().splitlines()
     return [json.loads(l) for l in lines[-limit:] if l.strip()]
 
 async def log_to_control_plane(entry: dict):
@@ -86,20 +86,14 @@ async def log_to_control_plane(entry: dict):
     except Exception:
         pass  # non bloccare il proxy se il CP è giù
 
-async def propagate_to_peers(entry: dict):
-    """Invia la memory entry agli hub peer noti tramite /memory/push."""
-    boot_peers = [
-        p.strip() for p in os.getenv("BOOT_PEERS", "").split(",") if p.strip()
-    ]
-    if not boot_peers:
+async def store_in_hermes(entry: dict):
+    """Persist the interaction once through the CP's Hermes adapter."""
+    if not CONTROL_PLANE_URL:
         return
     payload = {"node_id": NODE_ID, "entry": entry}
     async with httpx.AsyncClient(timeout=5.0) as client:
-        for peer in boot_peers:
-            try:
-                await client.post(f"{peer.rstrip('/')}/memory/push", json=payload)
-            except Exception:
-                pass
+        response = await client.post(f"{CONTROL_PLANE_URL}/memory/push", json=payload)
+        response.raise_for_status()
 
 # ── METRICHE TOKEN/S ──────────────────────────────────────
 # Estratte dai contatori nativi di Ollama (eval_count/eval_duration) quando
@@ -183,10 +177,10 @@ async def _record_interaction(
     }
     if metrics:
         entry.update(metrics)
-    save_memory(entry)
+    save_interaction(entry)
     await asyncio.gather(
         log_to_control_plane(entry),
-        propagate_to_peers(entry),
+        store_in_hermes(entry),
         return_exceptions=True,
     )
     if interaction_id:
@@ -442,18 +436,19 @@ async def proxy_generic(path: str, request: Request):
 
 # ── ENDPOINTS MEMORIA (letti da altri nodi / dashboard) ─────────
 @app.get("/memory")
-def get_memory(limit: int = 50):
-    """Ultime `limit` interazioni della memoria collettiva locale."""
-    return {"node_id": NODE_ID, "entries": read_memory(limit)}
+async def get_memory(limit: int = 50):
+    """Compatibility view of the authoritative Hermes-backed memory."""
+    if not CONTROL_PLANE_URL:
+        return {"node_id": NODE_ID, "entries": [], "backend": "hermes"}
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.get(f"{CONTROL_PLANE_URL}/memory", params={"limit": limit})
+        response.raise_for_status()
+        return {"node_id": NODE_ID, "entries": response.json().get("entries", []), "backend": "hermes"}
 
 @app.post("/memory/push")
 async def receive_memory(payload: dict):
-    """Riceve una memory entry da un peer e la salva localmente."""
-    entry = payload.get("entry", {})
-    if entry and entry.get("node_id") != NODE_ID:
-        entry["_received_from"] = payload.get("node_id", "unknown")
-        save_memory(entry)
-    return {"ok": True}
+    """Compatibility endpoint; no node-local memory is written."""
+    return {"ok": True, "stored": False, "backend": "hermes"}
 
 if __name__ == "__main__":
     import uvicorn

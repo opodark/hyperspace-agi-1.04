@@ -153,7 +153,7 @@ la cronologia della decisione.
 L'implementazione usa gli stati `hypothesis`, `deferred`, `promoted`,
 `rejected` e `revoked`. Le azioni valide dipendono dallo stato corrente e ogni
 azione richiede una motivazione non vuota. La nota promossa ha ID deterministico
-`insight-<dream-id>`; promozioni e revoche vengono appese a `memory.jsonl`, dove
+`insight-<dream-id>`; promozioni e revoche vengono inviate al backend Hermes, dove
 il retrieval considera soltanto l'ultima versione di ogni ID. Questo mantiene
 la cronologia su disco senza rendere visibile una nota revocata.
 
