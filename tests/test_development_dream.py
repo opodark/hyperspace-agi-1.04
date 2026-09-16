@@ -23,7 +23,7 @@ class FakeSandbox:
                      "diff": "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n", "truncated": False}
                     if self.changed else {"ok": True, "changed_files": [], "diff": ""})
         if action == "run":
-            is_test = args["argv"][:2] == ["python", "-m"]
+            is_test = args["argv"][:2] == ["python3", "-m"]
             return {"ok": self.tests_ok if is_test else True, "output": "ok", "exit_code": 0}
         if action == "discard":
             self.discarded.append(args["workspace_id"])

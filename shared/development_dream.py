@@ -113,7 +113,7 @@ class NightlyDevelopmentDream:
         self.start_hour = max(0, min(int(start_hour), 23))
         self.end_hour = max(0, min(int(end_hour), 24))
         self.idle_seconds = max(300, int(idle_seconds))
-        self.test_argv = list(test_argv or ["python", "-m", "unittest", "discover", "-s", "tests", "-v"])
+        self.test_argv = list(test_argv or ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"])
         self.clock = clock
         self.running = False
         self.error = ""
