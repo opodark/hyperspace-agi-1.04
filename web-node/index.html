@@ -1,16 +1,161 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="it">
 <head>
-    <meta charset="UTF-8">
-    <title>HyperSpace Web Node - 1.04</title>
-    <script>
-        console.log('HyperSpace Web Node initialized - Browser worker ready for HIP tasks');
-        // Register with control plane via WebSocket or fetch
-        // Capabilities: translation, embeddings, etc.
-    </script>
+<meta charset="utf-8">
+<title>HyperSpace Web Node</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 24px;
+         background: #0f1115; color: #e6e8ee; }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.lead { color: #9aa3b2; margin: 0 0 20px; }
+  section { border: 1px solid #232733; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #9aa3b2; margin: 0 0 12px; }
+  label { display: block; margin: 8px 0 4px; color: #c3c9d6; }
+  input[type=text], input[type=url] { width: 100%; padding: 8px 10px; background: #0b0d12;
+        border: 1px solid #2b3040; border-radius: 6px; color: inherit; box-sizing: border-box; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  button { padding: 9px 14px; border-radius: 6px; border: 1px solid #2b3040; background: #171a22;
+           color: inherit; cursor: pointer; }
+  button.primary { background: #2b6cff; border-color: #2b6cff; color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  code { background: #171a22; padding: 1px 5px; border-radius: 4px; }
+  ul#caps { margin: 6px 0 0; padding-left: 18px; }
+  pre#log { background: #0b0d12; border: 1px solid #232733; border-radius: 8px; padding: 12px;
+            max-height: 260px; overflow: auto; font-size: 12px; margin: 0; }
+  .stat { display: flex; gap: 18px; flex-wrap: wrap; color: #c3c9d6; }
+  .stat b { color: #fff; }
+  .warn { color: #ffb454; }
+</style>
 </head>
 <body>
-    <h1>HyperSpace Web Node</h1>
-    <p>Contributing lightweight capabilities to the mesh.</p>
+<main>
+  <h1>HyperSpace Web Node</h1>
+  <p class="lead">
+    Questo tab puo' contribuire alla mesh con task piccoli e sicuri. Non scarica
+    modelli e non esegue codice arbitrario: esegue solo i tipi di task elencati
+    qui sotto, e solo dopo il tuo consenso.
+  </p>
+
+  <section>
+    <h2>1. Cosa puo' fare questo browser</h2>
+    <p>Capability dichiarate alla mesh (rilevate adesso, non promesse):</p>
+    <ul id="caps"></ul>
+    <p class="warn" id="capsNote"></p>
+  </section>
+
+  <section>
+    <h2>2. Consenso</h2>
+    <label><input type="checkbox" id="consent"> Accetto di condividere cicli CPU di questo tab
+      con il mio control-plane HyperSpace mentre la pagina resta aperta.</label>
+    <p class="warn">Chiudendo il tab il nodo sparisce dalla mesh: nessuno stato resta nel browser
+      a parte l'identificativo e il consenso, salvati in <code>localStorage</code>.</p>
+  </section>
+
+  <section>
+    <h2>3. Control plane</h2>
+    <label for="baseUrl">URL del control-plane</label>
+    <input type="url" id="baseUrl" placeholder="http://localhost:8085">
+    <label for="label">Etichetta di questo nodo</label>
+    <input type="text" id="label" placeholder="es. MacBook di Alberto - Chrome">
+    <p>Identificativo: <code id="nodeId">-</code></p>
+    <div class="row">
+      <button class="primary" id="start" disabled>Avvia nodo</button>
+      <button id="stop" disabled>Ferma</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. Stato</h2>
+    <div class="stat">
+      <span>registrato: <b id="registered">no</b></span>
+      <span>completati: <b id="done">0</b></span>
+      <span>falliti: <b id="failed">0</b></span>
+      <span>ultimo task: <b id="lastTask">-</b></span>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script type="module">
+  import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
+
+  const $ = (id) => document.getElementById(id);
+  const log = (message) => {
+    $("log").textContent = `${new Date().toLocaleTimeString()}  ${message}\n` + $("log").textContent;
+  };
+
+  const capabilities = detectCapabilities(globalThis);
+  $("caps").replaceChildren(...capabilities.map((c) => {
+    const li = document.createElement("li");
+    li.textContent = c;
+    return li;
+  }));
+  const canDoModels = capabilities.includes("embed_texts") || capabilities.includes("translate");
+  $("capsNote").textContent = canDoModels ? ""
+    : "Embeddings e traduzione non compaiono perche' questo browser non offre un runtime"
+      + " adatto: il nodo non dichiara capability che non sa servire.";
+
+  const nodeId = localStorage.getItem("hyperspace.webNodeId") || newNodeId();
+  localStorage.setItem("hyperspace.webNodeId", nodeId);
+  $("nodeId").textContent = nodeId;
+  const fromQuery = new URLSearchParams(location.search).get("cp");
+  $("baseUrl").value = fromQuery
+    || localStorage.getItem("hyperspace.webNodeUrl")
+    || `${location.protocol}//${location.hostname}:8085`;
+  $("label").value = localStorage.getItem("hyperspace.webNodeLabel") || "";
+  $("consent").checked = localStorage.getItem("hyperspace.webNodeConsent") === "yes";
+
+  let node = null;
+  const syncButtons = () => {
+    $("start").disabled = !$("consent").checked || Boolean(node && node.state.running);
+    $("stop").disabled = !node || !node.state.running;
+  };
+  $("consent").addEventListener("change", () => {
+    localStorage.setItem("hyperspace.webNodeConsent", $("consent").checked ? "yes" : "no");
+    syncButtons();
+  });
+
+  const render = (state) => {
+    $("registered").textContent = state.registered ? "si" : "no";
+    $("done").textContent = state.tasksDone;
+    $("failed").textContent = state.tasksFailed;
+    $("lastTask").textContent = state.lastTask ? state.lastTask.type : "-";
+    syncButtons();
+  };
+
+  $("start").addEventListener("click", async () => {
+    $("start").disabled = true;
+    try {
+      localStorage.setItem("hyperspace.webNodeUrl", $("baseUrl").value.trim());
+      localStorage.setItem("hyperspace.webNodeLabel", $("label").value.trim());
+      node = new WebNode({
+        baseUrl: $("baseUrl").value.trim(),
+        nodeId,
+        label: $("label").value.trim(),
+        consent: $("consent").checked,
+        onState: render,
+      });
+      await node.start();
+      log(`nodo avviato, capability: ${node.capabilities.join(", ") || "nessuna"}`);
+    } catch (error) {
+      log(`avvio fallito: ${error.message}`);
+    }
+    syncButtons();
+  });
+
+  $("stop").addEventListener("click", () => {
+    if (node) node.stop();
+    log("nodo fermato");
+    syncButtons();
+  });
+
+  window.addEventListener("beforeunload", () => { if (node) node.stop(); });
+  log(`pronto. browser: ${navigator.userAgent}`);
+  syncButtons();
+</script>
 </body>
 </html>
+

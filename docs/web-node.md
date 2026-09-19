@@ -31,13 +31,35 @@ The browser node should not assume Docker, local model installs, or privileged s
 
 ## Interface with the control plane
 
-The web node should:
+The web node cannot be addressed by the control plane: a browser tab has no
+inbound HTTP endpoint. The direction is therefore inverted — the node
+registers, then *pulls* work with a long poll and publishes results. This is
+the same pattern the offline code sandbox runner already uses.
 
-1. register itself with a node id,
-2. declare capabilities and resource limits,
-3. receive a task envelope,
-4. execute the small task locally,
-5. return the result to the control plane.
+Implemented endpoints (all JSON, all under the control plane):
+
+| Endpoint         | Caller       | Purpose                                              |
+|------------------|--------------|------------------------------------------------------|
+| `POST /web/register` | node     | node id, capabilities, limits; also appears in the mesh list |
+| `POST /web/poll`     | node     | long poll (`timeout_s`), returns one task or `null`  |
+| `POST /web/result`   | node     | success or failure for the task that was in flight   |
+| `POST /web/tasks`    | operator | enqueue a web-safe task (needs `X-Hyperspace-Network-Token`) |
+| `GET  /web/status`   | dashboard| nodes, queue depth, in-flight and recent results     |
+
+Four rules are enforced on the control plane side, not trusted to the client:
+
+1. only task types in the web-safe whitelist can be enqueued, so heavy
+   inference can never land on a browser tab;
+2. a node only receives types it declared, and declarations are intersected
+   with the whitelist at registration;
+3. at most one task is in flight per node, so a slow tab can never be given
+   the same work twice;
+4. every queue, payload, task TTL and poll duration is bounded.
+
+Long polling costs a control-plane thread for up to `WEB_NODE_MAX_POLL_S`
+seconds, so the server must run multi-threaded; otherwise two web nodes block
+each other. `_best_endpoint` returns an empty string for `browser://` nodes,
+which keeps them out of every addressable-node filter — chat routing included.
 
 ## Deployment modes
 
@@ -52,3 +74,31 @@ The web node can also be published from a central landing page as the free/publi
 ## Design rule
 
 The browser node should stay small, safe, and optional. It is an addition to the mesh, not a replacement for the main execution runtimes.
+
+## Status (2026-09-19)
+
+Implemented: registration with capability negotiation, the full pull cycle,
+the control-plane queue with its whitelist and limits, the consent gate, and a
+Node test suite that runs without a browser.
+
+Honest limits, stated here so they are not discovered later:
+
+- `summarize` is extractive (term frequency), not abstractive;
+- `validate_json` covers a minimal subset of structural validation, not JSON
+  Schema;
+- `moderate` is a pattern heuristic over secrets and personal data — it is
+  **not** a content classifier and must not be used as a policy filter;
+- `translate` and `embed_texts` exist only when the host injects a runtime, or
+  the browser exposes its own translation API; the node never declares a
+  capability it cannot serve;
+- the extension is a launcher: MV3 service workers are suspended, so they
+  cannot hold the long poll. The supported runtime is the standalone page.
+
+Verification:
+
+```bash
+node web-node/tests/web-node.test.mjs      # 24 check, no browser needed
+node tests/dashboard.test.cjs
+.venv/bin/python -m unittest discover -s tests
+.venv/bin/python scripts/verify_web_node_e2e.py   # sull'app vera, richiede flask+cryptography
+```

@@ -84,20 +84,36 @@ POST /register
 
 ## Folder Structure
 
-Target layout above is not built yet. What actually exists today (2026-09):
+Target layout above is not built yet. What actually exists today (2026-09-19):
 
 ```
 web-node/
 ├── README.md
-├── index.html
+├── package.json                 # "type": "module", script test/check
+├── index.html                   # UI di consenso, configurazione e stato
 ├── src/
-│   └── index.js               # registerWebNode()/handleTask() stubs, both TODO
-└── apps/
-    └── extension/
-        └── manifest.json       # bare MV3 manifest, name only — no background/popup
+│   ├── protocol.js              # envelope, validazione, versione protocollo
+│   ├── capabilities.js          # rilevamento ONESTO delle capability del browser
+│   ├── task-runner.js           # handler web-safe (summarize/validate_json/moderate/...)
+│   ├── transport.js             # register/poll/result, fetch iniettabile
+│   └── index.js                 # WebNode: consenso, long-poll, ciclo di lavoro
+├── apps/extension/
+│   ├── manifest.json            # MV3 con popup e host_permissions
+│   ├── popup.html
+│   └── popup.js                 # lanciatore: il runtime resta la pagina
+└── tests/
+    └── web-node.test.mjs        # 24 check, senza browser e senza dipendenze
 ```
 
-No `package.json`, no `task-runner.js`/`capabilities.js`/`protocol/`, no `tests/`. Treat everything below this point as the design target, not a status report.
+Il runtime supportato e' la **pagina** (`index.html`): un service worker MV3
+viene sospeso dal browser e non puo' sostenere il long-poll che tiene il nodo
+vivo nella mesh. Per questo l'estensione apre e controlla la pagina invece di
+ospitare il nodo — e' una scelta deliberata, non una scorciatoia.
+
+Lato control-plane: `shared/web_node.py` (registry e coda dei task), le route
+`/web/register`, `/web/poll`, `/web/result`, `/web/tasks`, `/web/status`, e i
+test `tests/test_web_node.py` + `tests/test_web_node_routes.py`. La verifica
+end-to-end sull'app vera sta in `scripts/verify_web_node_e2e.py`.
 
 ## Security & Constraints
 
@@ -115,10 +131,23 @@ No `package.json`, no `task-runner.js`/`capabilities.js`/`protocol/`, no `tests/
 4. Browser Extension packaging
 5. Capability declaration UI (for user consent)
 
-## Status (as of 2026-09)
+## Status (as of 2026-09-19)
 
-- Technical specification defined (this document)
-- Bare skeleton only: stub `registerWebNode()`/`handleTask()` (both TODO, no real logic), a two-key manifest
-- No registration, task envelope handling, runtime integration, or extension packaging implemented yet
+- Registrazione con capability, heartbeat e ciclo di lavoro: implementati
+- Coda lato control-plane con whitelist dei task web-safe, limiti di coda,
+  payload e TTL, e un solo task in volo per nodo (mai doppia consegna)
+- Un web node non e' indirizzabile e `_best_endpoint` lo esclude dal routing
+  chat: prima annunciava `browser://<id>` e il control-plane provava davvero a
+  chiamare `http://browser://<id>/v1/chat/completions`
+- Handler implementati: `summarize` (estrattivo), `validate_json` (sottoinsieme
+  minimo di validazione), `moderate` (euristica sui pattern, dichiarata tale).
+  `translate` ed `embed_texts` girano solo con un runtime iniettato: il nodo non
+  dichiara capability che non sa servire
+- Consenso esplicito obbligatorio: `new WebNode({consent: false})` non parte
+- Test: 24 check JS (`npm test`, senza browser) + 33 Python nella suite
+  principale + `scripts/verify_web_node_e2e.py` sull'app vera
+- Non implementato: WebSocket (il long-poll e' la scelta deliberata, l'estensione
+  non puo' sostenere una connessione persistente), pubblicazione sullo store,
+  e embeddings reali senza portare un runtime di modelli nel browser
 
 This component is intentionally kept small and optional. It is an **addition** to the mesh, not a core dependency.
