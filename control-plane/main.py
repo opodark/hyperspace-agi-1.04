@@ -299,7 +299,7 @@ _TOOL_CAPABLE_PATTERNS = [
     "qwen3", "qwen2.5", "llama3.1", "llama3.2", "llama3.3",
     "mistral-nemo", "mistral-small", "mixtral",
     "command-r", "firefunction", "functionary",
-    "hermes", "nexusraven", "gorilla",
+    "hermes", "nexusraven", "gorilla", "gemma4", "deepseek-r1",
     "phi4",
 ]
 # Varianti vision (es. qwen2.5vl) non supportano le tool call di Ollama anche
@@ -319,6 +319,57 @@ def _model_supports_tools(model_name: str) -> bool:
     if any(p in m for p in _VISION_PATTERNS):
         return False
     return any(p in m for p in _TOOL_CAPABLE_PATTERNS)
+
+def _requested_thinking(data: dict, messages: list) -> bool:
+    """Legge la richiesta di reasoning ESPLICITA del client (flag JSON `think`
+    oppure direttive /think e /no_think nell'ultimo messaggio utente).
+
+    Ritorna None quando il client non ha espresso alcuna preferenza: in quel
+    caso la decisione spetta al control-plane (vedi _decide_thinking), non al
+    default del backend. Distinguere "non richiesto" da "richiesto False" e'
+    essenziale: solo cosi' il CP puo' imporre reasoning OFF quando servono i
+    tool senza sovrascrivere una scelta esplicita dell'utente."""
+    requested = data.get("think")
+    if isinstance(requested, bool):
+        return requested
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if "/no_think" in content.lower():
+                return False
+            if "/think" in content.lower():
+                return True
+        break
+    return None
+
+
+def _decide_thinking(model: str, data: dict, messages: list, tools: list) -> bool:
+    """Decisione UNICA del control-plane su reasoning on/off per questa richiesta.
+
+    Principio: il CP e' l'unico a decidere se il modello deve ragionare, se puo'
+    chiamare tool e quali skill esporre. Il backend (Ollama/nodo) non deve mai
+    prendere questa decisione da solo.
+
+    Regole, in ordine di priorita':
+      1. Se ci sono tool disponibili, il reasoning va SPENTO. Qwen3 (e i modelli
+         reasoning in generale) con thinking attivo tende a rispondere a memoria
+         invece di emettere tool_calls: reasoning e tool-calling sono di fatto
+         mutuamente esclusivi. Se l'utente vuole una ricerca, deve vincere il
+         tool-calling.
+      2. Altrimenti vale la richiesta esplicita del client (/think, /no_think,
+         flag JSON `think`).
+      3. Altrimenti reasoning OFF: default prudente e deterministico, coerente
+         con "il CP decide", non con il default implicito del backend.
+    """
+    if tools:
+        return False
+    explicit = _requested_thinking(data, messages)
+    if explicit is not None:
+        return explicit
+    return False
+
 
 tasks: dict = {}
 _nodes_by_id: dict  = {}
@@ -1554,7 +1605,40 @@ def v1_chat_completions():
         clean_model = raw_model[len(MESH_MODEL_ICON):] if raw_model.startswith(MESH_MODEL_ICON) else raw_model
         model, pinned_node_id = _parse_model_node_ref(clean_model)
     data      = {**data, "model": model}   # a valle il nodo riceve solo il nome modello "pulito"
+
+    # ── DECISIONE DEL CONTROL-PLANE: tool e reasoning ────────────────────────
+    # Il CP è l'unico a decidere se questa richiesta può chiamare tool e se il
+    # modello deve ragionare. Il backend (nodo/Ollama) non deve mai prendere
+    # questa decisione da solo: senza un `think` esplicito, Qwen3 attiva il
+    # reasoning di default e — con reasoning attivo — NON emette tool_calls,
+    # rispondendo a memoria. È il bug per cui "cerca su internet X" non
+    # attivava mai web_search.
+    #
+    # 1. Tool: se il modello è tool-capable, il CP inietta i BUILTIN_TOOLS
+    #    (web_search, omega_*, get_mesh_status + connettori) accanto a quelli
+    #    eventualmente già passati dal client, senza duplicarli.
+    # 2. Reasoning: deciso da _decide_thinking() — OFF quando ci sono tool
+    #    (reasoning e tool-calling sono mutuamente esclusivi), altrimenti
+    #    rispetta la richiesta esplicita del client, altrimenti OFF.
+    tools_available = []
+    if _model_supports_tools(model):
+        client_tools = data.get("tools") or []
+        client_names = {t.get("function", {}).get("name") for t in client_tools}
+        tools_available = client_tools + [
+            tool for tool in BUILTIN_TOOLS
+            if tool["function"]["name"] not in client_names
+        ]
+        data["tools"] = tools_available
+    else:
+        data.pop("tools", None)
+
+    data["think"] = _decide_thinking(model, data, messages, tools_available)
+    push_log('system',
+             f'CP decision: model={model} tools={len(tools_available)} think={data["think"]}',
+             status='info')
+
     stream    = data.get("stream", False)
+
     task_id   = str(uuid.uuid4())[:8]
 
     prompt = ""
@@ -1595,6 +1679,7 @@ def v1_chat_completions():
     ollama_base = advanced_config["ollama"]["url"].rstrip("/")
 
     # ── STREAM ────────────────────────────────────────────────────────────────
+
     # NOTA: lo streaming oggi resta locale (nodo o ollama-direct). La
     # federazione verso un altro CP entra in gioco solo nel percorso
     # non-stream — proxare uno stream SSE cross-CP e' un passo successivo.
@@ -1639,6 +1724,48 @@ def v1_chat_completions():
                     task["status"] = "failed"
                     db.update_task(task_id, "failed", error=str(e))
                 return
+
+            # Il backend Ollama puo' emettere tool_calls nello stream, ma il
+            # dispatcher non puo' eseguire il tool dopo aver gia' inoltrato i
+            # chunk al client. Per i modelli tool-capable usa quindi il loop
+            # non-streaming interno e riconfeziona solo il risultato finale
+            # come SSE: web_search viene realmente eseguito anche da WebUI.
+            if model.lower().startswith("qwen3") or _model_supports_tools(model):
+                for candidate in candidates:
+                    node_id_c = candidate.get("node_id", "cp")
+                    endpoint_c = _best_endpoint(candidate)
+                    _record_routing_pick(node_id_c)
+                    try:
+                        result_json = _run_tool_loop(
+                            stream_data, endpoint_c, sign=True, node_id=node_id_c
+                        )
+                    except NodeBusyError:
+                        continue
+                    except Exception:
+                        continue
+                    if isinstance(result_json, dict) and result_json.get("error"):
+                        continue
+                    message = ((result_json.get("choices") or [{}])[0] or {}).get("message") or {}
+                    content = message.get("content") or message.get("reasoning_content") or ""
+                    chunk = {
+                        "id": result_json.get("id", f"chatcmpl-{task_id}"),
+                        "object": "chat.completion.chunk",
+                        "created": result_json.get("created", int(time.time())),
+                        "model": result_json.get("model", model),
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }],
+                    }
+                    task["node"] = node_id_c
+                    db.update_task(task_id, "assigned", node_id=node_id_c, endpoint=endpoint_c)
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
+                    yield b"data: [DONE]\n\n"
+                    task["status"] = "done"
+                    task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    db.update_task(task_id, "done")
+                    return
 
             served = False
             for candidate in candidates:
@@ -1691,11 +1818,52 @@ def v1_chat_completions():
             task["node"] = "ollama-direct"
             db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
             try:
-                req = requests.post(f"{ollama_base}/v1/chat/completions", json=stream_data, stream=True, timeout=180)
-                with req as resp:
-                    for chunk in resp.iter_content(chunk_size=None):
-                        if chunk:
-                            yield chunk
+                if model.lower().startswith("qwen3"):
+                    # Fallback nativo (/api/chat) per qwen3, usato SOLO quando
+                    # non c'e' nessun nodo mesh disponibile. Anche il body
+                    # nativo accetta i tool nello stesso formato funzione
+                    # dell'API OpenAI, quindi li inoltriamo: senza di essi il
+                    # modello non potrebbe mai chiamare web_search in questo
+                    # percorso (il vecchio ramo li ometteva del tutto).
+                    native = {"model": model, "messages": stream_data.get("messages", []),
+                              "stream": False, "think": bool(stream_data.get("think", False))}
+                    if stream_data.get("tools"):
+                        native["tools"] = stream_data["tools"]
+                    native_resp = requests.post(f"{ollama_base}/api/chat", json=native, timeout=180)
+                    native_message = (native_resp.json().get("message") or {})
+                    if native_message.get("tool_calls"):
+                        # Il modello vuole chiamare un tool. Il percorso nativo
+                        # accetta i tool in INGRESSO (stesso formato OpenAI), ma
+                        # NON regge il formato OpenAI del secondo giro: il tool
+                        # loop rimanda `function.arguments` come STRINGA JSON e
+                        # /api/chat risponde 400 ("Value looks like object, but
+                        # can't find closing '}' symbol"). Era la causa del bug
+                        # "risposta vuota dopo web_search". Per ESEGUIRE davvero
+                        # i tool riusiamo quindi il loop del CP, che qui parla
+                        # con Ollama diretto (sign=False: nessun nodo da
+                        # autenticare). Cosi' anche questo fallback non
+                        # restituisce mai un content vuoto dopo una tool call.
+                        # Verificato su Ollama 0.34.2.
+                        result_json = _run_tool_loop(stream_data, ollama_base)
+                        message = ((result_json.get("choices") or [{}])[0] or {}).get("message") or {}
+                        direct_content = message.get("content") or message.get("reasoning_content") or ""
+                    else:
+                        direct_content = native_message.get("content", "")
+                    direct_chunk = {
+                        "id": f"chatcmpl-{task_id}", "object": "chat.completion.chunk",
+                        "created": int(time.time()), "model": model,
+                        "choices": [{"index": 0, "delta": {
+                            "role": "assistant", "content": direct_content},
+                            "finish_reason": "stop"}],
+                    }
+                    yield f"data: {json.dumps(direct_chunk, ensure_ascii=False)}\n\n".encode()
+                    yield b"data: [DONE]\n\n"
+                else:
+                    req = requests.post(f"{ollama_base}/v1/chat/completions", json=stream_data, stream=True, timeout=180)
+                    with req as resp:
+                        for chunk in resp.iter_content(chunk_size=None):
+                            if chunk:
+                                yield chunk
                 task["status"]       = "done"
                 task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 db.update_task(task_id, "done")

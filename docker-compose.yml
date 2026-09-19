@@ -175,7 +175,7 @@ services:
       CP_URL:           "http://control-plane:8085"
       VAULT_PATH:       "/vault"
       EXPORT_INTERVAL:  "${MEMORY_EXPORT_INTERVAL:-30}"
-      TITLER_ENABLED:   "${TITLER_ENABLED:-true}"
+      TITLER_ENABLED:   "${TITLER_ENABLED:-false}"
       TITLER_MODEL:     "${TITLER_MODEL:-qwen2:0.5b}"
       PYTHONUNBUFFERED: "1"
     extra_hosts:
@@ -358,6 +358,7 @@ services:
       # modello e' lento (es. varianti "abliterated"/reasoning). Disattivata
       # per non competere con la risposta vera.
       ENABLE_TITLE_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

@@ -1,0 +1,2 @@
+FROM qwen3:8b-original
+PARAMETER num_ctx 16384

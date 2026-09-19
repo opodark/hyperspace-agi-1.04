@@ -348,7 +348,21 @@ async def proxy_openai_chat(request: Request):
     t0 = time.time()
     iid = str(uuid.uuid4())
 
+    # NOTA: non instradiamo più qwen3 sul percorso nativo /api/chat. Quel
+    # workaround esisteva perché l'endpoint OpenAI-compatibile di Ollama non
+    # inoltrava `think: false` e restituiva solo il campo reasoning. Ora è il
+    # control-plane a decidere esplicitamente `think` (vedi _decide_thinking in
+    # control-plane/main.py): verificato su Ollama 0.34.2 che con think=false il
+    # campo `reasoning` resta popolato, ma i tool_calls vengono emessi comunque,
+    # nel formato giusto (`function.arguments` come stringa JSON). Il percorso
+    # nativo, invece, accetta i tool in ingresso ma NON regge il formato OpenAI
+    # del secondo giro (assistant con tool_calls + role:tool): risponde 400
+    # "Value looks like object, but can't find closing '}' symbol" — era la
+    # causa del bug "risposta vuota dopo web_search". Un solo percorso, quello
+    # OpenAI-compatibile.
+
     if stream:
+
         # Chiediamo a Ollama di riportare gli usage token nell'ultimo chunk SSE
         # (supportato dal suo endpoint OpenAI-compatibile). Se il backend non lo
         # supporta, l'unico effetto collaterale è che quel campo resta assente:
