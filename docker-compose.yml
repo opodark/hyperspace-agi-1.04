@@ -423,6 +423,16 @@ services:
       # dalla tab Setup: le modifiche alle env var vengono applicate a runtime
       # e persistite qui, così sopravvivono al riavvio del container.
       - .:/repo
+      # ...e /app/data, dove vivono TRE cose che senza volume sono effimere:
+      # il database (task, log, alias, peer federati), node_identity.json e
+      # node_private.pem — cioe' la CHIAVE ECDSA con cui il CP firma verso gli
+      # altri CP. Senza questo mount ogni `docker compose up -d --build` li
+      # azzerava: verificato, il peer_id del CP e' cambiato da
+      # 225378a217ffe488... a 7fdd15a5491e3640... a un rebuild di distanza, e un
+      # peer gia' accoppiato non avrebbe piu' riconosciuto questo CP.
+      # Il nodo (./data/node-1) e il compose Windows (${HS_DATA_DIR}) lo fanno
+      # gia': qui mancava solo al control-plane.
+      - ./data/control-plane:/app/data
       - sandbox_exchange:/sandbox-exchange
     environment:
       PYTHONUNBUFFERED: "1"

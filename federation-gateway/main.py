@@ -52,6 +52,17 @@ CP_URL = os.getenv("CP_URL", "http://control-plane:8085").rstrip("/")
 # né /bottles/announce (azione admin, vedi commento in cima al file).
 ALLOWED_ROUTES = {
     ("POST", "/federate/execute"),
+    # /federate/view e' l'unica rotta federata in LETTURA: restituisce a un peer
+    # ACCOPPIATO un'istantanea di nodi, modelli, task e log di questo CP
+    # (docs/control-plane-sync.md). Sta in whitelist perche' il CP la verifica da
+    # solo con firma ECDSA + allowlist, esattamente come /federate/execute: il
+    # gateway non aggiunge fiducia, toglie superficie. Nota: condivide solo se
+    # FEDERATION_VIEW_ENABLED=true sul CP, che di default e' false — quindi la
+    # rotta e' raggiungibile ma risponde 403 finche' l'operatore non lo decide.
+    # /federation/views NON e' qui, ed e' deliberato: quella e' la vista
+    # aggregata per la dashboard interna, e da fuori diventeremmo una sonda
+    # verso i peer federati per chiunque.
+    ("GET",  "/federate/view"),
     ("GET",  "/federation/identity"),
     ("POST", "/bottles/publish"),
     ("GET",  "/bottles/list"),

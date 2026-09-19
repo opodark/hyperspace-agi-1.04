@@ -236,6 +236,16 @@ NIGHTLY_DEV_DATA_DIR     = os.getenv("NIGHTLY_DEV_DATA_DIR", "/app/data")
 #                         pairing. Vuoto finché non hai un gateway pubblico attivo.
 FEDERATION_ENABLED    = os.getenv("FEDERATION_ENABLED", "true").lower() == "true"
 FEDERATION_PUBLIC_URL = os.getenv("FEDERATION_PUBLIC_URL", "").rstrip("/")
+# FEDERATION_VIEW_ENABLED : false (default) — condivisione in LETTURA della vista
+#   di questo CP verso i peer ACCOPPIATI (dashboard unica su piu' CP, vedi
+#   docs/control-plane-sync.md). Spento di default perche' e' una decisione sui
+#   DATI, non sull'esecuzione: /federate/execute presta a un peer il tuo calcolo,
+#   la vista gli mostra le tue informazioni (nodi, modelli, task, righe di log).
+#   Non e' mai anonima: risponde solo a un peer in allowlist con firma ECDSA
+#   valida, la stessa verifica di /federate/execute. Nessun modello di sicurezza
+#   nuovo: la scelta e' se condividere, non con chi.
+FEDERATION_VIEW_ENABLED = os.getenv("FEDERATION_VIEW_ENABLED", "false").lower() == "true"
+FEDERATION_VIEW_TTL_S   = int(os.getenv("FEDERATION_VIEW_TTL_S", "10"))
 
 # ── NODO ROOT/HUB LOCALE ─────────────────────────────────────────────────────
 # LOCAL_NODE_ID       : ID stabile (default: identita persistente del control-plane)
@@ -3787,6 +3797,14 @@ _ENV_META = [
      "label": "URL pubblico del federation-gateway",
      "hint": "URL pubblico del TUO federation-gateway (non del CP!): quello da condividere con l'admin di un altro sito per il pairing. Vuoto finché non hai un gateway pubblico attivo.",
      "default": ""},
+    {"section": "Federazione CP-to-CP", "key": "FEDERATION_VIEW_ENABLED", "type": "bool",
+     "label": "Condividi la vista con i peer",
+     "hint": "Ogni peer ACCOPPIATO (pairing firmato, mai auto-discovery) può leggere un'istantanea di nodi, modelli, task recenti e righe di log di questo CP, per una dashboard unica su più control-plane. Read-only e mai anonima: risponde solo a un peer in allowlist con firma valida. Spento = nessuno legge nulla.",
+     "default": "false"},
+    {"section": "Federazione CP-to-CP", "key": "FEDERATION_VIEW_TTL_S", "type": "int",
+     "label": "Cache vista peer (secondi)",
+     "hint": "Per quanti secondi si riusa una vista già scaricata da un peer prima di richiederla. La dashboard interroga /federation/views in polling: un valore basso = dati più freschi e più traffico verso i peer.",
+     "default": "10"},
     # Mesh
     {"section": "Mesh", "key": "NODE_ENDPOINTS", "type": "str",
      "label": "Endpoint nodi (virgola)",
@@ -3843,6 +3861,8 @@ _ENV_RUNTIME_GET = {
     "PROMPT_COMPRESSION_MIN_CHARS": lambda: PROMPT_COMPRESSION_MIN_CHARS,
     "FEDERATION_ENABLED": lambda: FEDERATION_ENABLED,
     "FEDERATION_PUBLIC_URL": lambda: FEDERATION_PUBLIC_URL,
+    "FEDERATION_VIEW_ENABLED": lambda: FEDERATION_VIEW_ENABLED,
+    "FEDERATION_VIEW_TTL_S": lambda: FEDERATION_VIEW_TTL_S,
     "NODE_ENDPOINTS": lambda: ",".join(NODE_ENDPOINTS),
     "TOOL_CAPABLE_MODELS": lambda: _TOOL_CAPABLE_OVERRIDE,
     "NATIVE_CHAT_FALLBACK_MODELS": lambda: _NATIVE_CHAT_FALLBACK_OVERRIDE,
@@ -3875,7 +3895,7 @@ def _apply_env_runtime(meta: dict, cv) -> None:
     global METRICS_MAX_WORKERS, METRICS_BACKOFF_BASE_S, METRICS_MAX_BACKOFF_S
     global OMNIROUTE_URL, OMNIROUTE_API_KEY, OMNIROUTE_MODEL, OMNIROUTE_ENABLED
     global PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MODE, PROMPT_COMPRESSION_MIN_CHARS
-    global FEDERATION_ENABLED, FEDERATION_PUBLIC_URL
+    global FEDERATION_ENABLED, FEDERATION_PUBLIC_URL, FEDERATION_VIEW_ENABLED, FEDERATION_VIEW_TTL_S
     global NODE_ENDPOINTS, _TOOL_CAPABLE_OVERRIDE, _NATIVE_CHAT_FALLBACK_OVERRIDE, _ROUTING_WEIGHTS, _SCORE_CACHE_TTL
 
     key = meta["key"]
@@ -3935,6 +3955,12 @@ def _apply_env_runtime(meta: dict, cv) -> None:
         FEDERATION_ENABLED = bool(cv)
     elif key == "FEDERATION_PUBLIC_URL":
         FEDERATION_PUBLIC_URL = str(cv).rstrip("/")
+    elif key == "FEDERATION_VIEW_ENABLED":
+        FEDERATION_VIEW_ENABLED = bool(cv)
+        _VIEW_CACHE["data"] = None    # il flag cambia cosa gli altri vedono: cache fuori
+    elif key == "FEDERATION_VIEW_TTL_S":
+        FEDERATION_VIEW_TTL_S = max(0, int(cv))
+        _VIEW_CACHE["data"] = None
     elif key == "NODE_ENDPOINTS":
         NODE_ENDPOINTS = [e.strip() for e in str(cv).split(",") if e.strip()]
         for ep in NODE_ENDPOINTS:
@@ -4336,6 +4362,276 @@ def federate_execute():
              f'Task federato {task_id} da {peer.get("label") or sender_id[:12]} -> {selected.get("node_id","?")[:12]}',
              status='success')
     return jsonify({"task_id": task_id, "status": "done", "result": result})
+
+# ── VISTA FEDERATA (read-only) ────────────────────────────────────────────────
+# Perche' esiste: i NODI sono gia' condivisi fra CP diversi (auto-discovery dal
+# registry + heartbeat_loop che pinga gli endpoint noti), quindi l'elenco dei
+# modelli e le decisioni di routing coincidono gia'. Quello che un CP non puo'
+# sapere di un altro e' cio' che vive nel SUO database locale: task, log, web
+# node, alias, contatori. Ogni dashboard mostra solo il proprio.
+#
+# Qui quella parte si condivide in LETTURA, e solo con i peer ACCOPPIATI (mai
+# auto-discovery: vedi il commento su federated_peers in shared/db.py), riusando
+# la firma ECDSA di /federate/execute: nessun modello di sicurezza nuovo.
+#
+# Cosa esce e cosa NON esce. La tabella `tasks` ha le colonne `prompt`, `result`
+# e `error` col TESTO delle richieste e delle risposte; i log hanno `summary` e
+# `detail`, dove finiscono i payload. Le righe del DB quindi non si serializzano
+# MAI intere: i campi si elencano uno per uno — se domani si aggiunge una colonna
+# con dentro un prompt, non esce da sola — e i messaggi si troncano. Il confine
+# e' "metadati si', contenuto no".
+
+_VIEW_CACHE = {"ts": 0.0, "data": None}
+_VIEW_SUMMARY_MAX = 160
+
+
+def _view_summary(text) -> str:
+    """Messaggio di log su una riga e accorciato.
+
+    Nota onesta: questo TRONCA, non maschera. Se un log contiene testo di prompt
+    o di risposta (i log di interazione dei nodi), quei 160 caratteri escono. E'
+    il motivo per cui la condivisione della vista e' spenta di default: la
+    decisione se condividere quel contenuto e' dell'operatore, non del codice.
+    """
+    flat = " ".join(str(text or "").split())
+    return flat[:_VIEW_SUMMARY_MAX] + ("..." if len(flat) > _VIEW_SUMMARY_MAX else "")
+
+
+def _cp_view_snapshot(log_limit: int = 40, task_limit: int = 40) -> dict:
+    """Istantanea read-only di quello che sa questo CP (vedi confine sopra)."""
+    warnings = []
+    nodes = []
+    for node in _node_list():
+        nodes.append({
+            "node_id":     node.get("node_id", ""),
+            "alias":       node.get("alias", ""),
+            "label":       node.get("label", ""),
+            "tier":        node.get("tier", ""),
+            "status":      node.get("status", ""),
+            "endpoint":    _best_endpoint(node) or "",
+            "vram_gb":     node.get("vram_gb", 0) or 0,
+            "uptime_s":    node.get("uptime_s", 0) or 0,
+            "is_web_node": bool(node.get("is_web_node")),
+            "last_seen":   node.get("last_seen", ""),
+        })
+    nodes.sort(key=lambda n: (n["status"] != "active", n["node_id"]))
+
+    try:
+        agg = _aggregate_mesh_models()
+        models = {"bare": list(agg.get("bare") or []),
+                  "per_node": [e.get("id", "") for e in (agg.get("per_node") or [])]}
+    except Exception as exc:
+        models = {"bare": [], "per_node": []}
+        warnings.append(f"modelli non disponibili: {exc}")
+
+    tasks = []
+    try:
+        for row in (db.get_all_tasks() or [])[:max(0, task_limit)]:
+            tasks.append({
+                "task_id":      row.get("task_id", ""),
+                "status":       row.get("status", ""),
+                "node_id":      row.get("node_id", ""),
+                "model":        row.get("model", ""),
+                "created_at":   row.get("created_at", ""),
+                "completed_at": row.get("completed_at", ""),
+            })
+    except Exception as exc:
+        warnings.append(f"task non disponibili: {exc}")
+
+    logs = []
+    try:
+        for row in (db.query_logs(page=1, per_page=max(1, log_limit)) or []):
+            logs.append({
+                "ts":      row.get("ts", ""),
+                "type":    row.get("type", ""),
+                "status":  row.get("status", ""),
+                "source":  row.get("source", ""),
+                "target":  row.get("target", ""),
+                "summary": _view_summary(row.get("summary", "")),
+            })
+    except Exception as exc:
+        warnings.append(f"log non disponibili: {exc}")
+
+    return {
+        "cp_id":        CP_ID,
+        "pubkey":       CP_PUBKEY,
+        "version":      "1.05",
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "federation":   {"enabled": FEDERATION_ENABLED, "public_url": FEDERATION_PUBLIC_URL},
+        "nodes":        nodes,
+        "models":       models,
+        "tasks":        tasks,
+        "logs":         logs,
+        "warnings":     warnings,
+        "counts": {
+            "nodes":     len(nodes),
+            "active":    len([n for n in nodes if n["status"] == "active"]),
+            "web_nodes": len([n for n in nodes if n["is_web_node"]]),
+            "models":    len(models.get("bare") or []),
+            "tasks":     len(tasks),
+            "logs":      len(logs),
+        },
+    }
+
+
+def _merge_views(local: dict, peers: list) -> dict:
+    """Unisce la vista locale con quelle dei peer, tenendo la provenienza.
+
+    I nodi si deduplicano per node_id (lo stesso nodo compare in piu' viste, una
+    per CP che lo vede) ma si conserva CHI lo vede: una dashboard puo' cosi'
+    scrivere "visto da entrambi" invece di due righe identiche, e soprattutto
+    "visto da uno solo" — che e' la divergenza da guardare.
+    I modelli si uniscono. Task e log NON si fondono in un flusso unico: sono
+    storie locali di CP diversi, e mescolarle falsificherebbe la loro sequenza.
+    """
+    sources, seen_by, models = [], {}, set()
+    peers_ok = [p for p in (peers or []) if p.get("ok") and p.get("view")]
+    items = [{"kind": "local", "label": "locale", "view": local}] + [
+        {"kind": "peer", "label": p.get("label") or (p.get("peer_id") or "?")[:8],
+         "view": p.get("view")} for p in peers_ok]
+
+    for src in items:
+        view = src["view"] or {}
+        sources.append({"kind": src["kind"], "label": src["label"],
+                        "cp_id": view.get("cp_id", ""), "counts": view.get("counts", {})})
+        for node in view.get("nodes") or []:
+            nid = node.get("node_id", "")
+            if not nid:
+                continue
+            entry = seen_by.setdefault(nid, {
+                "node_id":     nid,
+                "alias":       node.get("alias", ""),
+                "tier":        node.get("tier", ""),
+                "status":      node.get("status", ""),
+                "is_web_node": bool(node.get("is_web_node")),
+                "seen_by":     [],
+            })
+            if src["label"] not in entry["seen_by"]:
+                entry["seen_by"].append(src["label"])
+        for name in (view.get("models") or {}).get("bare") or []:
+            models.add(name)
+
+    nodes = sorted(seen_by.values(), key=lambda n: (n["status"] != "active", n["node_id"]))
+    return {
+        "sources": sources,
+        "nodes":   nodes,
+        "models":  sorted(models),
+        "counts": {
+            "sources": len(sources),
+            "nodes":   len(nodes),
+            "models":  len(models),
+            # Un nodo visto da un CP solo e' l'indizio che i due non stanno
+            # guardando la stessa mesh: e' il numero da tenere d'occhio.
+            "nodes_partial": len([n for n in nodes if len(n["seen_by"]) < len(sources)]),
+        },
+    }
+
+
+def _fetch_peer_view(peer: dict, timeout: int = 6):
+    """Chiede la vista a un peer. Ritorna `(vista, errore)`, uno dei due None.
+
+    La richiesta e' firmata come _federate_to_peer: e' il peer a decidere se
+    rispondere, verificando firma e allowlist dalla sua parte (mai da questa).
+    """
+    endpoint = str(peer.get("endpoint", "") or "").rstrip("/")
+    if not endpoint:
+        return None, "endpoint mancante"
+    headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, b"")
+    try:
+        r = requests.get(f"{endpoint}/federate/view", headers=headers, timeout=timeout)
+        r.raise_for_status()
+        db.touch_federated_peer(peer["peer_id"], "ok")
+        return r.json(), None
+    except Exception as e:
+        db.touch_federated_peer(peer["peer_id"], "unreachable")
+        return None, str(e)
+
+
+@app.route('/federate/view')
+def federate_view():
+    """La vista di questo CP, leggibile dai SOLI peer accoppiati (read-only).
+
+    Verifica identica a /federate/execute e nello stesso ordine: federazione
+    attiva, peer in allowlist, pubkey uguale a quella salvata, firma valida e non
+    scaduta. Un peer non accoppiato non ottiene nemmeno una riga di log.
+    La firma copre timestamp + hash del body (vedi shared/identity.py) e il body
+    qui e' vuoto: la richiesta e' una GET firmata, non autentica il path. Non
+    cambia nulla in pratica (il peer deve essere in allowlist per rispondere) ma
+    e' il motivo per cui questo endpoint RESTITUISCE soltanto: nessuna scrittura
+    puo' transitare da qui, firmata o no.
+    """
+    if not FEDERATION_ENABLED:
+        return jsonify({"error": "federazione disabilitata su questo CP"}), 403
+    if not FEDERATION_VIEW_ENABLED:
+        return jsonify({"error": "condivisione della vista disattivata su questo CP"}), 403
+
+    headers   = dict(request.headers)
+    sender_id = headers.get("X-Node-Id", "")
+    peer      = db.get_federated_peer(sender_id)
+    if not peer or not peer.get("enabled"):
+        push_log('mesh_event', f'Vista rifiutata: peer sconosciuto {sender_id[:16] or "?"}',
+                 status='failed')
+        return jsonify({"error": "peer non autorizzato"}), 403
+    if headers.get("X-Node-Pubkey", "") != peer.get("pubkey", ""):
+        push_log('mesh_event', f'Vista rifiutata: pubkey non corrisponde {sender_id[:16]}',
+                 status='failed')
+        return jsonify({"error": "pubkey non corrisponde all'allowlist"}), 403
+    if not verify_request_headers(headers, request.get_data()):
+        push_log('mesh_event', f'Vista rifiutata: firma non valida o scaduta {sender_id[:16]}',
+                 status='failed')
+        return jsonify({"error": "firma non valida o scaduta"}), 401
+
+    db.touch_federated_peer(sender_id, "ok")
+    return jsonify(_cp_view_snapshot())
+
+
+@app.route('/federation/views')
+def federation_views():
+    """Vista locale + viste dei peer, per la dashboard di QUESTO CP.
+
+    NON e' nella whitelist del federation-gateway, ed e' voluto: e' un endpoint
+    da dashboard interna. Chiama verso l'esterno (i peer) ma non si fa chiamare
+    da fuori — se ci finisse, chiunque potrebbe usare questo CP come sonda verso
+    i peer federati senza avere la loro chiave.
+
+    Il risultato e' in cache per FEDERATION_VIEW_TTL_S secondi, perche' la
+    dashboard la interroga in polling: `?refresh=1` la forza (pulsante Aggiorna).
+    """
+    now = time.time()
+    fresh = request.args.get("refresh") not in ("1", "true", "yes")
+    if (fresh and _VIEW_CACHE["data"] is not None
+            and (now - _VIEW_CACHE["ts"]) < max(0, FEDERATION_VIEW_TTL_S)):
+        cached = dict(_VIEW_CACHE["data"])
+        cached["cached"] = True
+        return jsonify(cached)
+
+    local = _cp_view_snapshot()
+    peers = []
+    for peer in db.get_all_federated_peers():
+        if not peer.get("enabled"):
+            continue
+        view, error = _fetch_peer_view(peer)
+        peers.append({
+            "peer_id":     peer.get("peer_id", ""),
+            "label":       peer.get("label", ""),
+            "endpoint":    peer.get("endpoint", ""),
+            "last_status": peer.get("last_status", ""),
+            "ok":          bool(view),
+            "error":       error,
+            "view":        view,
+        })
+
+    out = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cached":       False,
+        "ttl_s":        FEDERATION_VIEW_TTL_S,
+        "view_enabled": FEDERATION_VIEW_ENABLED,
+        "local":        local,
+        "peers":        peers,
+        "merged":       _merge_views(local, peers),
+    }
+    _VIEW_CACHE.update(ts=now, data=out)
+    return jsonify(out)
 
 # ── MEMORY SYNC ───────────────────────────────────────────────────────────────
 def _sync_memory_across_nodes():
