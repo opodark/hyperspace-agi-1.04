@@ -260,22 +260,24 @@ in esecuzione serve riconciliare `.env` — vedi sezione 0.
   va esposto da solo. La via cross-macchina prevista e' il **federation gateway**
   su 8095, che inoltra solo `/federate/execute` e `/federation/identity`.
 - **La 8085 e' comparsa il 2026-09-19** (il collega l'ha aggiunta al suo gateway,
-  per non ripubblicare il container core che dava problemi a Docker Desktop). Ma
-  quello che si osserva **non e' il gateway con whitelist**: e' un passaggio
-  trasparente. Prova, stesse rotte:
-
-  | Rotta | `:8085` | `:8095` (gateway) |
-  |---|---|---|
-  | `/federation/identity` | 200 | 200 |
-  | `/federation/peers` | **200** | **404** (esclusa dal whitelist) |
-  | `/logs` | **200** | 404 |
-  | `/config/routing-weights` | **200** | 404 |
-
-  Cioe': le rotte che il whitelist esiste per proteggere ("gestione allowlist,
-  solo dashboard interna") sono raggiungibili **senza autenticazione** su 8085.
-  Va deciso se e' voluto: se il "gateway unico" e' fidato perche' legato alla
-  mesh, il rischio e' limitato; se deve valere la regola del CP, il whitelist
-  deve stare davanti anche a 8085.
+  per non ripubblicare il container core che dava problemi a Docker Desktop).
+  **Attenzione a non attribuirle un'esposizione nuova**: le rotte che il
+  federation-gateway filtra erano **gia' raggiungibili prima**, sulla 8088.
+  Verificato: `/logs` e `/federation/peers` rispondevano **200 su 8088** prima
+  che la 8085 esistesse. La 8085 non ha aperto nulla; ha reso piu' visibile un
+  comportamento che c'era.
+- **I due gateway hanno filosofie opposte.** Il `federation-gateway` (8095) e'
+  un proxy con **whitelist**: inoltra solo `/federate/execute` e
+  `/federation/identity`, e le altre rotte le rifiuta. Il `hyperspace-gateway`
+  (Caddy, `gateway/Caddyfile`, entrato con il merge `2b5756b`) e' un
+  `reverse_proxy` **trasparente**: `:8088 -> hyperspace-core:8085` espone tutto
+  l'API del control-plane, `/logs` e `/federation/peers` comprese. Il Caddyfile
+  lo dice: nasce per risolvere un guasto di Docker Desktop (un terzo IP host
+  distinto sulle stesse bindings manda in hard-fail silenzioso il
+  port-forwarding), non per filtrare. Ma il risultato e' che sulla mesh il CP e'
+  aperto per intero, senza autenticazione. Va deciso quale dei due e' il modello:
+  se la regola "il CP non va esposto da solo" vale, davanti a 8088/8085 serve il
+  whitelist, non un `reverse_proxy` puro.
 - **Lato Mac, esposizione maggiore**: `docker-compose.yml` **non ha
   `MESH_BIND_IP`** (zero occorrenze), quindi il control-plane e' pubblicato su
   `0.0.0.0:8085`. Verificato: `10.143.160.44:8085/health` -> **200** e
