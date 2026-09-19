@@ -251,10 +251,46 @@ in esecuzione serve riconciliare `.env` — vedi sezione 0.
 - `deepseek-r1:8b` e' stato rimosso da entrambi (su hardware senza GPU dedicata
   era inutilizzabile: misurato **0.2 t/s** e **0 caratteri utili**, perche' il
   thinking consuma il budget prima della risposta).
-- **Nodo Windows**: id `fc6c821ba7c18667`, `100.64.31.18`. Porte **8081, 8086,
-  8088 raggiungibili**; **8085 in timeout**: la regola firewall di
-  `docs/tailscale-mesh-setup.md:65` elenca `8088,8086,8081,8095,20128` e **non
-  copre la porta del control-plane**.
+- **Nodo Windows**: id `fc6c821ba7c18667`, `100.64.31.18`.
+- **Dove sta il control-plane del Windows**: su **8088**, non su 8085. Il profilo
+  Windows lo pubblica con `${MESH_BIND_IP}:8088:8085` (host 8088 -> container
+  8085). Quindi "8085 in timeout" **non era una lacuna del firewall**, al
+  contrario di quanto avevo scritto qui: la regola elenca
+  `8088,8086,8081,8095,20128` e **omette 8085 di proposito**, perche' il CP non
+  va esposto da solo. La via cross-macchina prevista e' il **federation gateway**
+  su 8095, che inoltra solo `/federate/execute` e `/federation/identity`.
+- **La 8085 e' comparsa il 2026-09-19** (il collega l'ha aggiunta al suo gateway,
+  per non ripubblicare il container core che dava problemi a Docker Desktop). Ma
+  quello che si osserva **non e' il gateway con whitelist**: e' un passaggio
+  trasparente. Prova, stesse rotte:
+
+  | Rotta | `:8085` | `:8095` (gateway) |
+  |---|---|---|
+  | `/federation/identity` | 200 | 200 |
+  | `/federation/peers` | **200** | **404** (esclusa dal whitelist) |
+  | `/logs` | **200** | 404 |
+  | `/config/routing-weights` | **200** | 404 |
+
+  Cioe': le rotte che il whitelist esiste per proteggere ("gestione allowlist,
+  solo dashboard interna") sono raggiungibili **senza autenticazione** su 8085.
+  Va deciso se e' voluto: se il "gateway unico" e' fidato perche' legato alla
+  mesh, il rischio e' limitato; se deve valere la regola del CP, il whitelist
+  deve stare davanti anche a 8085.
+- **Lato Mac, esposizione maggiore**: `docker-compose.yml` **non ha
+  `MESH_BIND_IP`** (zero occorrenze), quindi il control-plane e' pubblicato su
+  `0.0.0.0:8085`. Verificato: `10.143.160.44:8085/health` -> **200** e
+  `/logs` -> **200** sulla rete locale, non solo sul tailnet. Il profilo Windows
+  e' quello disciplinato; il profilo Mac no. Da valutare il porting del pattern
+  `${MESH_BIND_IP:-127.0.0.1}` anche qui.
+- **Control-plane Windows con immagine vecchia**: `/models/capabilities` e
+  `/sandbox/status` rispondono **404** sul suo CP e **200** su quello del Mac.
+  Sono rotte recenti, quindi gira un'immagine piu' vecchia del repo: serve
+  `docker compose up -d --build`. Il test e' ora automatico in
+  `scripts/mesh_health.py`.
+- **`FEDERATION_PUBLIC_URL` non configurato su nessuna delle due**: entrambe le
+  identita' federate rispondono `"endpoint": ""`. Se il gateway deve essere la
+  faccia pubblica della federazione, quella variabile deve puntare al suo URL
+  pubblico, non essere vuota.
 - **Nodo Mac**: id `d7bc05baed5b752a`, `http://100.81.234.102:8081`. Dichiara
   anche lui `vram_gb=0.0` e `tier=leaf` (il suo `.env` ha `VRAM_GB=0`): **lo
   stesso difetto del Windows, sul lato locale**. I due nodi sono quindi

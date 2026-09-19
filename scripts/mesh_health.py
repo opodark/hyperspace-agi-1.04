@@ -39,14 +39,43 @@ import urllib.request
 MAC_IP = "100.81.234.102"
 WIN_IP = "100.64.31.18"
 
-# Porte di ogni profilo compose: nodo, control-plane, registry, dashboard.
+# Le due macchine espongono gli STESSI servizi su porte DIVERSE: sul Mac il
+# control-plane e' su 8085 e la dashboard su 8088; sul profilo Windows il
+# control-plane e' pubblicato su 8088 (host 8088 -> container 8085). Etichettare
+# per numero di porta e' quindi sbagliato — l'etichetta si deduce dalla risposta,
+# vedi describe().
 PORTS = {
     8081: "nodo",
-    8085: "control-plane",
+    8085: "control-plane (profilo Mac; non pubblicato sul Windows)",
     8086: "registry",
-    8088: "dashboard",
+    8088: "control-plane (Windows) / dashboard (Mac)",
+    8095: "federation gateway",
 }
 TCP_TIMEOUT = 4.0
+
+
+def describe(host, port):
+    """Cosa risponde su quella porta, dedotto DALLA RISPOSTA e non dal numero.
+
+    Il signature check del control-plane e' `engine == "hyperspace-agi"`: senza
+    quel controllo il /health di un nodo (che riporta engine=ollama) verrebbe
+    scambiato per un control-plane.
+    """
+    status, data = http_json(f"http://{host}:{port}/health", timeout=3)
+    if status == 200 and isinstance(data, dict) and data.get("engine") == "hyperspace-agi":
+        return (f"control-plane v{data.get('version', '?')} "
+                f"(memorie {data.get('memories', '?')}, nodi {data.get('nodes_active', '?')})")
+    status, data = http_json(f"http://{host}:{port}/status", timeout=3)
+    if status == 200 and isinstance(data, dict) and data.get("node_id"):
+        return f"nodo {str(data['node_id'])[:16]} tier={data.get('tier')} vram={data.get('vram_gb')}"
+    status, data = http_json(f"http://{host}:{port}/nodes", timeout=3)
+    if status == 200 and isinstance(data, list):
+        return f"registry ({len(data)} nodo/i)"
+    status, data = http_json(f"http://{host}:{port}/federation/identity", timeout=3)
+    if status == 200 and isinstance(data, dict) and data.get("peer_id"):
+        ep = data.get("endpoint") or "(endpoint VUOTO: FEDERATION_PUBLIC_URL non configurato)"
+        return f"federation gateway, peer {str(data['peer_id'])[:16]}, {ep}"
+    return None
 
 
 def is_windows():
@@ -203,6 +232,28 @@ def verdict(local, peer):
         if n["tier"] == "leaf" and peer["host"] != MAC_IP:
             lines.append("  tier=leaf su una macchina con GPU: attendersi hub.")
 
+    # Immagine vecchia: una rotta recente che manca. Il codice e' COTTO
+    # nell'immagine, quindi `up -d` senza --build ricrea il container ma con il
+    # codice di prima: il servizio risponde, sembra sano, e non ha le funzioni
+    # nuove. E' una trappola che ha gia' falsato una verifica, quindi la si
+    # controlla invece di sperarci.
+    for port in sorted(PORTS):
+        if peer["probes"][port][0] != "open":
+            continue
+        # Solo i control-plane: un nodo non ha /models/capabilities e verrebbe
+        # segnalato a sproposito come "immagine vecchia".
+        what = describe(peer["host"], port)
+        if not what or not what.startswith("control-plane"):
+            continue
+        cst, _ = http_json(f"http://{peer['host']}:{port}/models/capabilities", timeout=4)
+        if cst == 404:
+            lines.append(
+                f"  Il control-plane su {port} risponde ma NON ha /models/capabilities: gira\n"
+                "  un'immagine piu' vecchia del repo. Serve `docker compose up -d --build`,\n"
+                "  non un semplice `up -d`."
+            )
+        break
+
     if n_peers == 0:
         lines.append(
             "Il nodo LOCALE vede 0 peer: la mesh NON e' formata. Avere le porte aperte\n"
@@ -247,6 +298,10 @@ def run(peer_ip):
     for port in sorted(PORTS):
         st, secs, detail = peer["probes"][port]
         print(f"  tcp/{str(port):<5} {st:<8} {secs:.2f}s  ({PORTS[port]})" + (f" {detail}" if detail else ""))
+        if st == "open":
+            what = describe(peer_ip, port)
+            if what:
+                print(f"           -> {what}")
     if peer["node"]:
         pn = peer["node"]
         print(f"  nodo      {pn['id']} tier={pn['tier']} vram_gb={pn['vram_gb']} v={pn['version']}")
