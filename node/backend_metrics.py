@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # node/backend_metrics.py
 # HyperSpace AGI — Prototipo: metriche backend normalizzate
 #
@@ -123,6 +124,20 @@ _CAPABILITY_PROFILES = {
         "paged_attention":     False,
         "dynamic_loading":     True,
         "model_persistence":   False,
+        "streaming":           True,
+    },
+    # DwarfStar (ds4-server): motore nativo per DeepSeek V4 Flash/PRO, GLM 5.x e
+    # Qwen3.8 Flash Next. Tiene il modello RESIDENTE e prealloca slot di sessione
+    # indipendenti (--batched-session N), quindi paradigma inference_server. Non
+    # carica modelli a runtime: il GGUF si sceglie all'avvio del server, e i nomi
+    # accettati dagli endpoint (deepseek-v4-flash, glm-5.3-flash, ...) sono ALIAS
+    # di compatibilita', non modelli distinti.
+    "ds4": {
+        "backend_type":        "inference_server",
+        "continuous_batching": True,
+        "paged_attention":     False,
+        "dynamic_loading":     False,
+        "model_persistence":   True,
         "streaming":           True,
     },
 }
@@ -339,6 +354,94 @@ class OllamaMetricsProvider:
                 return [], f"HTTP {r.status_code}"
         except Exception as e:
             return [], str(e)[:120]
+
+# ── PROVIDER: DS4 (DwarfStar) ────────────────────────────
+def _interaction_aggregate(model: str) -> dict:
+    """EWMA per modello dal log interazioni del nodo.
+
+    Motore-agnostico: sono i dati che il nodo ha gia' visto passare (tok/s,
+    durata), quindi valgono anche per un motore che non espone endpoint di
+    stats. Stessa finestra per-modello e stesso decadimento degli altri motori.
+    """
+    item = {"tps": [], "lat": [], "count": 0, "last_ts": ""}
+    for e in _read_memory(METRICS_EWMA_READ_MAX):
+        if e.get("_received_from") or e.get("model") != model:
+            continue
+        tps = e.get("tokens_per_sec")
+        if not tps and e.get("tokens_out") and e.get("duration_ms"):
+            tps = round(e["tokens_out"] / max(e["duration_ms"] / 1000.0, 0.001), 2)
+        if tps:
+            item["tps"].append((float(tps), e.get("ts")))
+        if e.get("duration_ms"):
+            item["lat"].append((float(e["duration_ms"]), e.get("ts")))
+        item["count"] = min(item["count"] + 1, METRICS_EWMA_MODEL_WINDOW)
+        item["last_ts"] = e.get("ts") or item["last_ts"]
+        item["tps"] = item["tps"][-METRICS_EWMA_MODEL_WINDOW:]
+        item["lat"] = item["lat"][-METRICS_EWMA_MODEL_WINDOW:]
+    return item
+
+
+def _runtime_entry(aggregate: dict, loaded: bool, now: float) -> dict:
+    """Blocco `runtime` nello STESSO schema degli altri motori."""
+    last_ts = _parse_ts(aggregate["last_ts"])
+    return {
+        "loaded":              loaded,
+        "vram_gb":             None,
+        "tokens_per_sec_ewma": _ewma_decayed(aggregate["tps"], METRICS_EWMA_ALPHA,
+                                             METRICS_EWMA_HALF_LIFE_S, now),
+        "latency_ms_ewma":     _ewma_decayed(aggregate["lat"], METRICS_EWMA_ALPHA,
+                                             METRICS_EWMA_HALF_LIFE_S, now),
+        "requests_seen":       aggregate["count"],
+        "last_sample_ts":      aggregate["last_ts"] or None,
+        "data_age_s":          round(max(now - last_ts, 0.0), 1) if last_ts is not None else None,
+        "sample_source":       "ewma" if aggregate["count"] > 0 else None,
+    }
+
+
+class DS4MetricsProvider:
+    """DwarfStar (ds4-server): inferenza nativa, modello residente, batching.
+
+    ds4-server espone l'API OpenAI-style (default http://127.0.0.1:8000):
+      GET  /v1/models              -> modello/i serviti (lo decide il GGUF all'avvio)
+      POST /v1/chat/completions    -> chat, streaming SSE e tool supportati
+
+    Non esiste un equivalente di /api/ps di Ollama e il modello NON si sceglie a
+    runtime: lo stato del server si legge da /v1/models, mentre throughput e
+    latenza restano OSSERVATI dal log interazioni locale (come per gli altri
+    motori: il nodo e' un exporter, non inventa misure).
+    """
+
+    def __init__(self, base_url: str):
+        self.base = base_url.rstrip("/")
+
+    async def _models(self) -> tuple:
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                r = await client.get(f"{self.base}/v1/models")
+                if r.status_code == 200:
+                    return [m.get("id") for m in (r.json().get("data") or []) if m.get("id")], None
+                return [], f"HTTP {r.status_code}"
+        except Exception as e:
+            return [], str(e)[:120]
+
+    async def collect(self) -> dict:
+        loaded_ids, error = await self._models()
+        now = time.time()
+        runtime = {name: _runtime_entry(_interaction_aggregate(name), True, now)
+                   for name in loaded_ids}
+        server = {
+            "models_available": sorted(loaded_ids),
+            "models_loaded":    sorted(loaded_ids),
+            # `up` e' la chiave che il control-plane consuma; models_ok dice
+            # quale endpoint ha risposto (qui ce n'e' uno solo).
+            "health": {
+                "up":         error is None,
+                "last_error": error,
+                "models_ok":  error is None,
+                "checked_at": _iso_now(),
+            },
+        }
+        return {"server": server, "runtime": runtime}
 
 # ── PROVIDER: VLLM ───────────────────────────────────────
 class VLLMMetricsProvider:
@@ -623,6 +726,8 @@ def get_provider(engine: str):
     """Factory sul motore dichiarato (INFERENCE_BACKEND). vLLM = adapter
     Prometheus; tutto il resto (Ollama, LM Studio, custom) = adapter Ollama:
     è il percorso già strumentato (proxy + memoria condivisa)."""
+    if engine == "ds4":
+        return DS4MetricsProvider(os.getenv("DS4_URL", "http://127.0.0.1:8000"))
     if engine == "vllm":
         return VLLMMetricsProvider(VLLM_METRICS_URL, VLLM_URL, VLLM_MODELS)
     return OllamaMetricsProvider(os.getenv("OLLAMA_URL", "http://ollama:11434"))

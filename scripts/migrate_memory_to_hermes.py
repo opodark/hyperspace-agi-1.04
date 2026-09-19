@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Import the legacy compressed HyperSpace memory into Hermes idempotently."""
 
 from __future__ import annotations

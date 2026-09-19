@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Authenticated host bridge making Hermes the HyperSpace memory backend.
 
 Run this with the Python environment installed by Hermes Agent.  It uses the

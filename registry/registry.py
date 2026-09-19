@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # registry/registry.py
 # HyperSpace AGI v1.02 — Public Registry
 # feat: landing page pubblica, /dashboard nodi live, /nodes/active TTL-filtered

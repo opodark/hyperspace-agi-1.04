@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Client for the native Hermes memory bridge.
 
 HyperSpace services run in containers while Hermes owns its state on the host.

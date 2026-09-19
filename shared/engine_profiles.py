@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # shared/engine_profiles.py
 # Profili d'inferenza condivisi tra node e control-plane.
 #

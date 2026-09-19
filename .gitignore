@@ -50,3 +50,6 @@ wg0.conf
 
 # Node
 node_modules/
+
+# Report generati — artefatti, non sorgenti (scripts/generate_test_report.py)
+reports/

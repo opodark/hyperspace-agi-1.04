@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # shared/db.py
 # HyperSpace AGI v1.03 — SQLite persistence layer
 # Tabelle: logs, nodes, tasks, federated_peers

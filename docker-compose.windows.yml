@@ -52,6 +52,39 @@ version: '3.9'
 # ============================================================
 
 services:
+  code-sandbox:
+    build:
+      context: .
+      dockerfile: sandbox/Dockerfile
+    container_name: hyperspace-code-sandbox
+    restart: ${RESTART_POLICY}
+    environment:
+      SANDBOX_EXCHANGE_DIR: /exchange
+      SANDBOX_WORKSPACE_DIR: /workspaces
+      SANDBOX_MAX_WORKSPACES: "${SANDBOX_MAX_WORKSPACES:-6}"
+      SANDBOX_MAX_TIMEOUT: "${SANDBOX_MAX_TIMEOUT:-120}"
+      SANDBOX_MAX_FILE_BYTES: "${SANDBOX_MAX_FILE_BYTES:-1048576}"
+    volumes:
+      - sandbox_exchange:/exchange
+      - sandbox_workspaces:/workspaces
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pathlib,time; p=pathlib.Path('/exchange/heartbeat'); raise SystemExit(0 if p.exists() and time.time()-float(p.read_text())<5 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
   hyperspace-core:
     build:
       context: .
@@ -64,6 +97,8 @@ services:
       hyperspace-node-1:
         condition: service_started
       hyperspace-searxng:
+        condition: service_started
+      code-sandbox:
         condition: service_started
     env_file:
       - ./.env
@@ -102,6 +137,16 @@ services:
       FORGE_ADMIN_TOKEN: "${FORGE_ADMIN_TOKEN:-}"
       FORGE_DIR: /app/data/forge
       CODE_SERVER_PORT: "${CODE_SERVER_PORT:-8443}"
+      CODE_SANDBOX_ENABLED: "${CODE_SANDBOX_ENABLED:-false}"
+      SBX_SANDBOX_ENABLED: "${SBX_SANDBOX_ENABLED:-true}"
+      SANDBOX_EXCHANGE_DIR: /sandbox-exchange
+      SANDBOX_JOB_TIMEOUT: "${SANDBOX_JOB_TIMEOUT:-240}"
+      NIGHTLY_DEV_ENABLED: "${NIGHTLY_DEV_ENABLED:-false}"
+      NIGHTLY_DEV_START_HOUR: "${NIGHTLY_DEV_START_HOUR:-1}"
+      NIGHTLY_DEV_END_HOUR: "${NIGHTLY_DEV_END_HOUR:-5}"
+      NIGHTLY_DEV_IDLE_SECONDS: "${NIGHTLY_DEV_IDLE_SECONDS:-3600}"
+      NIGHTLY_DEV_MODEL: "${NIGHTLY_DEV_MODEL:-}"
+      NIGHTLY_DEV_DATA_DIR: /app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -109,6 +154,7 @@ services:
       - ${HS_DATA_DIR}:/app/data
       - ${HS_MEMORY_DIR}:/app/memory
       - ${HS_LOG_DIR}:/app/logs
+      - sandbox_exchange:/sandbox-exchange
     # Nessuna porta pubblicata qui: hyperspace-gateway fa da front door
     # (vedi sotto e docs/tailscale-mesh-setup.md — motivo: binding diretto
     # su 3+ IP host in parallelo su piu' container manda in errore il
@@ -261,6 +307,32 @@ services:
       - ./data/node-1:/app/data
     # Nessuna porta pubblicata qui: vedi hyperspace-gateway.
 
+    # ── GPU (RTX 3060): al momento NON abilitata qui ────────────────────────
+    # Il nodo dichiara la sua VRAM a mano (VRAM_GB nel .env) perche' senza
+    # passthrough `nvidia-smi` non esiste nel container e la detection ritorna
+    # 0.0 — con VRAM=0 il control-plane classifica questo nodo come il piu'
+    # debole della mesh e non gli manda lavoro.
+    #
+    # Per far vedere la GPU ANCHE al container (detection reale, non
+    # dichiarata) decommentare il blocco sotto. Richiede che Docker Desktop
+    # abbia il supporto GPU attivo (WSL2 + driver NVIDIA recente): se il
+    # runtime non c'e', `docker compose up` FALLISCE con un errore sui device,
+    # quindi va provato deliberatamente, non lasciato attivo per default.
+    #
+    # Dopo l'attivazione, verificare che la GPU lavori davvero:
+    #   ollama ps          -> deve dire 100% GPU, non uno split CPU/GPU
+    #   curl -s localhost:8084/metrics | grep -A3 qwen3
+    # Un 8B su 3060 deve fare 25-40 t/s, non ~10. Vedi
+    # docs/windows-node-handoff.md (sezione 3 e 4).
+    #
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
   # -- Infra-UI Bridge (dashboard SSE, log viewer) ---------------------------
   hyperspace-bridge:
     build:
@@ -307,7 +379,7 @@ services:
       CP_URL: http://hyperspace-core:8085
       VAULT_PATH: /vault
       EXPORT_INTERVAL: "${MEMORY_EXPORT_INTERVAL:-30}"
-      TITLER_ENABLED: "${TITLER_ENABLED:-true}"
+      TITLER_ENABLED: "${TITLER_ENABLED:-false}"
       TITLER_MODEL: "${TITLER_MODEL:-qwen2:0.5b}"
       PYTHONUNBUFFERED: "1"
     extra_hosts:
@@ -382,3 +454,5 @@ services:
 volumes:
   obsidian_config:
   omniroute_data:
+  sandbox_exchange:
+  sandbox_workspaces:

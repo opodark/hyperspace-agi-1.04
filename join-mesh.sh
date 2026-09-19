@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # =============================================================
 # HyperSpace AGI v1.02 — join-mesh.sh
 # Onboarding rapido di un nuovo nodo leaf nella mesh.

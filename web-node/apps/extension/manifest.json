@@ -1,1 +1,18 @@
-{"manifest_version":3,"name":"Hyperspace Browser Node"}
+{
+  "manifest_version": 3,
+  "name": "HyperSpace Browser Node",
+  "version": "1.0.0",
+  "description": "Contribuisci alla mesh HyperSpace con task piccoli e sicuri, solo dopo il tuo consenso.",
+  "action": {
+    "default_title": "HyperSpace Web Node",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://localhost:8085/*",
+    "http://127.0.0.1:8085/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

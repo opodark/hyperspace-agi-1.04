@@ -1,13 +1,101 @@
-# Integrazione Hermes
+# Hermes Agent come memoria unica di HyperSpace
 
-Hermes è il backend di memoria cognitiva di HyperSpace ed è anche il runtime
-esterno candidato a usare il control-plane come endpoint di inferenza e provider
-di tool. L'integrazione memoria è operativa; quella agent/MCP resta un traguardo
-separato.
+[Hermes Agent](https://github.com/nousresearch/hermes-agent) sostituisce il
+backend di memoria di HyperSpace. Non deve esistere un secondo archivio
+long-term proprietario di HyperSpace sincronizzato in parallelo: Hermes e' la
+source of truth per memoria personale, sessionale, semantica e procedurale.
+
+## Responsabilita'
+
+Hermes possiede e persiste:
+
+- `MEMORY.md` e `USER.md`;
+- sessioni e ricerca FTS5 in `state.db`;
+- skill apprese e memoria procedurale;
+- eventuali provider di memoria esterni configurati in Hermes.
+
+HyperSpace conserva soltanto:
+
+- API e adapter compatibili per nodi e applicazioni esistenti;
+- policy, identita', autorizzazioni e audit;
+- journal temporanei di ipotesi Dream ancora non approvate;
+- viste, grafi e indici derivati dalla memoria Hermes;
+- log operativi con retention limitata, che non sono memoria cognitiva.
+
+`omega_query`, `omega_store`, memory graph e retrieval dei nodi diventano
+adapter o proiezioni della memoria Hermes. Non effettuano dual-write su un
+archivio HyperSpace separato.
+
+## Gate dei sogni
+
+Le ipotesi Dream restano fuori dalla memoria finche' non vengono revisionate.
+Il journal di review e' stato transitorio, non memoria autorevole. Solo una
+promozione esplicita scrive la conoscenza approvata in Hermes, con provenance,
+autore della review e riferimenti alle fonti. Rifiuto e revoca devono essere
+tracciabili senza lasciare il contenuto attivo nella memoria Hermes.
+
+## Topologia prevista
+
+```text
+utente / gateway
+       |
+Hermes Agent ---- MEMORY.md, USER.md, state.db, skills
+       |                         ^
+       |                         |
+       +---- modello ---- HyperSpace /v1
+       |                         |
+       `---- tool ------- HyperSpace /mcp
+                                 |
+                  policy, mesh, Dream review, adapter legacy
+                                 |
+                       viste derivate della memoria Hermes
+```
+
+Hermes supporta endpoint OpenAI-compatible personalizzati e server MCP HTTP
+con header configurabili. Il control-plane espone `/v1` e `/mcp`: MCP richiede
+ora autenticazione, identita' del chiamante e allowlist (vedi sotto), mentre
+`/v1` resta senza token perche' lo consuma anche Open WebUI — va quindi esposto
+solo su loopback o attraverso il tunnel Tailscale, mai direttamente in LAN.
+
+## Accesso MCP
+
+`/mcp` espone i tool a runtime esterni, quindi non ha un default aperto: senza
+token risponde 503 e non serve nessuno.
+
+```dotenv
+# Un cliente per runtime: il nome finisce nei log di audit.
+MCP_CLIENTS="hermes=<token di almeno 32 caratteri>;ops=<altro token>"
+# Allowlist per cliente: "*" = tutto il catalogo pubblicato.
+MCP_CLIENT_TOOLS="hermes=omega_query,omega_store,get_mesh_status;ops=*"
+# true solo per sviluppo in ascolto su 127.0.0.1: e' una scorciatoia opt-in.
+MCP_ALLOW_LOOPBACK=false
+# false spegne MCP senza rimuovere i segreti.
+MCP_ENABLED=true
+```
+
+Il token si presenta con l'header standard `Authorization: Bearer <token>`
+(quello che i client MCP sanno configurare da soli) oppure con
+`X-Hyperspace-Mcp-Token`. Tre proprieta' valgono la pena di essere esplicite:
+
+1. un cliente senza voce in `MCP_CLIENT_TOOLS` non riceve NESSUN tool
+   (fail-closed): meglio un cliente inerte e visibile che uno con tutti i tool
+   per una svista di configurazione;
+2. l'allowlist filtra anche `tools/list`, non solo `tools/call`: il client vede
+   esattamente cio' che puo' usare;
+3. un tool non permesso e uno inesistente danno la stessa risposta a un cliente
+   con allowlist esplicita, cosi' non puo' enumerare il catalogo.
+
+`GET /mcp/status` mostra client, tool effettivi e problemi di configurazione, e
+non contiene mai i token.
+
+Per un profilo Hermes inizialmente read-only l'allowlist minima e' quella
+dell'esempio: niente `code_sandbox`, niente connettori con credenziali.
 
 ## Stato corrente
 
 - Gli endpoint HyperSpace `/v1` e `/mcp` sono raggiungibili sul nodo Windows.
+  `/mcp` richiede ora un token per cliente (vedi Accesso MCP): senza token
+  configurato risponde 503 invece di servire chiunque raggiunga la porta.
 - Hermes Agent 0.21.3 e' installato nativamente in
   `%LOCALAPPDATA%\hermes`; provider e credenziali modello restano da configurare.
 - Il bridge autenticato `scripts/hermes_memory_bridge.py` usa direttamente le
@@ -29,24 +117,20 @@ separato.
   da Hermes. La configurazione modello/MCP di Hermes non e' ancora completata;
   quindi il sistema non soddisfa ancora tutti i criteri di accettazione qui
   sotto.
-- Infra-UI espone un Memory Explorer che usa la ricerca Hermes server-side e
-  filtra per stato, nodo, modello e intervallo temporale. Le azioni operative
-  sono revisioni append-only: `quarantine`, `restore` e `revoke` (purge
-  logico). Non modificano direttamente SQLite e non coinvolgono le memorie
-  curate `MEMORY.md` o il profilo utente.
+- Infra-UI espone un Memory Explorer con ricerca Hermes server-side, filtri per
+  stato, nodo, modello e intervallo temporale, oltre a selezione multipla.
 
 ## Lifecycle e pulizia
 
 Il control-plane pubblica `POST /memory/search` e `POST /memory/lifecycle`.
-Il lifecycle accetta una lista di ID, un'azione e una motivazione. La
-quarantena nasconde le entry dalle viste attive ma le mantiene revisionabili;
-il ripristino crea una nuova revisione attiva; il purge crea una tombstone
-`revoked`. La dashboard richiede sempre una conferma operatore.
+Le azioni `quarantine`, `restore` e `revoke` sono revisioni append-only: non
+modificano direttamente SQLite e non coinvolgono `MEMORY.md` o il profilo
+utente. Il purge crea una tombstone `revoked`; la dashboard richiede sempre
+una conferma operatore.
 
-La stessa dashboard nasconde di default i nodi `unreachable`. La pulizia nodi
-usa `DELETE /mesh/nodes/<node_id>` e rifiuta nodi attivi o locali; rimuove
-soltanto la registrazione storica del control-plane, non arresta processi né
-container remoti.
+La dashboard nasconde di default i nodi `unreachable`. La pulizia usa
+`DELETE /mesh/nodes/<node_id>` e rifiuta nodi attivi o locali; rimuove solo la
+registrazione storica del control-plane, senza arrestare processi remoti.
 
 ## Avvio del bridge
 
@@ -85,27 +169,28 @@ quando manca un ID originale: rieseguirlo produce duplicati riconosciuti,
 non nuove memorie. Il file legacy va lasciato read-only fino alla verifica di
 conteggio, campionamento query e ripristino Hermes.
 
-## Integrazione agent e tool
+## Piano di sostituzione
 
-Il control-plane espone:
+1. Fare snapshot verificato di tutti gli archivi di memoria HyperSpace legacy.
+2. Installare Hermes in una directory persistente separata e provarne backup e
+   ripristino prima di importare dati reali.
+3. Collegare Hermes a HyperSpace `/v1` e a un profilo MCP inizialmente read-only.
+4. Definire un adapter unico `HermesMemoryBackend` e instradare tutte le letture
+   HyperSpace verso di esso.
+5. Importare la memoria legacy con ID, timestamp, fonte e hash per rendere la
+   migrazione idempotente e verificabile.
+6. Confrontare per un periodo le risposte legacy e Hermes senza doppia scrittura.
+7. Spostare le scritture normali e le promozioni Dream su Hermes.
+8. Rendere gli archivi legacy read-only, verificare recovery e poi rimuovere il
+   vecchio backend soltanto con approvazione esplicita.
 
-- `/v1` per l'inferenza compatibile con API OpenAI;
-- `/mcp` per `initialize`, `tools/list` e `tools/call`.
+## Criteri di accettazione
 
-Questi endpoint definiscono il punto di ingresso, ma la configurazione Hermes
-Agent e il relativo test end-to-end non sono ancora completati. Il bridge di
-memoria operativo e la disponibilità MCP sono componenti distinte.
-
-## Prossimo traguardo
-
-L'integrazione si considera funzionante quando una configurazione Hermes
-riproducibile completa questi passaggi:
-
-1. connessione e inizializzazione MCP;
-2. elenco dei tool pubblicati da HyperSpace;
-3. chiamata di un tool in sola lettura;
-4. richiesta di inferenza attraverso `/v1`;
-5. gestione osservabile di timeout, nodo non raggiungibile ed errore del tool.
-
-Prima del test vanno fissati autenticazione, indirizzo Tailscale del
-control-plane e policy dei tool concessi a Hermes.
+1. Ogni API memoria HyperSpace legge e scrive attraverso Hermes.
+2. Nessun percorso runtime continua a scrivere memoria cognitiva nel backend
+   legacy dopo il cutover.
+3. Sessioni, `MEMORY.md`, `USER.md` e skill sopravvivono a riavvio e recovery.
+4. La ricerca Hermes ritrova le memorie importate e conserva provenance e date.
+5. Dream non revisionati non compaiono nella memoria attiva.
+6. Memory graph e nodi mostrano viste coerenti derivate da Hermes.
+7. Backup, restore, rollback e migrazione idempotente hanno test automatici.

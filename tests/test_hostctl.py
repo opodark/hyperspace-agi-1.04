@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import importlib.util
 import json
 import tempfile
@@ -39,6 +40,54 @@ class ActionWhitelistTests(unittest.TestCase):
 
     def test_read_only_actions_are_a_subset_of_actions(self):
         self.assertTrue(agent.READ_ONLY_ACTIONS.issubset(agent.ACTIONS.keys()))
+
+
+class SbxSandboxTests(unittest.TestCase):
+    def test_rejects_non_hyperspace_names(self):
+        with self.assertRaises(ValueError):
+            agent._sbx_name("someone-elses-sandbox")
+
+    @patch.object(agent, "_sbx_executable", return_value="sbx")
+    @patch.object(agent, "_sbx_exec")
+    def test_run_rejects_shell_but_allows_python_argv(self, execute, _executable):
+        with self.assertRaises(ValueError):
+            agent.action_sbx_sandbox({"operation": "run", "workspace_id": "hyperspace-12345678",
+                                      "argv": ["sh", "-c", "whoami"]})
+        execute.return_value = {"ok": True, "output": "ok"}
+        result = agent.action_sbx_sandbox({"operation": "run", "workspace_id": "hyperspace-12345678",
+                                           "argv": ["python", "-m", "unittest"]})
+        self.assertTrue(result["ok"])
+        execute.assert_called_once()
+
+    @patch.object(agent, "_sbx_executable", return_value="sbx")
+    @patch.object(agent, "_sbx_exec")
+    def test_diff_never_mixes_stderr_warnings_into_patch(self, execute, _executable):
+        execute.side_effect = [
+            {"ok": True, "stdout": "", "stderr": "", "output": ""},
+            {"ok": True, "stdout": " M app.py\n", "stderr": "status warning\n", "output": ""},
+            {"ok": True, "stdout": "--- a/app.py\n+++ b/app.py\n", "stderr": "diff warning\n",
+             "output": "", "truncated": False},
+        ]
+        result = agent.action_sbx_sandbox({"operation": "diff",
+                                           "workspace_id": "hyperspace-12345678"})
+        self.assertEqual(result["diff"], "--- a/app.py\n+++ b/app.py\n")
+        self.assertNotIn("warning", result["diff"])
+        self.assertIn("diff warning", result["warnings"])
+
+    @patch.object(agent, "_sbx_executable", return_value="sbx")
+    @patch.object(agent, "_run")
+    def test_create_uses_private_clone_and_deny_all_network(self, run, _executable):
+        source = tempfile.TemporaryDirectory()
+        self.addCleanup(source.cleanup)
+        (Path(source.name) / ".git").mkdir()
+        run.return_value = {"ok": True, "stdout": "", "stderr": ""}
+        with patch.object(agent, "BASE_DIR", Path(source.name)):
+            result = agent.action_sbx_sandbox({"operation": "create", "label": "nightly"})
+        self.assertTrue(result["ok"])
+        argv = run.call_args.args[0]
+        self.assertIn("--clone", argv)
+        self.assertEqual(argv[argv.index("--deny-network") + 1], "**")
+        self.assertTrue(result["workspace_id"].startswith("hyperspace-"))
 
 
 class NgrokStartValidationTests(unittest.TestCase):

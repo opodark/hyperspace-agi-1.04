@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # node/main.py
 # HyperSpace AGI v1.05 — Unified Node
 # v1.05: concurrency ADATTATIVA QoS — niente più "unità di carico"/capacità
@@ -45,6 +46,8 @@ from shared.identity import (
     verify_request_headers,
 )
 from shared.network_security import token_authorized
+from shared.model_fit import assess as assess_model_fit, describe as describe_model_fit
+from shared.node_compat import PROTOCOL_VERSION
 from backend_metrics import collect_metrics, capability_profile
 from qos_monitor import QoSMonitor
 from dreaming import DreamJournal
@@ -69,6 +72,12 @@ OLLAMA_URL           = os.getenv("OLLAMA_URL", "http://ollama:11434")
 # /api/chat quando qualcuno chiama ollama-proxy direttamente.
 OLLAMA_PROXY_URL     = os.getenv("OLLAMA_PROXY_URL", "http://localhost:11435")
 DEFAULT_MODEL        = os.getenv("OLLAMA_MODEL", "")
+# Deve stare SOPRA il timeout del control-plane: il nodo e' un proxy, e se taglia
+# per primo il CP non ha modo di sapere che il backend era solo lento. Alzato a
+# 600s perche' i modelli reasoning (deepseek-r1, qwen3 col thinking, ds4 dove il
+# thinking e' acceso di default) superano i 180s fissi di prima: verificato in
+# sessione di test con Read timed out su entrambi i percorsi.
+NODE_INFERENCE_TIMEOUT_S = float(os.getenv("NODE_INFERENCE_TIMEOUT_S", "600"))
 HEARTBEAT_EVERY      = int(os.getenv("HEARTBEAT_EVERY", 15))
 PUBLIC_ENDPOINT      = os.getenv("PUBLIC_ENDPOINT", "").strip().rstrip("/")
 BOOT_PEERS           = [p.strip().rstrip("/") for p in os.getenv("BOOT_PEERS", "").split(",") if p.strip()]
@@ -294,6 +303,13 @@ if VRAM_GB > 0 or os.getenv("OLLAMA_URL"):
 NODE_CAPABILITIES.append("ollama-proxy")
 NODE_CAPABILITIES.append("v1-chat-completions")
 
+
+def _model_fit_status() -> dict:
+    """Verdetto compatto della stima, per /status e per la diagnostica."""
+    v = assess_model_fit(DEFAULT_MODEL, VRAM_GB)
+    return {"model": v["model"], "fits": v["fits"], "verdict": v["verdict"],
+            "total_gb": v.get("total_gb"), "vram_gb": v["vram_gb"]}
+
 def _normalize_endpoint(ep: str) -> str:
     ep = ep.strip().rstrip("/")
     if not ep:
@@ -316,6 +332,11 @@ NODE_PROFILE = {
     "capabilities": NODE_CAPABILITIES,
     "vram_gb":      VRAM_GB,
     "version":      "1.05.0",
+    # Versione del CONTRATTO con il control-plane, non del software installato:
+    # serve a distinguere "nodo aggiornato" da "nodo compatibile". Vedi
+    # shared/node_compat.py — alzare PROTOCOL_VERSION solo per modifiche che
+    # rendono incompleti i nodi precedenti.
+    "protocol_version": PROTOCOL_VERSION,
     "specialization": NODE_SPECIALIZATION,
     "avatar":         NODE_AVATAR,
 }
@@ -402,6 +423,7 @@ async def register_to_registry():
         "role":           NODE_PROFILE["tier"],
         "metadata": {
             "version":        NODE_PROFILE["version"],
+            "protocol_version": str(PROTOCOL_VERSION),
             "tier":           NODE_PROFILE["tier"],
             "capabilities":   ",".join(NODE_CAPABILITIES),
             "vram_gb":        str(VRAM_GB),
@@ -683,6 +705,22 @@ async def startup_event():
     print(f"[NODE:{NODE_ID[:10]}] tier={NODE_PROFILE['tier']} (forced={_FORCED_TIER or 'no'})")
     print(f"[NODE:{NODE_ID[:10]}] advertised={NODE_ADVERTISED_ENDPOINT}")
     print(f"[NODE:{NODE_ID[:10]}] vram_gb={VRAM_GB} (env={_vram_env} detected={_vram_detected})")
+    # Autodiagnosi del modello configurato: e' il controllo che mancava quando un
+    # profilo dichiarava un 14B su una macchina da 8 GB. Il sintomo osservato era
+    # "il modello e' lento"; la causa era che i pesi non entravano in VRAM e
+    # Ollama li splittava su CPU. Avvisa e NON impedisce l'avvio: un nodo che
+    # parte e serve male e' preferibile a un nodo che non parte.
+    if DEFAULT_MODEL:
+        _fit = assess_model_fit(DEFAULT_MODEL, VRAM_GB)
+        if not VRAM_GB:
+            print(f"[NODE:{NODE_ID[:10]}] ATTENZIONE modello: VRAM non dichiarata, "
+                  f"non posso verificare che {DEFAULT_MODEL} ci stia")
+        elif _fit["fits"] is False:
+            print(f"[NODE:{NODE_ID[:10]}] ATTENZIONE modello: "
+                  f"{describe_model_fit(DEFAULT_MODEL, VRAM_GB)}")
+            print(f"[NODE:{NODE_ID[:10]}]   {_fit['note']}")
+        else:
+            print(f"[NODE:{NODE_ID[:10]}] modello: {describe_model_fit(DEFAULT_MODEL, VRAM_GB)}")
     print(f"[NODE:{NODE_ID[:10]}] boot_peers={BOOT_PEERS or 'none — will use registry auto-discovery'}")
     print(f"[NODE:{NODE_ID[:10]}] peer_max_age_s={PEER_MAX_AGE_S}")
     print(f"[NODE:{NODE_ID[:10]}] backend_type={BACKEND_TYPE} adaptive_limiter={'on' if _load_limiter.adaptive else 'off (sequenziale)'} seed_concurrency={LOAD_SEED_CONCURRENCY} queue_timeout_s={REQUEST_QUEUE_TIMEOUT_S}")
@@ -731,9 +769,14 @@ def status():
         "public_key":     NODE_PUBKEY,
         "tier":           NODE_PROFILE["tier"],
         "version":        NODE_PROFILE["version"],
+        "protocol_version": PROTOCOL_VERSION,
         "endpoint":       NODE_ADVERTISED_ENDPOINT,
         "capabilities":   NODE_CAPABILITIES,
         "vram_gb":        VRAM_GB,
+        # Stima se il modello configurato entra nella VRAM dichiarata. Presente
+        # solo se c'e' un modello configurato: vedi shared/model_fit.py. Serve
+        # all'operatore e alla diagnostica, non al routing.
+        **({"model_fit": _model_fit_status()} if DEFAULT_MODEL else {}),
         "uptime_s":       int(time.time() - _boot_time),
         "peers_active":   len([p for p in _peers.values() if p["status"] == "active"]),
         "peers_total":    len(_peers),
@@ -922,7 +965,7 @@ async def v1_chat_completions_proxy(request: Request):
 
         async def _stream_gen():
             try:
-                async with httpx.AsyncClient(timeout=180.0) as client:
+                async with httpx.AsyncClient(timeout=NODE_INFERENCE_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_PROXY_URL}/v1/chat/completions",
                         content=body, headers={"Content-Type": "application/json"},
@@ -939,7 +982,7 @@ async def v1_chat_completions_proxy(request: Request):
     if not await _try_acquire_slot(model):
         return _busy_response()
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=NODE_INFERENCE_TIMEOUT_S) as client:
             r = await client.post(
                 f"{OLLAMA_PROXY_URL}/v1/chat/completions",
                 content=body, headers={"Content-Type": "application/json"},

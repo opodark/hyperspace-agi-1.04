@@ -1,0 +1,47 @@
+name: test
+
+# La suite c'era (247 test) ma la lanciava solo qualcuno, a mano, quando ci
+# pensava. Qui diventa un fatto verificabile a ogni push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Le versioni che girano DAVVERO nei container (control-plane/Dockerfile
+        # e node/Dockerfile sono 3.11 e 3.12). La macchina di sviluppo e' piu'
+        # avanti, quindi questo e' l'unico posto dove un'incompatibilita' con
+        # le versioni deployate si vede prima del deploy.
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Dipendenze
+        # Verificato in locale su venv pulito: con esattamente queste cinque la
+        # suite passa. fastapi/pydantic/uvicorn NON servono ai test — sono nel
+        # codice di produzione, non nella suite.
+        run: pip install flask flask-cors requests cryptography httpx
+      - name: Suite Python
+        run: PYTHONPATH=. python -m unittest discover -s tests -p 'test_*.py'
+
+  web-node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Sintassi
+        working-directory: web-node
+        run: npm run check
+      - name: Check del web node
+        working-directory: web-node
+        run: npm test

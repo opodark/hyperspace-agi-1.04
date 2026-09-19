@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # worker/main.py
 # HyperSpace AGI v0.2 — Worker Node
 # Identità crittografica nativa ECDSA secp256k1

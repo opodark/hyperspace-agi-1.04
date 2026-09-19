@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # build-exe.ps1 — Build locale HyperSpaceAGI-Installer.exe
 # Uso: cd installer && .\build-exe.ps1
 # Output: installer\dist\HyperSpaceAGI-Installer.exe  +  HyperSpaceAGI-Installer.zip

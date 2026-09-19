@@ -1,0 +1,19 @@
+{
+  "name": "hyperspace-web-node",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web node di HyperSpace-AGI: un tab del browser che si registra nella mesh e serve solo task web-safe.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node tests/web-node.test.mjs && node tests/chat.test.mjs && node tests/models.test.mjs",
+    "check": "node --check src/protocol.js && node --check src/capabilities.js && node --check src/task-runner.js && node --check src/transport.js && node --check src/chat.js && node --check src/models.js && node --check src/index.js",
+    "serve": "node --version >/dev/null && python3 -m http.server 8790"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

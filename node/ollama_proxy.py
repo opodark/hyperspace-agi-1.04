@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # node/ollama_proxy.py
 # HyperSpace AGI v1.03 — Ollama Proxy
 #
@@ -34,6 +35,10 @@ CONTROL_PLANE_URL = os.getenv("CONTROL_PLANE_URL", "").rstrip("/")
 NODE_TIER         = os.getenv("NODE_TIER", "leaf")
 PUBLIC_ENDPOINT   = os.getenv("PUBLIC_ENDPOINT", "").rstrip("/")
 PROXY_PORT        = int(os.getenv("PROXY_PORT", 11435))
+# Ultimo hop verso Ollama: sopra il timeout del nodo e del control-plane,
+# altrimenti taglia per primo e i livelli sopra interpretano un backend lento
+# come un backend assente. Vedi NODE_INFERENCE_TIMEOUT_S in node/main.py.
+OLLAMA_TIMEOUT_S  = float(os.getenv("OLLAMA_TIMEOUT_S", "600"))
 
 DATA_DIR   = Path(os.getenv("DATA_DIR", "/app/data"))
 INTERACTION_LOG_FILE = DATA_DIR / "interactions.jsonl"
@@ -146,6 +151,27 @@ def _metrics_from_native_done(chunk: dict, wall_ms: int) -> dict:
         m["prompt_tokens_per_sec"] = round(prompt_count / (prompt_ns / 1e9), 2)
     return m
 
+def _message_text(message, native: bool = False) -> str:
+    """Testo utile di un messaggio assistant, anche quando il modello ragiona.
+
+    Ollama consegna il ragionamento in `reasoning` (percorso OpenAI-compatibile)
+    o in `thinking` (percorso nativo): se il budget di token finisce mentre il
+    modello ragiona, `content` resta VUOTO. Senza questo fallback registreremmo
+    interazioni vuote in memoria e le metriche mostrerebbero risposte vuote,
+    pur essendo la generazione andata a buon fine.
+    """
+    if not isinstance(message, dict):
+        return ""
+    content = str(message.get("content") or "").strip()
+    if content:
+        return content
+    keys = ("thinking",) if native else ("reasoning", "reasoning_content", "thinking")
+    for key in keys:
+        value = str(message.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
 def _metrics_from_usage(usage: dict, wall_ms: int) -> dict:
     """OpenAI-compat (/v1/chat/completions): niente eval_duration nativo, quindi
     tok/s è approssimato dal wall-clock della richiesta (include un filo di
@@ -225,7 +251,7 @@ async def proxy_generate(request: Request):
             full_response = ""
             tick = _tick_state(iid)
             try:
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_URL}/api/generate", json=body
                     ) as resp:
@@ -253,7 +279,7 @@ async def proxy_generate(request: Request):
         return StreamingResponse(stream_and_log(), media_type="application/x-ndjson")
     else:
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                 r = await client.post(f"{OLLAMA_URL}/api/generate", json=body)
                 data = r.json()
                 dur  = int((time.time() - t0) * 1000)
@@ -287,7 +313,7 @@ async def proxy_chat(request: Request):
             full_response = ""
             tick = _tick_state(iid)
             try:
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_URL}/api/chat", json=body
                     ) as resp:
@@ -297,7 +323,7 @@ async def proxy_chat(request: Request):
                                 try:
                                     chunk = json.loads(line)
                                     msg = chunk.get("message", {})
-                                    full_response += msg.get("content", "")
+                                    full_response += _message_text(msg, native=True)
                                     tick["tokens"] += 1
                                     _maybe_tick(tick, model)
                                     if chunk.get("done"):
@@ -316,11 +342,11 @@ async def proxy_chat(request: Request):
         return StreamingResponse(stream_chat_and_log(), media_type="application/x-ndjson")
     else:
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                 r = await client.post(f"{OLLAMA_URL}/api/chat", json=body)
                 data = r.json()
                 dur  = int((time.time() - t0) * 1000)
-                content = data.get("message", {}).get("content", "")
+                content = _message_text(data.get("message") or {}, native=True)
                 metrics = _metrics_from_native_done(data, dur)
                 await _record_interaction(
                     prompt_summary, content, model, duration_ms=dur,
@@ -348,7 +374,21 @@ async def proxy_openai_chat(request: Request):
     t0 = time.time()
     iid = str(uuid.uuid4())
 
+    # NOTA: non instradiamo più qwen3 sul percorso nativo /api/chat. Quel
+    # workaround esisteva perché l'endpoint OpenAI-compatibile di Ollama non
+    # inoltrava `think: false` e restituiva solo il campo reasoning. Ora è il
+    # control-plane a decidere esplicitamente `think` (vedi _decide_thinking in
+    # control-plane/main.py): verificato su Ollama 0.34.2 che con think=false il
+    # campo `reasoning` resta popolato, ma i tool_calls vengono emessi comunque,
+    # nel formato giusto (`function.arguments` come stringa JSON). Il percorso
+    # nativo, invece, accetta i tool in ingresso ma NON regge il formato OpenAI
+    # del secondo giro (assistant con tool_calls + role:tool): risponde 400
+    # "Value looks like object, but can't find closing '}' symbol" — era la
+    # causa del bug "risposta vuota dopo web_search". Un solo percorso, quello
+    # OpenAI-compatibile.
+
     if stream:
+
         # Chiediamo a Ollama di riportare gli usage token nell'ultimo chunk SSE
         # (supportato dal suo endpoint OpenAI-compatibile). Se il backend non lo
         # supporta, l'unico effetto collaterale è che quel campo resta assente:
@@ -360,7 +400,7 @@ async def proxy_openai_chat(request: Request):
             usage = None
             tick = _tick_state(iid)
             try:
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_URL}/v1/chat/completions", json=body
                     ) as resp:
@@ -380,7 +420,7 @@ async def proxy_openai_chat(request: Request):
                                         if chunk.get("usage"):
                                             usage = chunk["usage"]
                                         delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                        content = delta.get("content", "")
+                                        content = _message_text(delta)
                                         if content:
                                             full_response += content
                                             tick["tokens"] += 1
@@ -398,12 +438,12 @@ async def proxy_openai_chat(request: Request):
         return StreamingResponse(stream_and_log(), media_type="text/event-stream")
     else:
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                 r = await client.post(f"{OLLAMA_URL}/v1/chat/completions", json=body)
                 dur = int((time.time() - t0) * 1000)
                 try:
                     data    = r.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    content = _message_text((data.get("choices") or [{}])[0].get("message") or {})
                     usage   = data.get("usage")
                 except Exception:
                     content, usage = "", None

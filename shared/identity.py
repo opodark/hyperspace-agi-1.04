@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # shared/identity.py
 # HyperSpace AGI v1.02 — Node Identity + Request Signing
 # Genera e persiste keypair ECDSA secp256k1 per ogni nodo.

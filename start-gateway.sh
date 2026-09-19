@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
 # HyperSpace AGI — Start Unified Gateway (Caddy + ngrok)
 
 echo "🚀 Avvio Gateway HyperSpace (Caddy + ngrok)..."

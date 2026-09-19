@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 connectors/base.py — BaseConnector per HyperSpace-AGI v1.03
 
