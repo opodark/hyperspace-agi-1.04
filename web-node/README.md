@@ -151,3 +151,69 @@ end-to-end sull'app vera sta in `scripts/verify_web_node_e2e.py`.
   e embeddings reali senza portare un runtime di modelli nel browser
 
 This component is intentionally kept small and optional. It is an **addition** to the mesh, not a core dependency.
+
+## Deploy di questa pagina (e cosa NON sta altrove)
+
+Questo componente e' un **sito statico**: `index.html` + `src/*.js`, nessun
+server, nessuna fase di build, e la configurazione arriva a runtime. Per questo
+e' l'unico pezzo del progetto che sta su un host di pagine statiche (Vercel,
+Netlify, Cloudflare Pages, GitHub Pages). Il resto no: vedi l'ultima sezione.
+
+### Vercel
+
+| Campo del progetto | Valore |
+|---|---|
+| Root Directory | `web-node` |
+| Framework Preset | Other |
+| Build Command | *(vuoto)* |
+| Output Directory | `.` |
+
+Nessun `vercel.json` serve. **La Root Directory e' il punto delicato.** Lasciandola
+alla radice del repository, Vercel cerca un `Dockerfile` alla radice e non lo
+trova (i Dockerfile stanno dentro le cartelle dei singoli servizi). Puntandola su
+`sandbox` si ottiene l'errore:
+
+```
+Error: building at STEP "COPY sandbox/requirements.txt /app/requirements.txt":
+copier: stat: "/sandbox/requirements.txt": no such file or directory
+```
+
+Quel `Dockerfile` e' scritto per avere la **radice del repo** come contesto di
+build — il compose lo fa con `context: .`, e deve, perche' contiene `COPY . /seed`
+(la sandbox semina l'intero progetto in `/seed`). Vercel invece usa come contesto
+la cartella del Dockerfile, quindi `sandbox/requirements.txt` diventa
+`sandbox/sandbox/requirements.txt`. Non e' correggibile dall'interno del
+Dockerfile: nessun percorso puo' risalire sopra il contesto.
+
+### Puntare la pagina al control-plane
+
+L'URL si sceglie a runtime, in ordine di priorita' (`index.html`, righe 104-107):
+
+1. `?cp=...` nella URL — es. `https://<deploy>.vercel.app/?cp=https://cp.example.com`
+2. `localStorage` (`hyperspace.webNodeUrl`): quello scritto l'ultima volta
+3. fallback `` `${location.protocol}//${location.hostname}:8085` ``
+
+### Il vincolo che frega dopo: HTTPS contro HTTP
+
+Il fallback (3) su una pagina servita in **HTTPS** non funziona **mai**: punterebbe
+a `https://<deploy>.vercel.app:8085`, e comunque il browser blocca una richiesta
+`http://` da una pagina `https://` come **mixed content**. Quindi su un deploy
+Vercel il control-plane deve essere raggiungibile in **HTTPS** (Tailscale Funnel,
+un tunnel Cloudflare, o un reverse proxy con certificato). In locale, dove servi
+la pagina in HTTP, il problema non esiste.
+
+L'estensione MV3 in `apps/extension/` non passa da qui: si carica *unpacked* nel
+browser, e Vercel non la deploya.
+
+### Perche' il resto non sta su Vercel
+
+Il repository e' un compose con **24 servizi** (control-plane, registry, node,
+memory-graph, onboarding, searxng, bridge, obsidian, quattro varianti di Ollama,
+open-webui, code-sandbox, omniroute, federation-gateway), 6 volumi, e una mesh
+Tailscale/WireGuard. Il control-plane tiene lo stato in **SQLite su file**
+(`shared/db.py`, `DB_PATH=./data/hyperspace.db`) e ha loop che vivono a lungo
+(heartbeat, dream worker, monitor QoS); il nodo ha bisogno di **Ollama e di una
+GPU**. Vercel esegue asset statici e funzioni di breve durata, con filesystem
+effimero e senza processi persistenti: non e' un Dockerfile da sistemare, e' il
+carico che non e' quello. Per avere lo stack intero online serve un host che
+esegua `docker compose up -d` (una VPS, Fly, Railway, una VM Oracle Free).
