@@ -43,7 +43,7 @@
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import os, threading, time, requests, json, uuid, gzip, hashlib, socket, re
+import os, threading, time, requests, json, uuid, gzip, hashlib, socket, re, ast
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -92,13 +92,16 @@ REGISTRY_URL       = os.getenv("REGISTRY_URL", "http://registry:8086")
 _AUTHORITY_URL     = os.getenv("AUTHORITY_URL", "http://authority:8080")
 _AUTHORITY_ENABLED = os.getenv("AUTHORITY_ENABLED", "false").lower() == "true"
 UI_BRIDGE_URL      = os.getenv("UI_BRIDGE_URL", "http://localhost:8099")
+FORGE_DIR          = os.getenv("FORGE_DIR", "/app/data/forge")
+FORGE_ADMIN_TOKEN  = os.getenv("FORGE_ADMIN_TOKEN", "").strip()
+FORGE_MODEL        = os.getenv("HS_MODEL_CODER", DEFAULT_MODEL)
+CODE_SERVER_PORT   = os.getenv("CODE_SERVER_PORT", "8443").strip()
 
 MEMORY_FILE_GZ     = os.path.join(BASE_DIR, "memory.json.gz")
 MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
 MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
 MEMORY_BACKEND     = os.getenv("MEMORY_BACKEND", "hermes").strip().lower()
 _hermes_memory     = HermesMemoryClient()
-
 # Web node (worker nel browser): non e' indirizzabile, quindi si registra e poi
 # tira il lavoro con un long-poll — vedi shared/web_node.py. Tutti i limiti sono
 # env, perche' un web node e' per definizione su hardware sconosciuto.
@@ -1373,7 +1376,7 @@ def _omega_stats(args: dict) -> str:
         f"ttl_days: {MEMORY_TTL_DAYS}\n"
         f"file_size_kb: {round(size_bytes / 1024, 2)}\n"
         f"mesh_nodes_active: {nodes_active}\n"
-        f"engine: hyperspace-agi v1.04"
+        f"engine: hyperspace-agi v1.05"
     )
 
 # ── WEB SEARCH ────────────────────────────────────────────────────────────────
@@ -1389,7 +1392,7 @@ def _tool_web_search(args: dict) -> str:
     # ── 1. SearXNG JSON API ───────────────────────────────────────────────────
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.04)",
+            "User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.05)",
             "Accept":     "application/json",
         }
         params = {
@@ -1424,7 +1427,7 @@ def _tool_web_search(args: dict) -> str:
     # ── 2. Fallback: DuckDuckGo lite (scraping HTML) ─────────────────────────
     try:
         import re
-        headers2  = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.04)"}
+        headers2  = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.05)"}
         r2        = requests.get("https://lite.duckduckgo.com/lite/",
                                  params={"q": query}, headers=headers2, timeout=8)
         snippets  = re.findall(r'class="result-snippet"[^>]*>([^<]+)<', r2.text)
@@ -2377,7 +2380,7 @@ def omega_health():
     entries      = _load_memory()
     nodes_active = len([n for n in _node_list() if n.get("status") == "active"])
     return jsonify({
-        "status": "ok", "engine": "hyperspace-agi", "version": "1.04",
+        "status": "ok", "engine": "hyperspace-agi", "version": "1.05.0",
         "memories": len(entries), "nodes_active": nodes_active,
         "ttl_days": MEMORY_TTL_DAYS,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -3015,6 +3018,25 @@ def get_mesh_nodes():
         if e:
             n["routing_score"] = e["score"]
     return jsonify(nodes)
+
+@app.route('/mesh/nodes/<node_id>', methods=['DELETE'])
+def delete_mesh_node(node_id):
+    node = _nodes_by_id.get(node_id)
+    if not node:
+        return jsonify({"ok": False, "error": "nodo non trovato"}), 404
+    if node.get("status") == "active" or node.get("is_local") or node_id == _LOCAL_NODE_ID:
+        return jsonify({"ok": False, "error": "un nodo attivo o locale non puo essere rimosso"}), 409
+    _nodes_by_id.pop(node_id, None)
+    endpoint = _normalize_endpoint(node.get("endpoint", ""))
+    if endpoint and not any(_normalize_endpoint(n.get("endpoint", "")) == endpoint for n in _nodes_by_id.values()):
+        _known_endpoints.discard(endpoint)
+    db.delete_node(node_id)
+    _node_aliases.pop(node_id, None)
+    with _node_metrics_lock:
+        _node_metrics_cache.pop(node_id, None)
+    push_log('mesh_event', f'Nodo obsoleto rimosso: {node_id[:16]}',
+             detail=f'endpoint={endpoint}', status='info')
+    return jsonify({"ok": True, "node_id": node_id})
 
 @app.route('/metrics/nodes')
 def get_metrics_nodes():
@@ -4109,6 +4131,220 @@ def set_config_env():
     return jsonify({"ok": True, "applied": list(applied.keys()),
                     "persisted": True, "path": path})
 
+# ── TOOL & SKILL FORGE ───────────────────────────────────────────────────────
+# Generated artifacts are inert drafts. Nothing here imports or executes tool
+# code: publication remains a separate, explicitly authorized operation.
+_FORGE_TYPES = {"tool", "skill"}
+_FORGE_STATES = {"draft", "review", "approved", "disabled"}
+_forge_lock = threading.Lock()
+
+
+def _forge_slug(value):
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
+    return slug[:64] or f"artifact-{uuid.uuid4().hex[:8]}"
+
+
+def _forge_path(artifact_id):
+    safe_id = re.sub(r"[^a-z0-9-]", "", str(artifact_id).lower())
+    if not safe_id or safe_id != artifact_id:
+        raise ValueError("invalid artifact id")
+    return os.path.join(FORGE_DIR, safe_id + ".json")
+
+
+def _forge_validate(kind, source):
+    issues, warnings = [], []
+    source = source or ""
+    if not source.strip():
+        issues.append("source is empty")
+    if len(source.encode("utf-8")) > 256_000:
+        issues.append("source exceeds 256 KB")
+    if kind == "tool" and source.strip():
+        try:
+            tree = ast.parse(source)
+            classes = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+            if "Tools" not in classes:
+                warnings.append("Open WebUI tools normally expose a top-level Tools class")
+            risky = {"subprocess", "socket", "ctypes"}
+            imports = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports.update(alias.name.split(".")[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imports.add(node.module.split(".")[0])
+            found = sorted(imports & risky)
+            if found:
+                warnings.append("security review required for imports: " + ", ".join(found))
+        except SyntaxError as error:
+            issues.append(f"python syntax error at line {error.lineno}: {error.msg}")
+    if kind == "skill" and source.strip():
+        if not source.lstrip().startswith("#"):
+            warnings.append("skill should start with a Markdown heading")
+        if len(source.split()) < 20:
+            warnings.append("skill instructions are unusually short")
+    return {"valid": not issues, "issues": issues, "warnings": warnings}
+
+
+def _forge_read_all():
+    os.makedirs(FORGE_DIR, exist_ok=True)
+    items = []
+    for filename in os.listdir(FORGE_DIR):
+        if not filename.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(FORGE_DIR, filename), "r", encoding="utf-8") as handle:
+                items.append(json.load(handle))
+        except (OSError, ValueError):
+            continue
+    return sorted(items, key=lambda item: item.get("updated_at", ""), reverse=True)
+
+
+def _forge_write(item):
+    os.makedirs(FORGE_DIR, exist_ok=True)
+    path = _forge_path(item["id"])
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(item, handle, ensure_ascii=False, indent=2)
+    extension = ".py" if item.get("type") == "tool" else ".md"
+    source_path = os.path.join(FORGE_DIR, item["id"] + extension)
+    source_temporary = source_path + ".tmp"
+    with open(source_temporary, "w", encoding="utf-8") as handle:
+        handle.write(item.get("source", ""))
+    os.replace(source_temporary, source_path)
+    os.replace(temporary, path)
+
+
+def _forge_authorized():
+    if not FORGE_ADMIN_TOKEN:
+        return False
+    supplied = request.headers.get("X-Hyperspace-Forge-Token", "")
+    return hashlib.sha256(supplied.encode()).digest() == hashlib.sha256(FORGE_ADMIN_TOKEN.encode()).digest()
+
+
+@app.route('/forge/artifacts')
+def forge_list():
+    return jsonify({"artifacts": _forge_read_all(), "approval_configured": bool(FORGE_ADMIN_TOKEN)})
+
+
+@app.route('/forge/config')
+def forge_config():
+    port = CODE_SERVER_PORT if CODE_SERVER_PORT.isdigit() else "8443"
+    return jsonify({"ide_url": f"http://127.0.0.1:{port}", "ide_artifacts_dir": "/home/coder/forge"})
+
+
+@app.route('/forge/artifacts', methods=['POST'])
+def forge_create():
+    data = request.get_json(force=True, silent=True) or {}
+    kind = str(data.get("type", "skill")).lower()
+    if kind not in _FORGE_TYPES:
+        return jsonify({"error": "type must be tool or skill"}), 400
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    source = str(data.get("source", ""))
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    item = {
+        "id": _forge_slug(name) + "-" + uuid.uuid4().hex[:6],
+        "name": name[:120], "type": kind, "description": str(data.get("description", ""))[:1000],
+        "source": source, "permissions": list(data.get("permissions") or []),
+        "status": "draft", "version": 1, "created_at": now, "updated_at": now,
+        "validation": _forge_validate(kind, source), "generator": data.get("generator") or "human",
+    }
+    with _forge_lock:
+        _forge_write(item)
+    push_log('system', f'Forge draft created: {item["id"]}', status='info')
+    return jsonify(item), 201
+
+
+@app.route('/forge/artifacts/<artifact_id>', methods=['PUT'])
+def forge_update(artifact_id):
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        path = _forge_path(artifact_id)
+        with _forge_lock:
+            with open(path, "r", encoding="utf-8") as handle:
+                item = json.load(handle)
+            kind = str(data.get("type", item.get("type", "skill"))).lower()
+            if kind not in _FORGE_TYPES:
+                return jsonify({"error": "type must be tool or skill"}), 400
+            name = str(data.get("name", item.get("name", ""))).strip()
+            if not name:
+                return jsonify({"error": "name is required"}), 400
+            source = str(data.get("source", item.get("source", "")))
+            item.update({
+                "name": name[:120],
+                "type": kind,
+                "description": str(data.get("description", item.get("description", "")))[:1000],
+                "source": source,
+                "permissions": list(data.get("permissions", item.get("permissions", [])) or []),
+                "status": "draft",
+                "version": int(item.get("version", 1)) + 1,
+                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "validation": _forge_validate(kind, source),
+                "generator": data.get("generator") or item.get("generator") or "human",
+            })
+            _forge_write(item)
+    except (OSError, ValueError, TypeError):
+        return jsonify({"error": "artifact not found"}), 404
+    push_log('system', f'Forge artifact updated: {artifact_id} v{item["version"]}', status='info')
+    return jsonify(item)
+
+
+@app.route('/forge/artifacts/<artifact_id>/status', methods=['POST'])
+def forge_status(artifact_id):
+    data = request.get_json(force=True, silent=True) or {}
+    state = str(data.get("status", ""))
+    if state not in _FORGE_STATES:
+        return jsonify({"error": "invalid status"}), 400
+    if state == "approved" and not _forge_authorized():
+        return jsonify({"error": "approval requires FORGE_ADMIN_TOKEN"}), 403
+    try:
+        path = _forge_path(artifact_id)
+        with _forge_lock:
+            with open(path, "r", encoding="utf-8") as handle:
+                item = json.load(handle)
+            validation = _forge_validate(item["type"], item.get("source", ""))
+            if state == "approved" and not validation["valid"]:
+                return jsonify({"error": "artifact is not valid", "validation": validation}), 409
+            item.update({"status": state, "validation": validation,
+                         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+            _forge_write(item)
+    except (OSError, ValueError):
+        return jsonify({"error": "artifact not found"}), 404
+    push_log('system', f'Forge artifact {artifact_id} -> {state}', status='success')
+    return jsonify(item)
+
+
+@app.route('/forge/generate', methods=['POST'])
+def forge_generate():
+    data = request.get_json(force=True, silent=True) or {}
+    kind = str(data.get("type", "skill")).lower()
+    description = str(data.get("description", "")).strip()
+    if kind not in _FORGE_TYPES or not description:
+        return jsonify({"error": "type and description are required"}), 400
+    if kind == "tool":
+        instruction = ("Return only Python source for an Open WebUI Workspace Tool. "
+                       "Expose a top-level class Tools with typed public methods and docstrings. "
+                       "Do not use shell commands, subprocess, dynamic execution, or embedded secrets.")
+    else:
+        instruction = ("Return only a reusable Markdown skill. Start with a clear title, then purpose, "
+                       "constraints, step-by-step method, validation checks, and failure handling.")
+    payload = {"model": data.get("model") or FORGE_MODEL, "stream": False, "think": False,
+               "messages": [{"role": "system", "content": instruction},
+                            {"role": "user", "content": description}],
+               "options": {"temperature": 0.2, "num_predict": 1400, "num_ctx": 8192}}
+    try:
+        response = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=240)
+        response.raise_for_status()
+        source = response.json().get("message", {}).get("content", "").strip()
+        source = re.sub(r"^```(?:python|markdown|md)?\s*|\s*```$", "", source,
+                        flags=re.IGNORECASE | re.DOTALL).strip()
+    except Exception as error:
+        return jsonify({"error": str(error)}), 502
+    generated = dict(data, source=source, generator=payload["model"], name=data.get("name") or description[:60])
+    with app.test_request_context(json=generated):
+        return forge_create()
+
+
 @app.route('/models')
 def list_models():
     return jsonify(_fetch_models())
@@ -4250,6 +4486,40 @@ def memory_stats():
         "file_size_kb": round(size_bytes/1024, 2),
         "file": MEMORY_FILE_GZ,
     })
+
+@app.route('/memory/search', methods=['POST'])
+def search_memory():
+    data = request.get_json(force=True, silent=True) or {}
+    if MEMORY_BACKEND != "hermes":
+        return jsonify({"ok": False, "error": "ricerca avanzata disponibile con Hermes"}), 409
+    try:
+        entries = _hermes_memory.query(
+            str(data.get("query", "")), int(data.get("limit", 50)),
+            str(data.get("event_type", "")), str(data.get("mode", "browse")),
+            node_id=str(data.get("node_id", "")), source=str(data.get("source", "")),
+            model=str(data.get("model", "")), status=str(data.get("status", "active")),
+            date_from=str(data.get("date_from", "")), date_to=str(data.get("date_to", "")),
+            offset=max(0, int(data.get("offset", 0))),
+        )
+        return jsonify({"ok": True, "entries": entries, "count": len(entries)})
+    except (HermesMemoryError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
+
+@app.route('/memory/lifecycle', methods=['POST'])
+def memory_lifecycle():
+    data = request.get_json(force=True, silent=True) or {}
+    ids = data.get("ids")
+    if MEMORY_BACKEND != "hermes":
+        return jsonify({"ok": False, "error": "lifecycle disponibile con Hermes"}), 409
+    if not isinstance(ids, list):
+        return jsonify({"ok": False, "error": "ids deve essere una lista"}), 400
+    try:
+        result = _hermes_memory.lifecycle(ids, str(data.get("action", "")), str(data.get("reason", "")))
+        push_log('memory_sync', f'Memory lifecycle: {result.get("action")} ({len(result.get("changed", []))})',
+                 detail=str(data.get("reason", "")), status='success')
+        return jsonify(result), (200 if result.get("ok") else 207)
+    except (HermesMemoryError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
 
 # ── FEDERAZIONE — IDENTITÀ E ALLOWLIST ─────────────────────────────────────────
 # Queste rotte, tranne /federation/identity e /federate/execute, NON devono
@@ -4913,7 +5183,7 @@ def development_dream_loop():
 
 def heartbeat_loop():
     time.sleep(3)
-    push_log('system', 'Control-plane v1.04 started',
+    push_log('system', 'Control-plane v1.05 started',
              detail=f'nodes={len(_nodes_by_id)} endpoints={list(_known_endpoints)} federation_id={CP_ID[:16]}',
              status='info')
     hb_state["running"] = True

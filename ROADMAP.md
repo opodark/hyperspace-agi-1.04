@@ -74,6 +74,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Integrare ufficialmente Claude Code come agente-collaboratore di sviluppo sul repository Windows.
 - Standardizzare `.claude/CLAUDE.md`, policy di editing e checklist per modifiche critiche.
 - Abilitare workflow di sviluppo assistito su file locali, review diff e task decomposition.
+- Estendere il Tool & Skill Forge dalla fondazione locale già implementata agli adapter di pubblicazione controllata per Open WebUI, MCP e OpenAPI.
 - Separare chiaramente runtime production e workspace di sviluppo.
 
 ### Fase 4 — Multi-node e mesh
@@ -102,6 +103,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 | P1 | Code Sandbox | Workspace offline, diff e test senza write-back sul repository operativo | prima versione implementata |
 | P1 | Nightly Development Dream | Esperimento notturno con microVM preferita, fallback offline, doppia verifica e review senza auto-apply | implementato |
 | P1 | Dream review lifecycle | Revisione, promozione o rifiuto delle ipotesi generate nei periodi di inattività | fondazione implementata |
+| P1 | Tool & Skill Forge | Generazione, modifica, validazione e approvazione esplicita di draft inerti | fondazione implementata |
 | P1 | Hermes Memory Backend | Sostituire interamente la memoria cognitiva HyperSpace con Hermes; mantenere API, policy, review e viste come adapter senza dual-write | progettato, migrazione da fare |
 | P1 | `profiles/linux-primary/` | Base del futuro target Linux production | da fare |
 | P2 | `benchmarks/` | Misure comparabili su modelli, RAM e latenza | da fare |

@@ -62,7 +62,7 @@ le connessioni in ingresso vanno in timeout silenzioso, non "connection
 refused" — sintomo facile da confondere con "non ho aperto il bind"):
 
 ```powershell
-New-NetFirewallRule -DisplayName "HyperSpace mesh" -Direction Inbound -Protocol TCP -LocalPort 8088,8086,8081,8095,20128 -Action Allow -Profile Private
+New-NetFirewallRule -DisplayName "HyperSpace mesh" -Direction Inbound -Protocol TCP -LocalPort 8081,8085,8086,8088,8095,20128 -Action Allow -Profile Private
 ```
 
 Su Mac e Ubuntu (`docker-compose.yml`) le porte sono già pubblicate senza
@@ -75,8 +75,11 @@ restrizione a `127.0.0.1` — non serve `MESH_BIND_IP` lì, funzionano già.
 curl http://100.64.31.18:8088/health
 curl http://100.64.31.18:8086/nodes
 
+# control-plane sulla porta canonica (8088 resta un alias compatibile)
+curl http://100.64.31.18:8085/health
+
 # oppure con l'hostname MagicDNS, equivalente
-curl http://laptop-t9h8plht.tail453db3.ts.net:8088/health
+curl http://laptop-t9h8plht.tail453db3.ts.net:8085/health
 ```
 
 Poi `/doctor` sul control-plane di ciascuna macchina: i check

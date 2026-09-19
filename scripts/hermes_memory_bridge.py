@@ -191,7 +191,9 @@ class HermesMemory:
         return {"ok": failed == 0, "stored": stored, "duplicates": duplicates,
                 "failed": failed, "errors": errors[:20]}
 
-    def query(self, query: str, limit: int, event_type: str = "", mode: str = "semantic") -> List[Dict[str, Any]]:
+    def query(self, query: str, limit: int, event_type: str = "", mode: str = "semantic",
+              node_id: str = "", source: str = "", model: str = "", status: str = "active",
+              date_from: str = "", date_to: str = "", offset: int = 0) -> List[Dict[str, Any]]:
         candidates = self.entries(limit=5000) if mode == "browse" or not query else None
         if candidates is None:
             hits = self.db.search_messages(query, source_filter=[SOURCE], limit=min(limit * 4, 400))
@@ -213,7 +215,37 @@ class HermesMemory:
             needle = event_type.lower()
             candidates = [entry for entry in candidates if needle in str(
                 entry.get("type") or entry.get("event_type") or "memory").lower()]
-        return candidates[:limit]
+        def matches(entry: Dict[str, Any]) -> bool:
+            entry_status = str(entry.get("status") or "active")
+            stamp = str(entry.get("ts") or entry.get("timestamp") or "")
+            return (not status or entry_status == status) and \
+                (not node_id or node_id.lower() in str(entry.get("node_id") or entry.get("sourceNode") or "").lower()) and \
+                (not source or source.lower() in str(entry.get("source") or "").lower()) and \
+                (not model or model.lower() in str(entry.get("model") or "").lower()) and \
+                (not date_from or stamp >= date_from) and (not date_to or stamp <= date_to + "T23:59:59Z")
+        candidates = [entry for entry in candidates if matches(entry)]
+        return candidates[max(0, offset):max(0, offset) + limit]
+
+    def lifecycle(self, ids: List[str], action: str, reason: str = "") -> Dict[str, Any]:
+        if action not in {"quarantine", "restore", "revoke"}:
+            raise ValueError("action must be quarantine, restore or revoke")
+        wanted = {str(value) for value in ids if value}
+        if not wanted or len(wanted) > 500:
+            raise ValueError("ids must contain between 1 and 500 values")
+        current = {str(entry.get("id")): entry for entry in self.entries(limit=5000)}
+        changed, missing = [], []
+        for memory_id in wanted:
+            original = current.get(memory_id)
+            if not original:
+                missing.append(memory_id)
+                continue
+            revision = dict(original)
+            revision["status"] = {"quarantine": "quarantined", "restore": "active", "revoke": "revoked"}[action]
+            revision["lifecycle"] = {"action": action, "reason": reason, "at": _iso()}
+            result = self.store(revision)
+            if result.get("stored"):
+                changed.append(memory_id)
+        return {"ok": not missing, "action": action, "changed": changed, "missing": missing}
 
     def stats(self) -> Dict[str, Any]:
         sessions = list(self._sessions())
@@ -279,8 +311,19 @@ class Handler(BaseHTTPRequestHandler):
         elif self.command == "POST" and parsed.path == "/query":
             body = self._json()
             entries = memory.query(str(body.get("query", "")), max(1, min(int(body.get("limit", 10)), 100)),
-                                   str(body.get("event_type", "")), str(body.get("mode", "semantic")))
+                                   str(body.get("event_type", "")), str(body.get("mode", "semantic")),
+                                   str(body.get("node_id", "")), str(body.get("source", "")),
+                                   str(body.get("model", "")), str(body.get("status", "active")),
+                                   str(body.get("date_from", "")), str(body.get("date_to", "")),
+                                   max(0, int(body.get("offset", 0))))
             self._send(200, {"ok": True, "entries": entries})
+        elif self.command == "POST" and parsed.path == "/lifecycle":
+            body = self._json()
+            ids = body.get("ids")
+            if not isinstance(ids, list):
+                raise ValueError("ids must be a list")
+            result = memory.lifecycle(ids, str(body.get("action", "")), str(body.get("reason", "")))
+            self._send(200 if result["ok"] else 207, result)
         else:
             self._send(404, {"ok": False, "error": "not found"})
 

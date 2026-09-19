@@ -240,6 +240,7 @@ main{padding:18px 20px;display:grid}
 ::-webkit-scrollbar-track{background:var(--surface)}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .inactive-nodes{margin-top:18px}.inactive-nodes summary{cursor:pointer;color:var(--text-muted);padding:12px 0}.inactive-nodes .node-card,.inactive-nodes .mx-node-card{opacity:.5}.inactive-nodes .node-card:hover,.inactive-nodes .mx-node-card:hover{opacity:1}.diag-node-fields{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}.diag-node-fields .fg{flex:1;min-width:180px}
+.forge-layout{display:grid;grid-template-columns:minmax(300px,1fr) minmax(360px,1.35fr);gap:14px}.forge-editor{min-height:340px;font-family:var(--font-mono);font-size:.72rem;line-height:1.55}.forge-list{display:flex;flex-direction:column;gap:8px;max-height:610px;overflow:auto}.forge-item{padding:11px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)}.forge-item-head{display:flex;gap:8px;align-items:center;justify-content:space-between}.forge-meta{font-size:.64rem;color:var(--text-muted);font-family:var(--font-mono);margin-top:5px}.forge-badge{font-size:.6rem;text-transform:uppercase;padding:2px 6px;border:1px solid var(--border);border-radius:99px}.forge-badge.approved{color:var(--success);border-color:var(--success)}.forge-badge.review{color:var(--warning);border-color:var(--warning)}.forge-validation{white-space:pre-wrap;font-family:var(--font-mono);font-size:.68rem;margin-top:7px;color:var(--text-muted)}@media(max-width:900px){.forge-layout{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -255,6 +256,7 @@ main{padding:18px 20px;display:grid}
     <button onclick="showPanel('tasks',this)">&#128640; Tasks</button>
     <button onclick="showPanel('logs',this)">&#128203; Logs</button>
     <button onclick="showPanel('metrics',this)">&#9889; Metrics</button>
+    <button onclick="showPanel('forge',this)">&#128736; Forge</button>
     <button onclick="showPanel('diag',this)">&#128295; Diagnostics</button>
     <button onclick="showPanel('network',this)">&#128225; Network</button>
     <button onclick="showPanel('setup',this)">&#9881;&#65039; Setup</button>
@@ -529,6 +531,35 @@ main{padding:18px 20px;display:grid}
 </div>
 
 <!-- SETUP -->
+<div id="panel-forge" class="panel">
+  <div class="sec-title">Tool &amp; Skill Forge</div>
+  <p class="hint">Il modello crea solo bozze inerti. Nessun sorgente viene importato o eseguito automaticamente.</p>
+  <div class="forge-layout">
+    <div class="card">
+      <div class="card-title">Nuovo artefatto</div>
+      <div class="setup-grid">
+        <label class="fg">Nome<input id="forgeName" class="inp" placeholder="es. GitHub issue triage"/></label>
+        <label class="fg">Tipo<select id="forgeType" class="inp"><option value="skill">Skill Markdown</option><option value="tool">Tool Python</option></select></label>
+      </div>
+      <label class="fg">Descrizione<textarea id="forgeDescription" class="inp" rows="4" placeholder="Cosa deve fare, input, output e vincoli"></textarea></label>
+      <label class="fg">Sorgente<textarea id="forgeSource" class="inp forge-editor" placeholder="Genera con il modello oppure scrivi qui..."></textarea></label>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="forgeGenerate()">&#10024; Genera draft</button>
+        <button class="btn btn-ghost" onclick="forgeSave()">Salva manualmente</button>
+        <button class="btn btn-ghost" onclick="forgeNew()">Nuovo</button>
+        <button class="btn btn-success" onclick="forgeOpenIde()">Apri IDE</button>
+      </div>
+      <div class="diag-out" id="forgeOutput" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><div class="card-title">Registry locale</div><button class="btn btn-ghost btn-sm" onclick="forgeLoad()">&#8634; Refresh</button></div>
+      <label class="fg">Token approvazione<input id="forgeToken" type="password" class="inp" autocomplete="off" placeholder="FORGE_ADMIN_TOKEN"/></label>
+      <div id="forgeList" class="forge-list"><div class="hint">Caricamento...</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- SETUP -->
 <div id="panel-setup" class="panel">
   <div class="sec-title">Setup</div>
   <div class="card"><div class="card-title">&#129302; Ollama</div>
@@ -619,11 +650,67 @@ function showPanel(name,btn){
   if(name==='tasks')refreshTaskHistory();
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
+  if(name==='forge')forgeLoad();
   if(name==='setup'){loadCfg();loadEnv();}
   if(name==='network'){
     document.getElementById('netAdminToken').value=networkToken();
     refreshNetwork();refreshBottles();
   }
+}
+
+// ── TOOL & SKILL FORGE ────────────────────────────────────────────────────
+function forgeEsc(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+async function forgeRequest(url,options){
+  var response=await fetch(url,options||{}),data=await response.json();
+  if(!response.ok)throw new Error(data.error||('HTTP '+response.status));
+  return data;
+}
+async function forgeLoad(){
+  var host=document.getElementById('forgeList');host.innerHTML='<div class="hint">Caricamento...</div>';
+  try{
+    var data=await forgeRequest('/forge/artifacts'),items=data.artifacts||[];
+    if(!items.length){host.innerHTML='<div class="hint">Nessun artefatto. Crea il primo draft.</div>';return;}
+    host.innerHTML=items.map(function(item){
+      var v=item.validation||{},notes=(v.issues||[]).concat(v.warnings||[]);
+      return '<div class="forge-item"><div class="forge-item-head"><b>'+forgeEsc(item.name)+'</b><span class="forge-badge '+forgeEsc(item.status)+'">'+forgeEsc(item.status)+'</span></div>'
+        +'<div class="forge-meta">'+forgeEsc(item.type)+' · v'+forgeEsc(item.version)+' · '+forgeEsc(item.generator)+'</div>'
+        +'<div class="forge-validation">'+(v.valid?'VALIDO':'NON VALIDO')+(notes.length?'\n'+forgeEsc(notes.join('\n')):'')+'</div>'
+        +'<div class="row" style="margin-top:8px;gap:6px"><button class="btn btn-ghost btn-sm" onclick="forgeEdit('+JSON.stringify(item.id)+')">Apri</button>'
+        +'<button class="btn btn-warn btn-sm" onclick="forgeState('+JSON.stringify(item.id)+',\'review\')">Review</button>'
+        +'<button class="btn btn-success btn-sm" onclick="forgeState('+JSON.stringify(item.id)+',\'approved\')">Approva</button>'
+        +'<button class="btn btn-danger btn-sm" onclick="forgeState('+JSON.stringify(item.id)+',\'disabled\')">Disabilita</button></div></div>';
+    }).join('');
+    window.forgeArtifacts=items;
+  }catch(error){host.innerHTML='<div class="forge-validation">Errore: '+forgeEsc(error.message)+'</div>';}
+}
+function forgeEdit(id){
+  var item=(window.forgeArtifacts||[]).find(function(x){return x.id===id;});if(!item)return;
+  window.forgeEditingId=item.id;
+  document.getElementById('forgeName').value=item.name||'';document.getElementById('forgeType').value=item.type;
+  document.getElementById('forgeDescription').value=item.description||'';document.getElementById('forgeSource').value=item.source||'';
+  document.getElementById('forgeOutput').textContent='Modifica '+item.id+' · v'+item.version;
+}
+function forgeNew(){
+  window.forgeEditingId=null;
+  ['forgeName','forgeDescription','forgeSource'].forEach(function(id){document.getElementById(id).value='';});
+  document.getElementById('forgeType').value='skill';document.getElementById('forgeOutput').textContent='Nuovo draft.';
+}
+async function forgeGenerate(){
+  var out=document.getElementById('forgeOutput');out.textContent='Generazione e validazione in corso...';
+  var payload={name:document.getElementById('forgeName').value.trim(),type:document.getElementById('forgeType').value,description:document.getElementById('forgeDescription').value.trim()};
+  try{var item=await forgeRequest('/forge/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});window.forgeEditingId=item.id;document.getElementById('forgeSource').value=item.source||'';out.textContent='Draft '+item.id+' creato. Valido: '+item.validation.valid;await forgeLoad();}catch(error){out.textContent='Errore: '+error.message;}
+}
+async function forgeSave(){
+  var out=document.getElementById('forgeOutput'),payload={name:document.getElementById('forgeName').value.trim(),type:document.getElementById('forgeType').value,description:document.getElementById('forgeDescription').value.trim(),source:document.getElementById('forgeSource').value};
+  var id=window.forgeEditingId,url=id?'/forge/artifacts/'+encodeURIComponent(id):'/forge/artifacts',method=id?'PUT':'POST';
+  try{var item=await forgeRequest(url,{method:method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});window.forgeEditingId=item.id;out.textContent='Draft '+item.id+' salvato come v'+item.version+'.';await forgeLoad();}catch(error){out.textContent='Errore: '+error.message;}
+}
+async function forgeOpenIde(){
+  try{var config=await forgeRequest('/forge/config');window.open(config.ide_url,'_blank');}catch(error){window.alert('Forge IDE: '+error.message);}
+}
+async function forgeState(id,status){
+  var token=document.getElementById('forgeToken').value,headers={'Content-Type':'application/json'};if(token)headers['X-Hyperspace-Forge-Token']=token;
+  try{await forgeRequest('/forge/artifacts/'+encodeURIComponent(id)+'/status',{method:'POST',headers:headers,body:JSON.stringify({status:status})});await forgeLoad();}catch(error){window.alert('Forge: '+error.message);}
 }
 
 // ── NETWORK: stato/azioni su ngrok, Tailscale, WireGuard via host-agent ────

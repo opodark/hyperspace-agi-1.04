@@ -117,6 +117,20 @@ dell'esempio: niente `code_sandbox`, niente connettori con credenziali.
   da Hermes. La configurazione modello/MCP di Hermes non e' ancora completata;
   quindi il sistema non soddisfa ancora tutti i criteri di accettazione qui
   sotto.
+- Infra-UI espone un Memory Explorer con ricerca Hermes server-side, filtri per
+  stato, nodo, modello e intervallo temporale, oltre a selezione multipla.
+
+## Lifecycle e pulizia
+
+Il control-plane pubblica `POST /memory/search` e `POST /memory/lifecycle`.
+Le azioni `quarantine`, `restore` e `revoke` sono revisioni append-only: non
+modificano direttamente SQLite e non coinvolgono `MEMORY.md` o il profilo
+utente. Il purge crea una tombstone `revoked`; la dashboard richiede sempre
+una conferma operatore.
+
+La dashboard nasconde di default i nodi `unreachable`. La pulizia usa
+`DELETE /mesh/nodes/<node_id>` e rifiuta nodi attivi o locali; rimuove solo la
+registrazione storica del control-plane, senza arrestare processi remoti.
 
 ## Avvio del bridge
 
