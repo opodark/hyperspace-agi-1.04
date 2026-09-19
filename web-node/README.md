@@ -23,6 +23,43 @@ It allows devices that cannot run Docker or heavy local runtimes to participate 
 
 **Important**: Heavy inference or long-running tasks are **not** routed to web nodes.
 
+## Chat — usare la mesh da questa pagina
+
+La pagina ha due funzioni separate, e conviene tenerle tali:
+
+| | Cosa fa | Dove sta la logica |
+|---|---|---|
+| **Nodo** | mette a disposizione della mesh i 5 tipi di task qui sopra | `src/index.js`, `src/task-runner.js` |
+| **Chat** | usa la mesh: manda la richiesta al control-plane, che la instrada al nodo che ha quel modello | `src/chat.js` |
+
+Il pannello 5 carica i modelli da `/v1/models`, poi invia a
+`/v1/chat/completions` in streaming e disegna i pezzi man mano. L'id del modello
+si manda **come lo restituisce il CP** (arriva decorato, `"🕸️ qwen3:8b"`): il CP
+lo normalizza da solo — verificato — e ripulirlo nel client sarebbe una
+supposizione in piu' sul server. Nel setup attuale `/v1` non chiede token
+(verificato senza header: e' l'endpoint aperto per compatibilita' con Open WebUI).
+
+**Perche' il parsing SSE e' un modulo e non codice nella pagina**: e' la parte che
+si rompe, e uno script inline non si testa. `src/chat.js` copre i casi che si
+vedono **solo in produzione**, tutti verificati sui **byte reali** del
+control-plane invece che su esempi immaginati (`tests/chat.test.mjs`):
+
+- un evento **spezzato a meta'** fra due chunk di rete — il caso normale su
+  connessioni lente, e quello che fa comparire testo doppio o mutilato;
+- gli **errori a meta' stream**, che arrivano come evento SSE con chiave `error`
+  e NON come errore HTTP: un client che non li guarda resta appeso per sempre;
+- il **ramo nativo**, che manda l'intera risposta in **un solo delta** con
+  `finish_reason: "stop"` invece che token per token;
+- `[DONE]`, eventi non JSON (keepalive), delta con il solo `role`, e CRLF.
+
+Verificato anche contro un control-plane vivo: `listModels()` legge i 21 modelli,
+e un invio reale restituisce il testo atteso. Test: `npm test` (24 + 19 check).
+
+**Il limite da conoscere**: da una pagina in **HTTPS** il browser blocca una
+richiesta verso un control-plane in `http://` (mixed content). La chat quindi
+funziona aprendo la pagina in HTTP, oppure con un CP raggiungibile in HTTPS — e
+per quest'ultimo caso vale l'avvertenza della sezione di deploy.
+
 ## Architecture
 
 ```

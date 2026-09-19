@@ -28,6 +28,20 @@
   .stat { display: flex; gap: 18px; flex-wrap: wrap; color: #c3c9d6; }
   .stat b { color: #fff; }
   .warn { color: #ffb454; }
+  select, textarea { width: 100%; padding: 8px 10px; background: #0b0d12; border: 1px solid #2b3040;
+        border-radius: 6px; color: inherit; box-sizing: border-box; font: inherit; }
+  select { width: auto; }
+  textarea { resize: vertical; margin-top: 4px; }
+  .chat { background: #0b0d12; border: 1px solid #232733; border-radius: 8px; padding: 12px;
+          min-height: 110px; max-height: 380px; overflow: auto; margin: 12px 0; }
+  .chat:empty::before { content: "Qui compare la conversazione."; color: #6b7280; }
+  .msg { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg:last-child { margin-bottom: 0; }
+  .msg .who { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+              color: #9aa3b2; margin-bottom: 3px; }
+  .msg.user .who { color: #7aa2ff; }
+  .msg.assistant .who { color: #7be0a8; }
+  .msg.error { color: #ff8080; }
 </style>
 </head>
 <body>
@@ -77,15 +91,129 @@
     </div>
     <pre id="log"></pre>
   </section>
+
+  <section>
+    <h2>5. Chat con la mesh</h2>
+    <p>La stessa pagina puo' anche <em>usare</em> la mesh: le richieste vanno al
+      control-plane, che le instrada al nodo che ha quel modello. E' una funzione
+      separata dal nodo: non passa di qui il lavoro che questo tab riceve.</p>
+    <div class="row">
+      <label for="model" style="margin:0">Modello</label>
+      <select id="model"></select>
+      <button id="loadModels">Carica modelli</button>
+      <span class="warn" id="chatNote"></span>
+    </div>
+    <div class="chat" id="chatLog"></div>
+    <label for="prompt">Messaggio</label>
+    <textarea id="prompt" rows="3" placeholder="Scrivi, poi Invia (oppure Ctrl+Invio)"></textarea>
+    <div class="row">
+      <button class="primary" id="send" disabled>Invia</button>
+      <button id="clearChat">Pulisci</button>
+      <span class="warn" id="chatStatus"></span>
+    </div>
+    <p class="warn">Se non si connette: su una pagina in HTTPS il browser blocca un
+      control-plane in <code>http://</code> (mixed content). Serve un CP raggiungibile
+      in HTTPS, oppure aprire questa pagina in HTTP.</p>
+  </section>
 </main>
 
 <script type="module">
   import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
+  import { ChatClient, ChatError, prettyModelId } from "./src/chat.js";
 
   const $ = (id) => document.getElementById(id);
   const log = (message) => {
     $("log").textContent = `${new Date().toLocaleTimeString()}  ${message}\n` + $("log").textContent;
   };
+
+  // ── chat: usare la mesh, non servirla ─────────────────────────────────────
+  // Funzione separata dal nodo. La logica che si rompe (streaming SSE) sta in
+  // src/chat.js ed e' testata; qui c'e' solo il disegno e il cablaggio.
+  let history = [];
+
+  const bubble = (role, text) => {
+    const div = document.createElement("div");
+    div.className = `msg ${role}`;
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = role === "user" ? "tu" : "mesh";
+    const body = document.createElement("span");
+    body.textContent = text;
+    div.append(who, body);
+    $("chatLog").append(div);
+    $("chatLog").scrollTop = $("chatLog").scrollHeight;
+    return body;
+  };
+
+  // L'id si manda come lo da' il CP, emoji compresa: il CP lo normalizza da solo
+  // (verificato), e ripulirlo qui sarebbe una supposizione in piu' sul server.
+  const chatClient = () => {
+    const baseUrl = $("baseUrl").value.trim();
+    if (!baseUrl) throw new ChatError("serve l'URL del control-plane");
+    return new ChatClient({ baseUrl, model: $("model").value });
+  };
+
+  const loadModels = async () => {
+    $("chatNote").textContent = "carico...";
+    try {
+      const models = await chatClient().listModels();
+      $("model").replaceChildren(...models.map((id) => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = prettyModelId(id);
+        return option;
+      }));
+      $("send").disabled = !models.length;
+      $("chatNote").textContent = models.length ? `${models.length} modelli` : "nessun modello";
+    } catch (error) {
+      $("model").replaceChildren();
+      $("send").disabled = true;
+      $("chatNote").textContent = error.message;
+    }
+  };
+
+  const sendMessage = async () => {
+    const text = $("prompt").value.trim();
+    if (!text) return;
+    $("prompt").value = "";
+    bubble("user", text);
+    history.push({ role: "user", content: text });
+    const target = bubble("assistant", "");
+    $("send").disabled = true;
+    $("chatStatus").textContent = "in corso...";
+    try {
+      const result = await chatClient().send(history, {
+        onDelta: (_piece, whole) => {
+          target.textContent = whole;
+          $("chatLog").scrollTop = $("chatLog").scrollHeight;
+        },
+      });
+      history.push({ role: "assistant", content: result.text });
+      $("chatStatus").textContent = `${result.text.length} caratteri in ${result.chunks} pezzi`;
+    } catch (error) {
+      target.parentElement.classList.add("error");
+      target.textContent = error.message;
+      // Il turno fallito non entra nella storia: ritentare non deve duplicare.
+      history.pop();
+      $("chatStatus").textContent = "errore";
+    } finally {
+      $("send").disabled = false;
+    }
+  };
+
+  $("loadModels").addEventListener("click", loadModels);
+  $("send").addEventListener("click", sendMessage);
+  $("clearChat").addEventListener("click", () => {
+    history = [];
+    $("chatLog").replaceChildren();
+    $("chatStatus").textContent = "";
+  });
+  $("prompt").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      sendMessage();
+    }
+  });
 
   const capabilities = detectCapabilities(globalThis);
   $("caps").replaceChildren(...capabilities.map((c) => {

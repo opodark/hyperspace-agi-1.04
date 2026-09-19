@@ -9,8 +9,8 @@
     ".": "./src/index.js"
   },
   "scripts": {
-    "test": "node tests/web-node.test.mjs",
-    "check": "node --check src/protocol.js && node --check src/capabilities.js && node --check src/task-runner.js && node --check src/transport.js && node --check src/index.js",
+    "test": "node tests/web-node.test.mjs && node tests/chat.test.mjs",
+    "check": "node --check src/protocol.js && node --check src/capabilities.js && node --check src/task-runner.js && node --check src/transport.js && node --check src/chat.js && node --check src/index.js",
     "serve": "node --version >/dev/null && python3 -m http.server 8790"
   },
   "engines": {
