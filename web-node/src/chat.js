@@ -119,7 +119,9 @@ export class ChatClient {
     if (typeof fetchImpl !== "function") throw new ChatError("fetch non disponibile");
     this.baseUrl = normalizeBaseUrl(baseUrl);
     this.model = String(model || "").trim();
-    this.fetch = fetchImpl;
+    // Stesso motivo di transport.js: senza il bind, `this.fetch(...)` in un
+    // browser fa fallire il brand check di fetch con "Illegal invocation".
+    this.fetch = fetchImpl.bind(globalThis);
     this.timeoutMs = Math.max(1000, Number(timeoutMs) || 180000);
   }
 

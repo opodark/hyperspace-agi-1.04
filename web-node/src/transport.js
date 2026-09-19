@@ -19,7 +19,13 @@ export class WebNodeTransport {
     if (typeof fetchImpl !== "function") throw new TransportError("fetch non disponibile");
     this.baseUrl = String(baseUrl || "").replace(/\/+$/, "");
     if (!this.baseUrl) throw new TransportError("baseUrl mancante");
-    this.fetch = fetchImpl;
+    // `fetch` va invocata con `this` = window. Chiamarla come `this.fetch(...)`
+    // le passerebbe QUESTO oggetto come receiver, e il browser la rifiuta con
+    // "Failed to execute 'fetch' on 'Window': Illegal invocation" — che arriva
+    // qui come "rete non raggiungibile" e sembra un problema di rete.
+    // In Node non succede (undici non controlla il receiver), quindi un test che
+    // inietta un fetch finto non se ne accorge: il bind lo rende esplicito.
+    this.fetch = fetchImpl.bind(globalThis);
     this.timeoutBufferMs = Math.max(500, Number(timeoutBufferMs) || 5000);
   }
 

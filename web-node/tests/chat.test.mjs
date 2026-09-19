@@ -54,6 +54,28 @@ function fetchThat(response) {
   };
 }
 
+/** Fetch finto che imita il BROWSER: rifiuta un receiver diverso da window.
+ *
+ *  In Node il controllo non esiste, e la differenza ha lasciato passare un
+ *  difetto vero: `this.fetch(...)` passa l'oggetto come receiver e in un browser
+ *  fetch risponde "Illegal invocation" (arrivato all'utente come "rete non
+ *  raggiungibile"). Deve essere una `function`, non una arrow: la arrow ignora
+ *  il receiver e non potrebbe accorgersi di niente.
+ */
+function browserLikeFetch(responses) {
+  return function (url, options) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    }
+    const prossima = (responses || []).shift() ?? { ok: true, status: 200, body: {} };
+    return Promise.resolve({
+      ok: prossima.ok !== false, status: prossima.status ?? 200,
+      json: async () => prossima.body ?? {},
+      body: prossima.body_stream,
+    });
+  };
+}
+
 console.log("== URL e id ==");
 await check("normalizeBaseUrl aggiunge /v1 una volta sola", () => {
   assert.equal(normalizeBaseUrl("http://cp:8085"), "http://cp:8085/v1");
@@ -203,6 +225,27 @@ await check("listModels restituisce gli id come li da' il CP (emoji comprese)", 
   const models = await client.listModels();
   assert.deepEqual(models, ["🕸️ qwen3:8b", "gemma4:e4b"]);
   assert.equal(calls[0].url, "http://cp:8085/v1/models");
+});
+
+console.log("== receiver di fetch (come in un browser) ==");
+await check("la finta che imita il browser rifiuta DAVVERO un receiver sbagliato", () => {
+  const finta = browserLikeFetch([]);
+  assert.throws(() => ({ finta }).finta("http://cp:8085/v1/models"), /Illegal invocation/);
+});
+
+await check("listModels regge un fetch che controlla il receiver", async () => {
+  const impl = browserLikeFetch([{ body: { data: [{ id: "qwen3:8b" }] } }]);
+  const client = new ChatClient({ baseUrl: "http://cp:8085", model: "qwen3:8b", fetchImpl: impl });
+  assert.deepEqual(await client.listModels(), ["qwen3:8b"]);
+});
+
+await check("send regge un fetch che controlla il receiver", async () => {
+  const impl = browserLikeFetch([{ body_stream: (async function* () {
+    yield delta("ciao"); yield DONE;
+  })() }]);
+  const client = new ChatClient({ baseUrl: "http://cp:8085", model: "qwen3:8b", fetchImpl: impl });
+  const result = await client.send([{ role: "user", content: "x" }]);
+  assert.equal(result.text, "ciao");
 });
 
 console.log();

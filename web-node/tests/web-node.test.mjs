@@ -42,6 +42,27 @@ function fakeFetch(responses) {
   return { impl, calls };
 }
 
+/** Fetch finto che imita il BROWSER: rifiuta un receiver diverso da window.
+ *
+ *  Serve perche' in Node questo controllo non esiste, e la differenza ha
+ *  lasciato passare un difetto vero: `this.fetch(...)` dentro una classe passa
+ *  l'oggetto come receiver, e in un browser fetch risponde
+ *    Failed to execute 'fetch' on 'Window': Illegal invocation
+ *  In Node la stessa chiamata funziona. Una finta permissiva non se ne accorge;
+ *  questa si'.
+ *
+ *  Deve essere una `function`, non una arrow: una arrow ignora il receiver e
+ *  quindi non potrebbe mai accorgersi dell'errore.
+ */
+function browserLikeFetch(body = { ok: true }) {
+  return function (url, options) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => body });
+  };
+}
+
 console.log("== protocollo ==");
 await check("registrationPayload scarta le capability fuori whitelist", () => {
   const payload = registrationPayload({ nodeId: " n1 ", capabilities: ["summarize", "chat"] });
@@ -190,6 +211,19 @@ await check("un errore di rete non esplode la coda", async () => {
 await check("baseUrl vuoto viene rifiutato", () => {
   assert.throws(() => new WebNodeTransport({ baseUrl: "", fetchImpl: async () => {} }),
                 TransportError);
+});
+
+await check("la finta che imita il browser rifiuta DAVVERO un receiver sbagliato", () => {
+  // Test del test: senza questo, il controllo sotto potrebbe passare perche' la
+  // finta e' permissiva invece che perche' il codice e' corretto.
+  const finta = browserLikeFetch();
+  assert.throws(() => ({ finta }).finta("http://cp:8085/web/poll"), /Illegal invocation/);
+});
+
+await check("il trasporto regge un fetch che controlla il receiver (come il browser)", async () => {
+  const transport = new WebNodeTransport({ baseUrl: "http://cp:8085", fetchImpl: browserLikeFetch() });
+  const esito = await transport.poll({ nodeId: "n1", timeoutS: 0 });
+  assert.equal(esito.ok, true);
 });
 
 console.log("== ciclo del nodo ==");
