@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # memory-graph/exporter.py
 # HyperSpace AGI v1.03 -- Memory Graph Exporter + LLM Titler
 # Legge memory dal CP, genera titoli via il control plane stesso

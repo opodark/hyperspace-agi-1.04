@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/tests/web-node.test.mjs
 // Test del web node senza browser e senza dipendenze: `fetch` e `env` sono
 // iniettati. Si esegue con:  node web-node/tests/web-node.test.mjs

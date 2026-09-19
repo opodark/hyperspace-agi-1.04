@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Client per la registrazione dinamica dei nodi al HyperSpace Registry."""
 import os
 import socket

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Guardia contro il downgrade silenzioso dei log.
 
 push_log() riscrive a "system" qualunque tipo non presente in LOG_TYPES: un

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Primitive piccole e testabili per le route amministrative di rete."""
 from __future__ import annotations
 

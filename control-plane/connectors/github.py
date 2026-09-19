@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 connectors/github.py — GitHub REST API per HyperSpace-AGI v1.03
 Dipendenze: requests (già presente in requirements.txt)

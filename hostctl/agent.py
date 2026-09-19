@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Host-agent HyperSpace — rete host e broker ristretto Docker Sandboxes.
 
 Perche' esiste: il control-plane gira dentro un container Docker e non puo'

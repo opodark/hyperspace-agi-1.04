@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/src/capabilities.js
 // Rilevamento ONESTO delle capability del browser. Regola: una capability si
 // dichiara solo se il nodo sa davvero servirla. Meglio un nodo che dichiara

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # tasks_view.py — Task History HTML panel (iniettato nella dashboard)
 # Importato da main.py: from tasks_view import TASKS_PANEL_HTML, tasks_api_extra
 

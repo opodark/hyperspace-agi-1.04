@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # node/ollama_proxy.py
 # HyperSpace AGI v1.03 — Ollama Proxy
 #

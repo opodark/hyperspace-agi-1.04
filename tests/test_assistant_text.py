@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Testo dei messaggi assistant quando il modello ha ragionato.
 
 Il bug trovato in sessione reale: con un budget di token piccolo il modello

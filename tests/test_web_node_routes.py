@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Guardie delle route web node e del confine di indirizzabilita'.
 
 Niente Flask qui: le funzioni vengono estratte dal VERO control-plane/main.py

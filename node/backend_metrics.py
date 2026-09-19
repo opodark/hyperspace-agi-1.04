@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # node/backend_metrics.py
 # HyperSpace AGI — Prototipo: metriche backend normalizzate
 #

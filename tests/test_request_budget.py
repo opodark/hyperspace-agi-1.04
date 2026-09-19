@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Budget di tempo di una richiesta: timeout per modello, deadline, errori.
 
 I tre bug trovati in sessione di test reale, e il test che li blocca:

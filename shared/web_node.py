@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Registry e coda dei task per i nodi browser (web node).
 
 Il web node e' l'unico worker della mesh che il control-plane NON puo'

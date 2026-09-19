@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 connectors/google.py — Google Workspace per HyperSpace-AGI v1.03
 Libreria: google-api-python-client>=2.120.0

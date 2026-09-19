@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """File-queue client for the offline code sandbox runner."""
 from __future__ import annotations
 

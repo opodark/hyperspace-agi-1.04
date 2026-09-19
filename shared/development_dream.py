@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Nightly, review-gated code experiments for HyperSpace."""
 from __future__ import annotations
 

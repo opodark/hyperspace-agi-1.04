@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Header delle risposte SSE: nessun header hop-by-hop.
 
 Bug trovato in sessione di test reali: `_sse_headers()` impostava

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # HyperSpace AGI 1.04 - Windows Setup
 # Uso:
 #   Set-ExecutionPolicy -Scope Process Bypass

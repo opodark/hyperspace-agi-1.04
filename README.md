@@ -151,3 +151,18 @@ See [ROADMAP.md](ROADMAP.md#deliverable-prioritari) for the full prioritized del
 ## Notes
 
 This repository is the 1.04 evolution of the HyperSpace stack: the working 1.02/1.03 mesh (registry, control-plane, node workers, memory graph, Obsidian, SearXNG) repositioned as an operational agent runtime, with Open WebUI as the default interface and the Intent Protocol (HIP) as long-term direction rather than current architecture.
+
+## Licenza
+
+**Apache License 2.0** — testo integrale in [LICENSE](LICENSE).
+
+Copyright 2026 the HyperSpace-AGI authors — opodark (Alberto Raul Marinoni),
+cips, e altri contributori. Vedi [NOTICE](NOTICE).
+
+- Componenti di terze parti e loro licenze: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)
+- Perche' questa licenza, cosa non copre, e cosa e' stato rimandato (lo split
+  open-core): [docs/licensing.md](docs/licensing.md)
+
+Ogni file sorgente porta in testa `SPDX-License-Identifier: Apache-2.0`, e
+`tests/test_licensing.py` lo verifica: la convenzione e' imposta, non ricordata.
+

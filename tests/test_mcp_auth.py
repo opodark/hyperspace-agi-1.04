@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Policy di accesso a /mcp: token, identita' del chiamante, allowlist dei tool.
 
 La policy e' pura (shared/mcp_auth.py), quindi si testa direttamente. Le

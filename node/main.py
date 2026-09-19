@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # node/main.py
 # HyperSpace AGI v1.05 — Unified Node
 # v1.05: concurrency ADATTATIVA QoS — niente più "unità di carico"/capacità

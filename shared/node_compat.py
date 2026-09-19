@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compatibilita' di protocollo fra control-plane e nodi.
 
 Perche' esiste: un nodo che gira un'immagine vecchia risponde a `/health`,

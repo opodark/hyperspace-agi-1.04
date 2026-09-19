@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Verifica end-to-end del gate di autenticazione su /mcp.
 
 Carica la VERA app del control-plane (test client Flask, DB temporaneo) con due

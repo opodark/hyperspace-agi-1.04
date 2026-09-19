@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test dell'analisi del nome modello e della stima di ingombro in VRAM.
 
 Le fixture sono i nomi REALI presenti sulle due macchine della mesh, non

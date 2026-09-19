@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // popup.js — lanciatore dell'estensione. Nessun import: la CSP di MV3 consente
 // solo script propri, e il runtime vero (long-poll + esecuzione) vive nella
 // pagina standalone, che il service worker dell'estensione non puo' sostenere.

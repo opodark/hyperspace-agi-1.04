@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test della compatibilita' di protocollo fra control-plane e nodi.
 
 Il caso che conta non e' "la versione combacia": e' che un nodo che NON dichiara

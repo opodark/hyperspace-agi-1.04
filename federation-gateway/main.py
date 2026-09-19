@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # federation-gateway/main.py
 # HyperSpace AGI v1.03 — Federation Gateway
 #

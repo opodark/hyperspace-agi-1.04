@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # control-plane/main.py
 # HyperSpace AGI v1.05 — Control Plane
 # v1.05: routing metric-driven — scoring IBRIDO (qualità osservata

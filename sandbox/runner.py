@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Offline code workspace runner.
 
 The runner has no network and no Docker socket. It consumes JSON jobs from a

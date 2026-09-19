@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # control-plane/routing.py
 # Scoring di routing metric-driven (v1.05). Funzioni pure e testabili.
 #

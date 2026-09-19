@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/src/protocol.js
 // Contratto fra il web node e il control-plane. Nessuna dipendenza: questo
 // modulo deve girare sia in una pagina sia in un service worker di estensione.

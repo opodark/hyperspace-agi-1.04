@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Idle-only reflections and their manual review lifecycle.
 
 Dreams are untrusted hypotheses. Only an explicit review can promote one to a

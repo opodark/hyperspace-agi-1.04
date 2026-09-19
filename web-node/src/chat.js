@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/src/chat.js
 // Client di chat verso il control-plane (endpoint OpenAI-compatible /v1).
 //

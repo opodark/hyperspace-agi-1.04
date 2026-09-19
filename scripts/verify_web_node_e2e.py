@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Verifica end-to-end delle route web node con il test client di Flask.
 
 Carica la VERA app del control-plane (nessun mock delle route), su un DB

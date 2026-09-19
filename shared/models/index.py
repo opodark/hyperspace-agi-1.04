@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # shared/models/index.py
 from typing import Dict, Any, List
 from datetime import datetime

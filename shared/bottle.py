@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """'Bottiglie' — annunci di rendez-vous firmati e a prova di lavoro.
 
 Sostituisce l'idea originale (pubblicare su Pastebin e bacheche pubbliche

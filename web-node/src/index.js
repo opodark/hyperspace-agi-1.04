@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/src/index.js
 // Orchestrazione del web node: registrazione, long-poll, esecuzione, risultato.
 // Nessuna dipendenza: gira in una pagina o in un service worker di estensione.

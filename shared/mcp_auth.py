@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Autenticazione, identita' del chiamante e allowlist dei tool per `/mcp`.
 
 `/mcp` e' l'unica superficie del control-plane che espone i tool a runtime

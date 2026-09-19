@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/src/transport.js
 // Trasporto HTTP verso il control-plane. `fetchImpl` e' iniettabile: il modulo
 // resta testabile in Node senza un browser. Nessuna dipendenza esterna.

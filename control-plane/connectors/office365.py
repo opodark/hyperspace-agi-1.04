@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 connectors/office365.py — Microsoft 365 / Graph API per HyperSpace-AGI v1.03
 Libreria: O365>=2.0.35  (pip install O365)

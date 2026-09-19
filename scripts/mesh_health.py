@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Diagnostica del link di mesh tra due macchine (Mac e Windows).
 
 Serve a rispondere a una domanda sola: *la mesh si e' formata o no, e se no

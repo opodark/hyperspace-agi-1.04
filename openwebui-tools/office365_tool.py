@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 title: HyperSpace Office 365
 description: Email, calendario e OneDrive (Microsoft 365) via il control-plane di HyperSpace AGI.

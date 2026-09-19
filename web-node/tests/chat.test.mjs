@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/tests/chat.test.mjs
 // Test del client di chat. `fetch` e il `body` della risposta sono iniettati:
 // nessun browser, nessuna rete, nessuna dipendenza esterna.

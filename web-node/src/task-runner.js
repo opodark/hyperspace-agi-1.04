@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // web-node/src/task-runner.js
 // Esecuzione dei task web-safe nel browser. Nessun modello scaricato qui: gli
 // handler che richiedono un runtime di modelli (embeddings, traduzione) lo

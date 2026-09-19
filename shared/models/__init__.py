@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # shared/models/__init__.py
 # Questo rende 'shared.models' un pacchetto Python importabile.
 

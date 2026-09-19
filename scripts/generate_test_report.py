@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Genera un report PDF dei test eseguiti su questo repository.
 
 Non racconta test: li ESEGUE e riporta quello che esce, con il comando usato e

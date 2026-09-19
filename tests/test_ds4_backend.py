@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Adapter DwarfStar (ds4-server) — verificato contro un server ds4 FINTO.
 
 ds4 richiede Metal 96GB+ o CUDA/ROCm e il GGUF minimo e' ~81 GiB: qui non e'

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Stima se un modello entra nella VRAM di un nodo, PRIMA di provarci.
 
 Perche' esiste: un profilo dichiarava modelli da 14B mai installati e non
