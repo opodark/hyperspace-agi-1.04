@@ -186,6 +186,14 @@ def get_all_nodes() -> list:
     return [dict(r) for r in rows]
 
 
+def delete_node(node_id: str) -> bool:
+    """Remove a persisted mesh node and its optional alias."""
+    with _conn() as con:
+        con.execute("DELETE FROM node_aliases WHERE node_id = ?", (node_id,))
+        cur = con.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
+        return cur.rowcount > 0
+
+
 # ── TASKS ─────────────────────────────────────────────────────────────────────
 
 def insert_task(task: dict):

@@ -130,6 +130,31 @@ class HermesBridgeTests(TestCase):
         self.assertTrue(revoked["stored"])
         self.assertEqual(memory.entries(), [])
 
+    def test_lifecycle_quarantine_restore_and_revoke(self):
+        memory = self.bridge.HermesMemory(FakeDB())
+        memory.store({"id": "cleanup-1", "content": "temporary smoke test"})
+
+        quarantined = memory.lifecycle(["cleanup-1"], "quarantine", "test noise")
+        self.assertEqual(quarantined["changed"], ["cleanup-1"])
+        self.assertEqual(memory.entries()[0]["status"], "quarantined")
+
+        memory.lifecycle(["cleanup-1"], "restore", "keep it")
+        self.assertEqual(memory.entries()[0]["status"], "active")
+
+        memory.lifecycle(["cleanup-1"], "revoke", "confirmed purge")
+        self.assertEqual(memory.entries(), [])
+
+    def test_query_filters_node_model_status_and_date(self):
+        memory = self.bridge.HermesMemory(FakeDB())
+        memory.store({"id": "a", "content": "alpha", "node_id": "win", "model": "qwen",
+                      "ts": "2026-09-19T10:00:00Z"})
+        memory.store({"id": "b", "content": "beta", "node_id": "mac", "model": "llama",
+                      "ts": "2026-09-20T10:00:00Z"})
+
+        results = memory.query("", 10, mode="browse", node_id="mac", model="llama",
+                               date_from="2026-09-20", status="active")
+        self.assertEqual([item["id"] for item in results], ["b"])
+
     def test_import_reports_invalid_entries_without_losing_valid_ones(self):
         memory = self.bridge.HermesMemory(FakeDB())
         result = memory.import_entries([{"content": "valid"}, {"content": ""}])

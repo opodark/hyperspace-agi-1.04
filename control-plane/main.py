@@ -2053,6 +2053,25 @@ def get_mesh_nodes():
             n["routing_score"] = e["score"]
     return jsonify(nodes)
 
+@app.route('/mesh/nodes/<node_id>', methods=['DELETE'])
+def delete_mesh_node(node_id):
+    node = _nodes_by_id.get(node_id)
+    if not node:
+        return jsonify({"ok": False, "error": "nodo non trovato"}), 404
+    if node.get("status") == "active" or node.get("is_local") or node_id == _LOCAL_NODE_ID:
+        return jsonify({"ok": False, "error": "un nodo attivo o locale non puo essere rimosso"}), 409
+    _nodes_by_id.pop(node_id, None)
+    endpoint = _normalize_endpoint(node.get("endpoint", ""))
+    if endpoint and not any(_normalize_endpoint(n.get("endpoint", "")) == endpoint for n in _nodes_by_id.values()):
+        _known_endpoints.discard(endpoint)
+    db.delete_node(node_id)
+    _node_aliases.pop(node_id, None)
+    with _node_metrics_lock:
+        _node_metrics_cache.pop(node_id, None)
+    push_log('mesh_event', f'Nodo obsoleto rimosso: {node_id[:16]}',
+             detail=f'endpoint={endpoint}', status='info')
+    return jsonify({"ok": True, "node_id": node_id})
+
 @app.route('/metrics/nodes')
 def get_metrics_nodes():
     """Metriche backend normalizzate dei nodi (vedi node/backend_metrics.py):
@@ -3478,6 +3497,40 @@ def memory_stats():
         "file_size_kb": round(size_bytes/1024, 2),
         "file": MEMORY_FILE_GZ,
     })
+
+@app.route('/memory/search', methods=['POST'])
+def search_memory():
+    data = request.get_json(force=True, silent=True) or {}
+    if MEMORY_BACKEND != "hermes":
+        return jsonify({"ok": False, "error": "ricerca avanzata disponibile con Hermes"}), 409
+    try:
+        entries = _hermes_memory.query(
+            str(data.get("query", "")), int(data.get("limit", 50)),
+            str(data.get("event_type", "")), str(data.get("mode", "browse")),
+            node_id=str(data.get("node_id", "")), source=str(data.get("source", "")),
+            model=str(data.get("model", "")), status=str(data.get("status", "active")),
+            date_from=str(data.get("date_from", "")), date_to=str(data.get("date_to", "")),
+            offset=max(0, int(data.get("offset", 0))),
+        )
+        return jsonify({"ok": True, "entries": entries, "count": len(entries)})
+    except (HermesMemoryError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
+
+@app.route('/memory/lifecycle', methods=['POST'])
+def memory_lifecycle():
+    data = request.get_json(force=True, silent=True) or {}
+    ids = data.get("ids")
+    if MEMORY_BACKEND != "hermes":
+        return jsonify({"ok": False, "error": "lifecycle disponibile con Hermes"}), 409
+    if not isinstance(ids, list):
+        return jsonify({"ok": False, "error": "ids deve essere una lista"}), 400
+    try:
+        result = _hermes_memory.lifecycle(ids, str(data.get("action", "")), str(data.get("reason", "")))
+        push_log('memory_sync', f'Memory lifecycle: {result.get("action")} ({len(result.get("changed", []))})',
+                 detail=str(data.get("reason", "")), status='success')
+        return jsonify(result), (200 if result.get("ok") else 207)
+    except (HermesMemoryError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
 
 # ── FEDERAZIONE — IDENTITÀ E ALLOWLIST ─────────────────────────────────────────
 # Queste rotte, tranne /federation/identity e /federate/execute, NON devono

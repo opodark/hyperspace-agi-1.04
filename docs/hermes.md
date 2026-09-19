@@ -29,6 +29,24 @@ separato.
   da Hermes. La configurazione modello/MCP di Hermes non e' ancora completata;
   quindi il sistema non soddisfa ancora tutti i criteri di accettazione qui
   sotto.
+- Infra-UI espone un Memory Explorer che usa la ricerca Hermes server-side e
+  filtra per stato, nodo, modello e intervallo temporale. Le azioni operative
+  sono revisioni append-only: `quarantine`, `restore` e `revoke` (purge
+  logico). Non modificano direttamente SQLite e non coinvolgono le memorie
+  curate `MEMORY.md` o il profilo utente.
+
+## Lifecycle e pulizia
+
+Il control-plane pubblica `POST /memory/search` e `POST /memory/lifecycle`.
+Il lifecycle accetta una lista di ID, un'azione e una motivazione. La
+quarantena nasconde le entry dalle viste attive ma le mantiene revisionabili;
+il ripristino crea una nuova revisione attiva; il purge crea una tombstone
+`revoked`. La dashboard richiede sempre una conferma operatore.
+
+La stessa dashboard nasconde di default i nodi `unreachable`. La pulizia nodi
+usa `DELETE /mesh/nodes/<node_id>` e rifiuta nodi attivi o locali; rimuove
+soltanto la registrazione storica del control-plane, non arresta processi né
+container remoti.
 
 ## Avvio del bridge
 
