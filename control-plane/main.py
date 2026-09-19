@@ -981,7 +981,7 @@ def _omega_stats(args: dict) -> str:
         f"ttl_days: {MEMORY_TTL_DAYS}\n"
         f"file_size_kb: {round(size_bytes / 1024, 2)}\n"
         f"mesh_nodes_active: {nodes_active}\n"
-        f"engine: hyperspace-agi v1.04"
+        f"engine: hyperspace-agi v1.05"
     )
 
 # ── WEB SEARCH ────────────────────────────────────────────────────────────────
@@ -997,7 +997,7 @@ def _tool_web_search(args: dict) -> str:
     # ── 1. SearXNG JSON API ───────────────────────────────────────────────────
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.04)",
+            "User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.05)",
             "Accept":     "application/json",
         }
         params = {
@@ -1032,7 +1032,7 @@ def _tool_web_search(args: dict) -> str:
     # ── 2. Fallback: DuckDuckGo lite (scraping HTML) ─────────────────────────
     try:
         import re
-        headers2  = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.04)"}
+        headers2  = {"User-Agent": "Mozilla/5.0 (compatible; HyperSpaceAGI/1.05)"}
         r2        = requests.get("https://lite.duckduckgo.com/lite/",
                                  params={"q": query}, headers=headers2, timeout=8)
         snippets  = re.findall(r'class="result-snippet"[^>]*>([^<]+)<', r2.text)
@@ -1693,7 +1693,7 @@ def omega_health():
     entries      = _load_memory()
     nodes_active = len([n for n in _node_list() if n.get("status") == "active"])
     return jsonify({
-        "status": "ok", "engine": "hyperspace-agi", "version": "1.04",
+        "status": "ok", "engine": "hyperspace-agi", "version": "1.05.0",
         "memories": len(entries), "nodes_active": nodes_active,
         "ttl_days": MEMORY_TTL_DAYS,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -3842,7 +3842,7 @@ def metrics_loop():
 
 def heartbeat_loop():
     time.sleep(3)
-    push_log('system', 'Control-plane v1.04 started',
+    push_log('system', 'Control-plane v1.05 started',
              detail=f'nodes={len(_nodes_by_id)} endpoints={list(_known_endpoints)} federation_id={CP_ID[:16]}',
              status='info')
     hb_state["running"] = True
