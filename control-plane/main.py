@@ -1045,12 +1045,20 @@ def _aggregate_mesh_models(force: bool = False) -> dict:
 
 # ── SSE HEADERS ───────────────────────────────────────────────────────────────
 def _sse_headers():
+    """Header della risposta SSE.
+
+    NON impostare qui i header hop-by-hop (`Transfer-Encoding`, `Connection`):
+    appartengono al server WSGI, che li aggiunge gia' da solo. Impostarli a mano
+    produce header DUPLICATI nella risposta — `Transfer-Encoding: chunked` due
+    volte e `Connection: keep-alive` seguito da `Connection: close` — cioe' HTTP
+    malformato: lo stream viene troncato e il primo chunk puo' andare perso.
+    Osservato in sessione di test: SSE da 15 byte con il solo [DONE] su qwen3 e
+    connessione chiusa a meta' su qwen2.
+    """
     return {
         "Content-Type":      "text/event-stream",
         "Cache-Control":     "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
-        "Transfer-Encoding": "chunked",
-        "Connection":        "keep-alive",
+        "X-Accel-Buffering": "no",   # evita il buffering di un nginx a monte
     }
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
