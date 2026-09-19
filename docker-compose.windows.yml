@@ -39,7 +39,7 @@ version: '3.9'
 # la copia. Stessa convenzione di docker-compose.yml con .env.mac
 # / .env.ubuntu.)
 #
-# Dashboard core:      http://localhost:8088
+# Dashboard core:      http://localhost:8085 (8088 compatibility alias)
 # Open WebUI:          http://localhost:3000
 # Registry:            http://localhost:8086
 # Node 1:              http://localhost:8081/status
@@ -333,6 +333,7 @@ services:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
       - "${MESH_BIND_IP:-127.0.0.1}:8081:8081"
+      - "${MESH_BIND_IP:-127.0.0.1}:8085:8085"
       - "${MESH_BIND_IP:-127.0.0.1}:8086:8086"
       - "${MESH_BIND_IP:-127.0.0.1}:8088:8088"
 

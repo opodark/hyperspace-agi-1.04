@@ -119,7 +119,7 @@ After boot, services are reachable on `localhost`:
 | Service                | URL                            |
 | ----------------------- | ------------------------------- |
 | Open WebUI              | http://localhost:3000           |
-| Control Plane Dashboard | http://localhost:8085/dashboard |
+| Control Plane Dashboard | http://localhost:8085/dashboard (`8088` compatibility alias on Windows) |
 | Infra-UI Bridge         | http://localhost:8099           |
 | Registry                | http://localhost:8086/nodes     |
 | Node 1                  | http://localhost:8081/status    |

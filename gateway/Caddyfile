@@ -20,3 +20,9 @@
 :8088 {
 	reverse_proxy hyperspace-core:8085
 }
+
+# Canonical control-plane port. 8088 remains as a compatibility alias for
+# existing Windows deployments and scripts.
+:8085 {
+	reverse_proxy hyperspace-core:8085
+}
