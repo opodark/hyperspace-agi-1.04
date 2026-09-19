@@ -137,15 +137,73 @@ Ora c'è `./data/control-plane:/app/data` (come `./data/node-1` per il nodo e
 `${HS_DATA_DIR}` nel compose Windows), con un test che la protegge
 (`tests/test_compose_persistence.py`).
 
-## 4. Il vincolo che blocca tutto, adesso
+## 4. Il vincolo che c'era (risolto il 19/09)
 
-La vista la serve il CP, quindi **entrambi i CP devono girare la stessa
-versione**: il PC gira un'immagine vecchia (`/models/capabilities` → 404) e non ha
-`/federate/view`. Fino al suo `docker compose up -d --build` la fusione mostrerà
-`ok: false, error: "HTTP 404"` per quel peer — che è comunque l'informazione
-utile: la vista dice *perché* non ha i dati.
+La vista la serve il CP, quindi serviva che anche il peer girasse la stessa
+versione. **Fatto**: il CP del Windows risponde `/models/capabilities` → 200 e
+`/federate/view` → **403 con il messaggio di questo codice** ("condivisione della
+vista disattivata su questo CP"). Quel 403 è la prova che il codice è aggiornato:
+prima della ricostruzione la rotta non esisteva affatto (404). Non resta niente da
+ricostruire da quella parte.
 
-## 5. Prossimi passi
+Quello che manca è solo: **pairing** (0 peer su entrambi i lati) e
+`FEDERATION_VIEW_ENABLED=true` (spento su entrambi). Entrambi i gateway sono
+raggiungibili sulla 8095 attraverso il tailnet, quindi si fa in due comandi.
+
+## 5. La memoria: due sistemi diversi, non due copie
+
+Misurato interrogando i due CP:
+
+```
+Mac      /memory/stats → {"entries":14, "file":"/app/memory.json.gz", "max_entries":200, "ttl_days":7}
+Windows  /memory/stats → {"backend":"hermes", "entries":91, "sessions":8, "curated_memory_entries":0}
+```
+
+Campi diversi = sistemi diversi. Il Mac gira `MEMORY_BACKEND=legacy` (un gzip), il
+Windows `hermes` (Hermes Agent su `host.docker.internal:8098`). Quindi la memoria
+dei due CP **non è "non sincronizzata": è un'altra cosa** — e "ripartire da zero"
+da solo non li allineerebbe, ripartirebbero in parallelo e divergerebbero di nuovo.
+
+Perché è così: sul Mac Hermes **non esiste** (niente in ascolto sulla 8098,
+nessuna installazione, nessun `data/hermes-memory.token`), quindi `legacy` è stato
+messo per far funzionare la memoria lo stesso. Sul Windows Hermes c'è da settimane.
+
+### Come si allinea: **un solo Hermes**, puntato da entrambi
+
+Non è una scelta estetica, è `docs/hermes.md`:
+
+> "Non deve esistere un secondo archivio long-term proprietario di HyperSpace
+> sincronizzato in parallelo: Hermes e' la source of truth"
+
+Con un solo store la memoria **non va sincronizzata: è la stessa**, per
+costruzione. La vista di §2 serve per log, task, alias e web node — che per natura
+sono *osservazioni locali*; la memoria è un dato condiviso e va condivisa come è
+già progettata.
+
+1. L'istanza Hermes sta su **una** macchina (naturalmente il Windows:
+   `HOST_ROLE=primary-brain`, sempre acceso, Hermes già installato) e va resa
+   raggiungibile sul tailnet: oggi ascolta solo in locale — dal Mac
+   `http://100.64.31.18:8098` non risponde, mentre il suo CP sulla 8085 sì.
+2. **Azzerarla** (è il "ripartire da zero"): `MEMORY.md`, `USER.md`, `state.db`.
+3. Passare il token a chi si collega: è un segreto, quindi fuori banda, e finisce
+   in `data/hermes-memory.token` (gitignored, come tutta `data/`).
+4. Sul Mac, nell'`.env`: `MEMORY_BACKEND=hermes`,
+   `HERMES_MEMORY_URL=http://100.64.31.18:8098`,
+   `HERMES_MEMORY_TOKEN_FILE=/repo/data/hermes-memory.token`.
+5. Verifica: `/memory/stats` sulle **due** macchine deve rispondere con lo stesso
+   `backend: hermes` e lo stesso numero di `entries`.
+
+**Il costo, da decidere**: con un solo Hermes, se la sua macchina è spenta il CP
+del Mac risponde 503 sulle rotte di memoria — oggi il Mac non dipende da nessuno.
+È il prezzo di "una sola source of truth"; l'alternativa sono due store separati,
+cioè il problema di partenza.
+
+Nota: la memoria `legacy` del Mac è **effimera**. Il file è `/app/memory.json.gz`,
+cioè in `/app`, **fuori** da `/app/data`: non è coperto dal volume di §3 e sparisce
+a ogni recreate del container. È un altro motivo per cui `legacy` non è una base su
+cui costruire.
+
+## 6. Prossimi passi
 
 1. Pannello in dashboard sui dati di `/federation/views`: sorgenti, nodi con
    `seen_by`, e in evidenza i `nodes_partial`.
