@@ -46,7 +46,7 @@ WIN_IP = "100.64.31.18"
 # vedi describe().
 PORTS = {
     8081: "nodo",
-    8085: "control-plane (profilo Mac; non pubblicato sul Windows)",
+    8085: "control-plane (Mac; sul Windows solo via gateway)",
     8086: "registry",
     8088: "control-plane (Windows) / dashboard (Mac)",
     8095: "federation gateway",
