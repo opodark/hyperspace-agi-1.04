@@ -142,7 +142,17 @@ services:
       CP_URL:        "http://control-plane:8085"
       REGISTRY_URL:  "http://registry:${REGISTRY_PORT:-8086}"
       POLL_INTERVAL: "${POLL_INTERVAL:-4}"
+      # Ritmo del probe verso i servizi mostrati nella home (GET /api/services):
+      # un servizio che apre e chiude non ha bisogno di 4 secondi di risoluzione,
+      # e sono sette probe HTTP per giro.
+      SERVICES_POLL_INTERVAL: "${SERVICES_POLL_INTERVAL:-15}"
       PYTHONUNBUFFERED: "1"
+    # Serve a raggiungere servizi fuori da questo compose project (minimesh):
+    # l'host come lo vede il container. Senza, quella card direbbe per sempre
+    # "non raggiungibile" per un motivo che non ha niente a che vedere col
+    # servizio.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - hyperspace-net
     restart: unless-stopped

@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # app files
 COPY server.py .
 COPY dashboard.html .
+COPY landing.html .
 
 EXPOSE 8099
 
