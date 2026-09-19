@@ -254,6 +254,34 @@ def test_config():
 
 
 
+    # Il template puo' essere cambiato senza che il compose se ne accorga: qui si
+    # controlla che i valori attesi ci siano ancora.
+    attesi = {"VRAM_GB": "8", "NODE_TIER": "hub", "HS_MODEL_GENERAL": "qwen3.5:4b",
+              "TITLER_ENABLED": "false", "MESH_BIND_IP": "100.64.31.18"}
+    testo = (ROOT / ".env.windows").read_text()
+    righe, mancanti = [], []
+    for chiave, valore in attesi.items():
+        m = re.search(rf"(?m)^{chiave}=(.+)$", testo)
+        got = m.group(1).strip() if m else None
+        righe.append(f"{chiave}={got}" + ("" if got == valore else f"   ATTESO {valore}"))
+        if got != valore:
+            mancanti.append(chiave)
+    add("Configurazione e integrità",
+        f"Template .env.windows — {len(attesi) - len(mancanti)}/{len(attesi)} chiavi attese",
+        "ok" if not mancanti else "fail", "\n".join(righe))
+
+    _, h = sh("git rev-parse --short HEAD")
+    _, subj = sh("git log -1 --format=%s")
+    _, dirty = sh("git status --porcelain -uall")
+    _, anc = sh("git merge-base --is-ancestor origin/winZOZ main && echo assorbito || echo divergente")
+    modificati = len([l for l in dirty.splitlines() if l.strip()])
+    add("Configurazione e integrità", "Stato del repository",
+        "ok" if not modificati else "warn",
+        f"HEAD: {h.strip()}  ({subj.strip()})\n"
+        f"working tree: {modificati} file modificati\n"
+        f"branch winZOZ: {anc.strip()}")
+
+
 def test_measures(peer):
     """Cosa dichiarano e quanto rendono davvero i due nodi."""
     for etichetta, url in (("nodo locale (Mac)", "http://127.0.0.1:8081/metrics"),
