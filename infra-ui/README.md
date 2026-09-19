@@ -6,7 +6,8 @@ Dashboard 3D in tempo reale per HyperSpace-AGI.
 
 ```
 infra-ui/
-  dashboard.html   ← Single-page app (WebGL canvas + HUD)
+  landing.html     ← Home: card dei servizi con stato e latenza
+  dashboard.html   ← Single-page app (WebGL canvas + HUD), su /dashboard
   server.py        ← FastAPI SSE bridge + REST proxy
   requirements.txt
 ```
@@ -17,8 +18,15 @@ infra-ui/
 cd infra-ui
 pip install -r requirements.txt
 uvicorn server:app --host 0.0.0.0 --port 8099 --reload
-# apri http://localhost:8099
+# http://localhost:8099         → home con le card dei servizi
+# http://localhost:8099/dashboard → dashboard 3D
 ```
+
+La home (`GET /`) è un indice: per ogni servizio una card con raggiungibilità e
+latenza, alimentata da `GET /api/services` (probe HTTP dal container bridge, non
+dal browser: `internal_url` e l'URL che il browser deve aprire sono due cose
+diverse, vedi il commento su `SERVICES` in `server.py`). La dashboard 3D resta
+su `/dashboard` e `/dashboard.html`.
 
 ## Modalità
 
@@ -64,4 +72,5 @@ async def notify_ui(from_node: str, to_node: str, label: str):
 | `CP_URL` | `http://localhost:8085` | URL Control Plane |
 | `REGISTRY_URL` | `http://localhost:8086` | URL Registry |
 | `POLL_INTERVAL` | `4` | Secondi tra i poll REST |
+| `SERVICES_POLL_INTERVAL` | `15` | Secondi tra i probe dei servizi della home |
 | `UI_BRIDGE_URL` | `http://localhost:8099` | (lato CP) dove pushare gli eventi |

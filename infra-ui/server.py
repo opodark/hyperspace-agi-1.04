@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -15,6 +17,38 @@ CP_URL = os.getenv("CP_URL", "http://localhost:8085")
 REGISTRY_URL = os.getenv("REGISTRY_URL", "http://localhost:8086")
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "4"))
 DASHBOARD_HTML = os.path.join(os.path.dirname(__file__), "dashboard.html")
+LANDING_HTML = os.path.join(os.path.dirname(__file__), "landing.html")
+
+# Servizi mostrati come card nella landing page (GET /). "internal_url" e'
+# raggiunto DAL container bridge (DNS Docker / host.docker.internal per
+# minimesh, che vive in un compose project separato); "public_port"/"path"
+# sono quello che il BROWSER dell'utente deve usare per aprire il servizio
+# da fuori Docker — mai lo stesso URL per i due scopi.
+SERVICES = [
+    {"name": "landing_dashboard", "label": "Mesh Dashboard (3D)",
+     "internal_url": "http://localhost:8099/dashboard", "public_port": 8099, "path": "/dashboard"},
+    {"name": "onboarding", "label": "Onboarding / Setup",
+     "internal_url": "http://onboarding:8088/", "public_port": 8088, "path": "/"},
+    {"name": "control_plane", "label": "Control Plane",
+     "internal_url": "http://control-plane:8085/health", "public_port": 8085, "path": "/health"},
+    {"name": "open_webui", "label": "Chat (Open WebUI)",
+     "internal_url": "http://open-webui:8080/", "public_port": 3000, "path": "/"},
+    {"name": "obsidian", "label": "Note (Obsidian)",
+     "internal_url": "http://obsidian:3000/", "public_port": 8091, "path": "/"},
+    {"name": "searxng", "label": "Ricerca (SearXNG)",
+     "internal_url": "http://searxng:8080/", "public_port": 8092, "path": "/"},
+    # Progetto Docker separato (minimesh-net): nessuna garanzia di ordering/
+    # depends_on possibile, e' una probe HTTP best-effort. Se non raggiungibile
+    # (es. su una macchina dove minimesh non e' deployato) la card mostra
+    # semplicemente stato "non raggiungibile", senza rompere nient'altro.
+    {"name": "minimesh", "label": "Minimesh Web-Node",
+     "internal_url": "http://host.docker.internal:3001/", "public_port": 3001, "path": "/",
+     "optional": True},
+]
+SERVICES_POLL_INTERVAL = float(os.getenv("SERVICES_POLL_INTERVAL", "15"))
+_service_status: dict[str, dict[str, Any]] = {
+    svc["name"]: {"up": None, "latency_ms": None, "checked_at": None} for svc in SERVICES
+}
 
 app = FastAPI(title="HyperSpace-AGI Infra-UI Bridge")
 app.add_middleware(
@@ -280,6 +314,28 @@ async def _poll_log_type(client: httpx.AsyncClient, log_type: str, per_page: int
         pass
 
 
+async def _check_services(client: httpx.AsyncClient) -> None:
+    for svc in SERVICES:
+        t0 = time.monotonic()
+        try:
+            r = await client.get(svc["internal_url"], timeout=4.0)
+            up = r.status_code < 500
+        except Exception:
+            up = False
+        _service_status[svc["name"]] = {
+            "up": up,
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1) if up else None,
+            "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+
+async def _services_poller() -> None:
+    async with httpx.AsyncClient() as client:
+        while True:
+            await _check_services(client)
+            await asyncio.sleep(SERVICES_POLL_INTERVAL)
+
+
 async def _poller() -> None:
     async with httpx.AsyncClient(timeout=6) as client:
         while True:
@@ -311,11 +367,34 @@ async def _metrics_poller() -> None:
 async def _startup() -> None:
     asyncio.create_task(_poller())
     asyncio.create_task(_metrics_poller())
+    asyncio.create_task(_services_poller())
 
 
 @app.get("/")
-async def serve_dashboard() -> FileResponse:
-    return FileResponse(DASHBOARD_HTML, media_type="text/html")
+async def serve_landing() -> FileResponse:
+    """Home = indice dei servizi, non il grafo 3D.
+
+    La dashboard 3D resta su /dashboard (e /dashboard.html): era la home fino a
+    ieri, ma aprire il bridge per cercare "dove sta Open WebUI" costringeva a
+    caricare il canvas WebGL. L'indice costa una fetch a /api/services.
+    """
+    return FileResponse(LANDING_HTML, media_type="text/html")
+
+
+@app.get("/api/services")
+async def services_status() -> dict[str, Any]:
+    services = []
+    for svc in SERVICES:
+        status = _service_status.get(svc["name"], {})
+        services.append({
+            "name": svc["name"],
+            "label": svc["label"],
+            "public_port": svc["public_port"],
+            "path": svc["path"],
+            "optional": svc.get("optional", False),
+            **status,
+        })
+    return {"services": services}
 
 
 @app.get("/dashboard")
