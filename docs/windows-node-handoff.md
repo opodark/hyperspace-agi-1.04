@@ -4,6 +4,40 @@ Documento per chi prende in mano il nodo Windows 11 della mesh: stato, un
 problema aperto con la sua diagnosi, e cosa metterci. Scritto per essere letto
 da solo, senza il contesto della sessione che l'ha prodotto.
 
+## 0. Prima di tutto: `.env` non si aggiorna da solo
+
+`.env.windows` **non e' la configurazione attiva**. Il compose legge `.env`, e
+`setup.ps1` copia `.env.windows` → `.env` **solo se `.env` non esiste**
+(`Ensure-EnvFile`). `.env` e' in `.gitignore`, quindi **nessun `git pull` lo
+tocca mai**.
+
+Conseguenza: i fix in questo documento sono nel repo, ma su una macchina gia'
+avviata **non hanno effetto** finche' `.env` non viene riconciliato. Se "non
+vedi le modifiche", nella quasi totalita' dei casi e' questo — non il pull,
+non il checkout, non la cache di Docker.
+
+```powershell
+git fetch origin --prune
+git checkout main
+git pull
+
+# mostra le differenze tra la config attiva e il template aggiornato
+.\scripts\sync_env_windows.ps1
+
+# le applica: aggiorna solo le chiavi divergenti, preserva le righe locali
+.\scripts\sync_env_windows.ps1 -Apply
+```
+
+Valori che `.env` deve avere su questa macchina:
+
+```powershell
+Select-String -Path .env -Pattern 'NODE_TIER|^VRAM_GB|HS_MODEL_GENERAL|TITLER_ENABLED'
+# NODE_TIER=hub          <- altrimenti il CP lo tratta come nodo piu' debole
+# VRAM_GB=8              <- con 0 (o assente) la GPU non riceve lavoro
+# HS_MODEL_GENERAL=qwen3:8b      <- installato e dentro gli 8 GB
+# TITLER_ENABLED=false   <- non ruba VRAM al modello di servizio
+```
+
 ## 1. Aggiornare (branch `main`, e `--build` obbligatorio)
 
 ```bash
