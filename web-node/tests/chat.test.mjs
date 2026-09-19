@@ -217,13 +217,20 @@ await check("senza modello selezionato non parte nessuna richiesta", async () =>
   assert.equal(calls.length, 0);
 });
 
-await check("listModels restituisce gli id come li da' il CP (emoji comprese)", async () => {
+await check("listModels restituisce le voci del CP, blocco hyperspace compreso", async () => {
   const { impl, calls } = fetchThat(streamResponse([], {
-    json: { data: [{ id: "🕸️ qwen3:8b" }, { id: "gemma4:e4b" }] },
+    json: { data: [
+      { id: "🕸️ qwen3:8b", owned_by: "hyperspace-agi" },
+      { id: "🕸️ qwen3:8b::macbook", owned_by: "hyperspace-agi",
+        hyperspace: { base_model: "qwen3:8b", node_alias: "macbook", tier: "leaf" } },
+    ] },
   }));
   const client = new ChatClient({ baseUrl: "http://cp:8085", model: "x", fetchImpl: impl });
   const models = await client.listModels();
-  assert.deepEqual(models, ["🕸️ qwen3:8b", "gemma4:e4b"]);
+  assert.deepEqual(models.map((m) => m.id), ["🕸️ qwen3:8b", "🕸️ qwen3:8b::macbook"]);
+  // Il blocco hyperspace e' il motivo per cui si restituiscono oggetti: senza,
+  // "qwen3:8b" e "qwen3:8b su macbook" sarebbero indistinguibili.
+  assert.equal(models[1].hyperspace.node_alias, "macbook");
   assert.equal(calls[0].url, "http://cp:8085/v1/models");
 });
 
@@ -236,7 +243,7 @@ await check("la finta che imita il browser rifiuta DAVVERO un receiver sbagliato
 await check("listModels regge un fetch che controlla il receiver", async () => {
   const impl = browserLikeFetch([{ body: { data: [{ id: "qwen3:8b" }] } }]);
   const client = new ChatClient({ baseUrl: "http://cp:8085", model: "qwen3:8b", fetchImpl: impl });
-  assert.deepEqual(await client.listModels(), ["qwen3:8b"]);
+  assert.deepEqual((await client.listModels()).map((m) => m.id), ["qwen3:8b"]);
 });
 
 await check("send regge un fetch che controlla il receiver", async () => {

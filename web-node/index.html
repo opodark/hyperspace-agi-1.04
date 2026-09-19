@@ -111,6 +111,12 @@
       <button id="clearChat">Pulisci</button>
       <span class="warn" id="chatStatus"></span>
     </div>
+    <p>La tendina e' raggruppata per modello, e ogni gruppo dice su quali
+      macchine quel modello esiste: <em>Automatico</em> lascia scegliere al CP
+      fra i nodi che ce l'hanno, <em>pin: macchina</em> forza quella macchina.
+      Dietro le quinte il suffisso <code>::</code> e' il pin: se la macchina
+      pinnata non e' disponibile il CP torna da solo allo scoring automatico,
+      invece di far fallire la richiesta.</p>
     <p class="warn">Se non si connette: su una pagina in HTTPS il browser blocca un
       control-plane in <code>http://</code> (mixed content). Serve un CP raggiungibile
       in HTTPS, oppure aprire questa pagina in HTTP.</p>
@@ -119,7 +125,8 @@
 
 <script type="module">
   import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
-  import { ChatClient, ChatError, prettyModelId } from "./src/chat.js";
+  import { ChatClient, ChatError } from "./src/chat.js";
+  import { buildCatalog } from "./src/models.js";
 
   const $ = (id) => document.getElementById(id);
   const log = (message) => {
@@ -153,18 +160,50 @@
     return new ChatClient({ baseUrl, model: $("model").value });
   };
 
+  // La tendina raggruppata per modello. Senza raggruppare, le stesse voci
+  // sembrano doppioni senza senso: il CP pubblica un id per OGNI nodo che ha
+  // quel modello, piu' l'id senza suffisso del routing automatico. Il
+  // raggruppamento e le etichette stanno in src/models.js (testato); qui c'e'
+  // solo il disegno.
+  const option = (value, text) => {
+    const el = document.createElement("option");
+    el.value = value;
+    el.textContent = text;
+    return el;
+  };
+
+  const modelOptions = (catalog) => {
+    const out = [];
+    for (const group of catalog.groups) {
+      const optgroup = document.createElement("optgroup");
+      const machines = group.nodes.map((n) => n.label).join(", ");
+      optgroup.label = machines ? `${group.base}  ·  ${machines}` : group.base;
+      if (group.genericId) optgroup.append(option(group.genericId, "Automatico (sceglie il CP)"));
+      for (const machine of group.nodes) {
+        const tier = machine.tier ? ` · ${machine.tier}` : "";
+        optgroup.append(option(machine.id, `pin: ${machine.label}${tier}`));
+      }
+      out.push(optgroup);
+    }
+    if (catalog.external.length) {
+      const optgroup = document.createElement("optgroup");
+      optgroup.label = "🌐 fuori dalla mesh";
+      for (const entry of catalog.external) optgroup.append(option(entry.id, "OmniRoute (provider esterni)"));
+      out.push(optgroup);
+    }
+    return out;
+  };
+
   const loadModels = async () => {
     $("chatNote").textContent = "carico...";
     try {
-      const models = await chatClient().listModels();
-      $("model").replaceChildren(...models.map((id) => {
-        const option = document.createElement("option");
-        option.value = id;
-        option.textContent = prettyModelId(id);
-        return option;
-      }));
-      $("send").disabled = !models.length;
-      $("chatNote").textContent = models.length ? `${models.length} modelli` : "nessun modello";
+      const catalog = buildCatalog(await chatClient().listModels());
+      $("model").replaceChildren(...modelOptions(catalog));
+      const { models, pinned, machines, external } = catalog.counts;
+      $("send").disabled = !(models || external);
+      $("chatNote").textContent = `${models} modelli su ${machines} macchine`
+        + (pinned ? ` · ${pinned} pin diretti` : "")
+        + (external ? ` · ${external} esterno` : "");
     } catch (error) {
       $("model").replaceChildren();
       $("send").disabled = true;

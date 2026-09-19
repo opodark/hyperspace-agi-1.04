@@ -125,7 +125,13 @@ export class ChatClient {
     this.timeoutMs = Math.max(1000, Number(timeoutMs) || 180000);
   }
 
-  /** Gli id dei modelli, nell'ordine in cui il CP li propone. */
+  /** I modelli come li propone il CP: `[{id, owned_by, hyperspace}]`.
+   *
+   *  Si restituiscono gli OGGETTI e non i soli id perche' il blocco
+   *  `hyperspace` di ogni voce dice su quale nodo sta quel modello: senza, la
+   *  pagina non puo' distinguere "modello" da "modello su quella macchina" —
+   *  vedi src/models.js. L'id si manda al CP come arriva, emoji compresa.
+   */
   async listModels() {
     let response;
     try {
@@ -135,7 +141,7 @@ export class ChatClient {
     }
     if (!response.ok) throw new ChatError(`HTTP ${response.status}`, { status: response.status });
     const body = await response.json().catch(() => null);
-    return (((body && body.data) || []).map((m) => String(m.id)).filter(Boolean));
+    return (((body && body.data) || []).filter((m) => m && String(m.id || "").trim()));
   }
 
   /** Invia la conversazione e restituisce `{text, chunks}`.

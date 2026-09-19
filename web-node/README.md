@@ -52,8 +52,20 @@ control-plane invece che su esempi immaginati (`tests/chat.test.mjs`):
   `finish_reason: "stop"` invece che token per token;
 - `[DONE]`, eventi non JSON (keepalive), delta con il solo `role`, e CRLF.
 
-Verificato anche contro un control-plane vivo: `listModels()` legge i 21 modelli,
-e un invio reale restituisce il testo atteso. Test: `npm test` (24 + 19 check).
+Verificato anche contro un control-plane vivo: `listModels()` legge le voci del CP
+(blocco `hyperspace` compreso), un invio reale restituisce il testo atteso, e un
+invio **pinnato** su una macchina precisa (`qwen3.5:4b::win11`) e' stato servito
+da quella macchina. Test: `npm test` (26 + 22 + 9 check).
+
+**La tendina e' raggruppata** (`src/models.js`): il CP pubblica lo stesso modello
+una volta per OGNI nodo che ce l'ha (`modello::ref`), piu' la voce senza suffisso
+del routing automatico — sulla mesh reale 17 voci per 8 modelli su 2 macchine.
+Appiattite in un `<select>` sembrano doppioni senza significato; raggruppate
+dicono su quale macchina sta ogni modello e permettono di **pinnare** una
+macchina. Il raggruppamento e' una funzione pura con i suoi test
+(`tests/models.test.mjs`, su voci reali di `/v1/models`); il disegno con
+`<optgroup>` resta in `index.html`. Il `ref` e' l'alias del nodo se impostato
+(`POST /nodes/<id>/alias`), altrimenti i primi 8 caratteri del `node_id`.
 
 **Il limite da conoscere**: da una pagina in **HTTPS** il browser blocca una
 richiesta verso un control-plane in `http://` (mixed content). La chat quindi

@@ -1173,7 +1173,8 @@ def _fetch_node_models(node: dict) -> list:
     return []
 
 def _aggregate_mesh_models(force: bool = False) -> dict:
-    """Aggrega i modelli di tutti i nodi attivi. Ritorna:
+    """Aggrega i modelli dei nodi attivi e CHIAMABILI (vedi _best_endpoint).
+    Ritorna:
       - 'bare':     lista modelli senza suffisso (routing automatico, come oggi)
       - 'per_node': lista di dict {id, base_model, node_id, node_alias, tier}
                     con id nel formato 'modello::ref' per il pinning esplicito
@@ -1187,6 +1188,17 @@ def _aggregate_mesh_models(force: bool = False) -> dict:
     per_node = []
     for node in active:
         nid = node.get("node_id", "")
+        # Un nodo che il CP non puo' CHIAMARE non puo' servire nessun modello, e
+        # pubblicarlo in /v1/models crea una voce pinnabile che il routing poi
+        # scarta in silenzio. E' il caso del nodo locale pseudo-registrato per
+        # bookkeeping (endpoint vuoto, ma is_local quindi con i modelli
+        # dell'Ollama di QUESTA macchina): senza questa guardia ogni suo modello
+        # compariva una seconda volta come 'modello::local-xxxx' accanto alla
+        # voce vera del nodo che lo serve davvero — due opzioni identiche a
+        # vedersi, una delle quali non poteva funzionare. E' la stessa condizione
+        # che _select_best_node applica ai candidati.
+        if not _best_endpoint(node):
+            continue
         ref = _node_ref_for(nid)
         for m in _fetch_node_models(node):
             bare_models.add(m)
