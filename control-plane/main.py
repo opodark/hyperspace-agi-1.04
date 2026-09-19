@@ -73,6 +73,8 @@ from shared.web_node import (
     WebNodeUnknown,
     WebTaskRejected,
 )
+from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
+from shared.mcp_auth import McpAuthPolicy
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -1001,8 +1003,12 @@ def _sse_headers():
     }
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
+# NB: push_log() riscrive a "system" qualunque tipo fuori da questo insieme. Un
+# tipo nuovo che non viene aggiunto qui non fa rumore: sparisce nel tipo
+# sbagliato e non e' piu' filtrabile da /logs?type=. tests/test_log_types.py
+# estrae i tipi usati dalle route e verifica che siano tutti elencati.
 LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
-             "webui_interaction", "dream", "node_chat"}
+             "webui_interaction", "dream", "node_chat", "web_task", "mcp"}
 
 def push_log(type_, summary, detail="", source="control-plane", target="", status="info", trace_id=""):
     entry = {
@@ -2082,6 +2088,12 @@ def omega_health():
 # nuovi senza motivo.
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
+# Policy di accesso a /mcp: token, identita' del chiamante e allowlist dei tool.
+# /mcp espone i tool a runtime ESTERNI (Hermes, Claude, ...): senza un token
+# configurato resta CHIUSO, non aperto. Vedi shared/mcp_auth.py e docs/hermes.md.
+_mcp_policy = McpAuthPolicy.from_env()
+_MCP_TOKEN_HEADER = "X-Hyperspace-Mcp-Token"
+
 
 def _mcp_tools() -> list:
     """BUILTIN_TOOLS tradotti nello schema MCP (parameters -> inputSchema)."""
@@ -2099,6 +2111,23 @@ def _mcp_tools() -> list:
     return out
 
 
+def _mcp_catalogue() -> list:
+    """Nomi dei tool pubblicati: l'allowlist si valuta sempre su questo."""
+    return [t["name"] for t in _mcp_tools()]
+
+
+def _mcp_presented_token() -> str:
+    """Token dall'header standard (Authorization: Bearer) o dal fallback.
+
+    L'header standard e' quello che i client MCP sanno configurare da soli; il
+    secondo esiste per parita' con X-Hyperspace-Network-Token.
+    """
+    header = request.headers.get("Authorization", "") or ""
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return (request.headers.get(_MCP_TOKEN_HEADER, "") or "").strip()
+
+
 @app.route('/mcp', methods=['POST'])
 def omega_mcp():
     payload = request.get_json(force=True, silent=True) or {}
@@ -2113,12 +2142,50 @@ def omega_mcp():
     def _err(msg, code=-32600):
         return jsonify({"jsonrpc": "2.0", "error": {"code": code, "message": msg}, "id": rpc_id})
 
+    def _auth_err(msg, status):
+        """Autenticazione fallita: HTTP 401/503 con corpo JSON-RPC.
+
+        Il trasporto HTTP di MCP vuole un 401 (con WWW-Authenticate); un client
+        JSON-RPC si aspetta comunque un oggetto. Facciamo entrambe le cose.
+        """
+        response = jsonify({"jsonrpc": "2.0",
+                            "error": {"code": -32001, "message": msg}, "id": rpc_id})
+        response.status_code = status
+        if status == 401:
+            response.headers["WWW-Authenticate"] = 'Bearer realm="hyperspace-mcp"'
+        return response
+
+    # ── GATE ──────────────────────────────────────────────────────────────────
+    # Prima dell'autenticazione non si esegue NULLA: nemmeno le notifiche, che
+    # altrimenti resterebbero un canale non autenticato.
+    if not _mcp_policy.enabled:
+        return _auth_err("MCP disattivato su questo control-plane", 503)
+    if not _mcp_policy.configured:
+        if not (_mcp_policy.allow_loopback and _mcp_policy.is_loopback(request.remote_addr)):
+            return _auth_err(
+                "MCP non configurato: serve un token di almeno "
+                f"{MIN_MCP_TOKEN_LENGTH} caratteri in MCP_CLIENTS o MCP_TOKEN", 503)
+        client = _mcp_policy.loopback_client()
+    else:
+        client = _mcp_policy.authenticate(_mcp_presented_token())
+        if client is None:
+            # Il token non viene mai loggato, nemmeno troncato.
+            push_log('mcp', 'MCP: token assente o non valido',
+                     f"from={request.remote_addr} method={method}", status='warn')
+            return _auth_err("Token MCP mancante o non valido", 401)
+
+    catalogue = _mcp_catalogue()
+
     # Le notifiche non hanno id e non vogliono risposta.
     if rpc_id is None and method.startswith("notifications/"):
         return "", 202
 
     if method == "initialize":
         asked = str(params.get("protocolVersion") or "").strip()
+        info = params.get("clientInfo") or {}
+        push_log('mcp', f"MCP initialize da {client.name}",
+                 f"client_info={info} tools_visibili={len(catalogue)}",
+                 source=f"mcp:{client.name}", status='success')
         return _result({
             "protocolVersion": asked or MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
@@ -2129,7 +2196,11 @@ def omega_mcp():
         return _result({})
 
     if method == "tools/list":
-        return _result({"tools": _mcp_tools()})
+        # L'allowlist non e' solo un controllo su tools/call: il client VEDE
+        # esattamente i tool che puo' usare, cosi' non prova a chiamarne altri.
+        visible = [t for t in _mcp_tools()
+                   if _mcp_policy.allows(client, t["name"], catalogue)]
+        return _result({"tools": visible})
 
     if method == "tools/call":
         tool_name = str(params.get("name", ""))
@@ -2137,18 +2208,38 @@ def omega_mcp():
         if tool_name == "omega_call":
             tool_name = str(arguments.get("tool", ""))
             arguments = arguments.get("args") or {}
-        if not any(t["name"] == tool_name for t in _mcp_tools()):
+        # Il permesso si valuta PRIMA dell'esistenza: con un allowlist esplicito
+        # un tool non permesso e uno inesistente danno la stessa risposta, cosi'
+        # un client non autorizzato non puo' enumerare il catalogo.
+        if not _mcp_policy.allows(client, tool_name, catalogue):
+            push_log('mcp', f"MCP {client.name}: tool non permesso {tool_name or '(vuoto)'}",
+                     source=f"mcp:{client.name}", status='warn')
+            return _err(f"Tool non permesso per il client '{client.name}': {tool_name}", -32001)
+        if tool_name not in catalogue:
             return _err(f"Unknown tool: {tool_name}", -32602)
         try:
             text = _execute_tool_call(tool_name, arguments)
         except Exception as exc:
             # Il tool e' fallito: per MCP non e' un errore di protocollo ma un
             # risultato con isError, cosi' il modello puo' leggerlo e reagire.
+            push_log('mcp', f"MCP {client.name}: {tool_name} fallito",
+                     detail=str(exc)[:160], source=f"mcp:{client.name}", status='warn')
             return _result({"content": [{"type": "text", "text": f"Tool error: {exc}"}],
                             "isError": True})
+        push_log('mcp', f"MCP {client.name}: {tool_name}",
+                 f"args={str(arguments)[:120]}", source=f"mcp:{client.name}", status='success')
         return _result({"content": [{"type": "text", "text": str(text)}], "isError": False})
 
     return _err(f"Unsupported method: {method}", -32601)
+
+
+@app.route('/mcp/status')
+def mcp_status():
+    """Diagnostica per l'operatore. Non contiene MAI token (vedi describe())."""
+    catalogue = _mcp_catalogue()
+    return jsonify({**_mcp_policy.describe(catalogue),
+                    "published_tools": catalogue,
+                    "protocol_version": MCP_PROTOCOL_VERSION})
 
 
 # ── LOG ENDPOINTS ─────────────────────────────────────────────────────────────

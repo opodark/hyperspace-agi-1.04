@@ -52,13 +52,50 @@ Hermes Agent ---- MEMORY.md, USER.md, state.db, skills
 ```
 
 Hermes supporta endpoint OpenAI-compatible personalizzati e server MCP HTTP
-con header configurabili. Il control-plane espone gia' `/v1` e `/mcp`, ma MCP
-deve ricevere autenticazione, identita' del chiamante e allowlist prima di
-essere usato fuori dal loopback.
+con header configurabili. Il control-plane espone `/v1` e `/mcp`: MCP richiede
+ora autenticazione, identita' del chiamante e allowlist (vedi sotto), mentre
+`/v1` resta senza token perche' lo consuma anche Open WebUI — va quindi esposto
+solo su loopback o attraverso il tunnel Tailscale, mai direttamente in LAN.
+
+## Accesso MCP
+
+`/mcp` espone i tool a runtime esterni, quindi non ha un default aperto: senza
+token risponde 503 e non serve nessuno.
+
+```dotenv
+# Un cliente per runtime: il nome finisce nei log di audit.
+MCP_CLIENTS="hermes=<token di almeno 32 caratteri>;ops=<altro token>"
+# Allowlist per cliente: "*" = tutto il catalogo pubblicato.
+MCP_CLIENT_TOOLS="hermes=omega_query,omega_store,get_mesh_status;ops=*"
+# true solo per sviluppo in ascolto su 127.0.0.1: e' una scorciatoia opt-in.
+MCP_ALLOW_LOOPBACK=false
+# false spegne MCP senza rimuovere i segreti.
+MCP_ENABLED=true
+```
+
+Il token si presenta con l'header standard `Authorization: Bearer <token>`
+(quello che i client MCP sanno configurare da soli) oppure con
+`X-Hyperspace-Mcp-Token`. Tre proprieta' valgono la pena di essere esplicite:
+
+1. un cliente senza voce in `MCP_CLIENT_TOOLS` non riceve NESSUN tool
+   (fail-closed): meglio un cliente inerte e visibile che uno con tutti i tool
+   per una svista di configurazione;
+2. l'allowlist filtra anche `tools/list`, non solo `tools/call`: il client vede
+   esattamente cio' che puo' usare;
+3. un tool non permesso e uno inesistente danno la stessa risposta a un cliente
+   con allowlist esplicita, cosi' non puo' enumerare il catalogo.
+
+`GET /mcp/status` mostra client, tool effettivi e problemi di configurazione, e
+non contiene mai i token.
+
+Per un profilo Hermes inizialmente read-only l'allowlist minima e' quella
+dell'esempio: niente `code_sandbox`, niente connettori con credenziali.
 
 ## Stato corrente
 
 - Gli endpoint HyperSpace `/v1` e `/mcp` sono raggiungibili sul nodo Windows.
+  `/mcp` richiede ora un token per cliente (vedi Accesso MCP): senza token
+  configurato risponde 503 invece di servire chiunque raggiunga la porta.
 - Hermes Agent 0.21.3 e' installato nativamente in
   `%LOCALAPPDATA%\hermes`; provider e credenziali modello restano da configurare.
 - Il bridge autenticato `scripts/hermes_memory_bridge.py` usa direttamente le
