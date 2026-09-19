@@ -28,6 +28,7 @@ See the [HIP section of ROADMAP.md](ROADMAP.md#visione-a-lungo-termine--hyperspa
 
 - `registry/` — service discovery, node registry, public landing/dashboard.
 - `control-plane/` — orchestration, OpenAI-compatible API, tool calling loop, connector fabric, dashboard, task management.
+- Tool & Skill Forge — dashboard workflow for generating, editing, validating and explicitly approving inert tool or skill drafts; see [`docs/tool-skill-forge.md`](docs/tool-skill-forge.md).
 - `node/` — agent worker runtime (ECDSA identity, PEX, `/execute`).
 - `memory-graph/` — exports control-plane memory to the Obsidian vault; note titling is routed through the control-plane task queue (`/task/create` + `/task/assign`), reusing the same node scoring as any other task.
 - `obsidian/` — Obsidian in the browser (KasmVNC) for browsing the memory vault.
@@ -128,6 +129,12 @@ After boot, services are reachable on `localhost`:
 | Federation Gateway       | http://localhost:8095           |
 
 On Windows, use `docker-compose.windows.yml` instead (see comments at the top of that file for the `.env.windows` → `.env` copy step it expects).
+
+The optional browser IDE used by the Tool & Skill Forge can be started separately:
+
+```powershell
+docker compose -f docker-compose.windows.yml --profile ide up -d hyperspace-ide
+```
 
 **Development** (Node/TS side of the control plane — HIP intent router, not the Python `main.py` service that actually ships in the containers):
 ```bash

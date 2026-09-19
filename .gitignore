@@ -39,6 +39,8 @@ wg0.conf
 .idea/
 *.swp
 *.swo
+.worktrees/
+.acl-backup-*.txt
 
 # macOS
 .DS_Store

@@ -95,6 +95,9 @@ services:
       HS_ENABLE_TOOL_USE: ${HS_ENABLE_TOOL_USE}
       OLLAMA_REQUEST_TIMEOUT: ${OLLAMA_REQUEST_TIMEOUT}
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH}
+      FORGE_ADMIN_TOKEN: "${FORGE_ADMIN_TOKEN:-}"
+      FORGE_DIR: /app/data/forge
+      CODE_SERVER_PORT: "${CODE_SERVER_PORT:-8443}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -332,6 +335,24 @@ services:
       - "${MESH_BIND_IP:-127.0.0.1}:8081:8081"
       - "${MESH_BIND_IP:-127.0.0.1}:8086:8086"
       - "${MESH_BIND_IP:-127.0.0.1}:8088:8088"
+
+  # -- Browser IDE (optional) -------------------------------------------------
+  # Avvio esplicito: docker compose -f docker-compose.windows.yml --profile ide up -d hyperspace-ide
+  # Solo localhost, repository RW, nessun accesso al socket Docker dell'host.
+  hyperspace-ide:
+    image: codercom/code-server:latest
+    container_name: hyperspace-ide
+    profiles: ["ide"]
+    restart: ${RESTART_POLICY}
+    environment:
+      TZ: ${TZ}
+      PASSWORD: "${CODE_SERVER_PASSWORD:-change-me-before-remote-use}"
+    working_dir: /home/coder/project
+    volumes:
+      - ./:/home/coder/project:rw
+      - ${HS_DATA_DIR}/forge:/home/coder/forge:rw
+    ports:
+      - "127.0.0.1:${CODE_SERVER_PORT:-8443}:8080"
 
   # -- Obsidian nel browser (KasmVNC) -----------------------------------------
   hyperspace-obsidian:
