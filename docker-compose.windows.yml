@@ -152,8 +152,10 @@ services:
       - ${HS_MEMORY_DIR}:/app/memory
       - ${HS_LOG_DIR}:/app/logs
       - sandbox_exchange:/sandbox-exchange
-    ports:
-      - "${MESH_BIND_IP:-127.0.0.1}:8088:8085"
+    # Nessuna porta pubblicata qui: hyperspace-gateway fa da front door
+    # (vedi sotto e docs/tailscale-mesh-setup.md — motivo: binding diretto
+    # su 3+ IP host in parallelo su piu' container manda in errore il
+    # port-forwarding di Docker Desktop su Windows).
 
   # -- OmniRoute (fallback esterno) --------------------------------------------
   # Parita' con docker-compose.yml: quando la mesh non riesce a servire una
@@ -234,8 +236,7 @@ services:
       NODE_TTL: "${NODE_TTL:-300}"
       REGISTRY_PUBLIC_URL: "${REGISTRY_PUBLIC_URL:-}"
       PYTHONUNBUFFERED: "1"
-    ports:
-      - "${MESH_BIND_IP:-127.0.0.1}:${REGISTRY_PORT:-8086}:${REGISTRY_PORT:-8086}"
+    # Nessuna porta pubblicata qui: vedi hyperspace-gateway.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${REGISTRY_PORT:-8086}/health"]
       interval: 15s
@@ -301,8 +302,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data/node-1:/app/data
-    ports:
-      - "${MESH_BIND_IP:-127.0.0.1}:8081:8084"
+    # Nessuna porta pubblicata qui: vedi hyperspace-gateway.
 
     # ── GPU (RTX 3060): al momento NON abilitata qui ────────────────────────
     # Il nodo dichiara la sua VRAM a mano (VRAM_GB nel .env) perche' senza
@@ -385,6 +385,29 @@ services:
       - ./data/obsidian-vault:/vault
     ports:
       - "${MESH_BIND_IP:-127.0.0.1}:8090:8090"
+
+  # -- Gateway (front door unico per core/registry/node-1) --------------------
+  # Consolida qui il bind multi-IP (localhost/Tailscale/WireGuard): vedi
+  # gateway/Caddyfile per il perche'. docker-compose.tailscale.yml e
+  # docker-compose.wireguard.yml aggiungono le porte extra QUI, non piu'
+  # sui singoli servizi.
+  hyperspace-gateway:
+    image: caddy:2-alpine
+    container_name: hyperspace-gateway
+    restart: ${RESTART_POLICY}
+    depends_on:
+      hyperspace-core:
+        condition: service_started
+      hyperspace-registry:
+        condition: service_healthy
+      hyperspace-node-1:
+        condition: service_started
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${MESH_BIND_IP:-127.0.0.1}:8081:8081"
+      - "${MESH_BIND_IP:-127.0.0.1}:8086:8086"
+      - "${MESH_BIND_IP:-127.0.0.1}:8088:8088"
 
   # -- Obsidian nel browser (KasmVNC) -----------------------------------------
   hyperspace-obsidian:

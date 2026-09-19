@@ -1,0 +1,22 @@
+# Single front door for the mesh's externally-reachable ports. Binding 3+
+# host IPs (localhost/Tailscale/WireGuard) directly on core/registry/node-1
+# made Docker Desktop's Windows port-forwarding layer fail unpredictably
+# (verified 2026-09-13: same failure survived a Docker Desktop restart and
+# a full `wsl --shutdown`). Consolidating the multi-IP bind onto this one
+# container, with the backends published only on internal ports, avoided it.
+{
+	auto_https off
+	admin off
+}
+
+:8081 {
+	reverse_proxy hyperspace-node-1:8084
+}
+
+:8086 {
+	reverse_proxy hyperspace-registry:8086
+}
+
+:8088 {
+	reverse_proxy hyperspace-core:8085
+}

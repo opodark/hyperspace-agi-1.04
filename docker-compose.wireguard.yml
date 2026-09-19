@@ -1,0 +1,30 @@
+# Add WireGuard mesh access via a SECOND, dedicated gateway container.
+# Verified 2026-09-13: this Docker Desktop/Windows install hard-fails
+# (silently — no error, zero ports actually published) as soon as a THIRD
+# distinct host IP is added to bindings already carrying two (regardless of
+# which container holds them, and not specific to the wg0 interface: tested
+# localhost+Tailscale alone, localhost+WireGuard alone, both fine; adding a
+# third IP is what breaks it). Two IPs per container port is the max this
+# host supports, so WireGuard gets its own proxy container instead of a
+# third port entry on hyperspace-gateway.
+#
+# Use together with docker-compose.windows.yml (+ docker-compose.tailscale.yml
+# if that's also active); set WIREGUARD_BIND_IP in .env to this host's wg0 IP.
+services:
+  hyperspace-gateway-wg:
+    image: caddy:2-alpine
+    container_name: hyperspace-gateway-wg
+    restart: ${RESTART_POLICY}
+    depends_on:
+      hyperspace-core:
+        condition: service_started
+      hyperspace-registry:
+        condition: service_healthy
+      hyperspace-node-1:
+        condition: service_started
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${WIREGUARD_BIND_IP:?Set WIREGUARD_BIND_IP}:8088:8088"
+      - "${WIREGUARD_BIND_IP:?Set WIREGUARD_BIND_IP}:8086:8086"
+      - "${WIREGUARD_BIND_IP:?Set WIREGUARD_BIND_IP}:8081:8081"
