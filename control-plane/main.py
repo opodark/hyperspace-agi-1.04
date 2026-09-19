@@ -397,6 +397,114 @@ def _warn_tools_stripped(model: str) -> None:
              f"elenco completo su GET /models/capabilities.",
              status='warn')
 
+# ── BUDGET DI TEMPO DI UNA RICHIESTA ─────────────────────────────────────────
+# Perche' esistono: in sessione di test reale `deepseek-r1:8b` con 600 token di
+# risposta NON concludeva entro i 180s fissi, ne' sul nodo Windows ne' su Ollama
+# locale (Read timed out, verificato lato server). Con i modelli reasoning il
+# thinking consuma decine di secondi prima che l'answer cominci, e con ds4 il
+# thinking e' acceso di default.
+#
+# Due meccanismi distinti:
+#   1. timeout per SINGOLO tentativo, scelto in base al modello;
+#   2. budget TOTALE della richiesta, che limita la catena di fallback invece di
+#      sommarsi a essa (prima: nodo 180s + OmniRoute + ollama-direct 180s =
+#      oltre tre minuti di attesa prima di ammettere il fallimento).
+INFERENCE_TIMEOUT_S           = int(os.getenv("INFERENCE_TIMEOUT_S", "180"))
+INFERENCE_TIMEOUT_REASONING_S = int(os.getenv("INFERENCE_TIMEOUT_REASONING_S", "600"))
+FALLBACK_MIN_ATTEMPT_S        = int(os.getenv("FALLBACK_MIN_ATTEMPT_S", "60"))
+# Il budget TOTALE deve poter contenere almeno un tentativo lungo piu' un
+# ripiego, altrimenti il primo tentativo lo sfora e il messaggio di errore
+# diventa incoerente ("budget di 300s esaurito dopo 600s", osservato in test).
+# Il controllo della deadline avviene FRA gli stadi, non dentro un tentativo:
+# un default piu' corto del timeout reasoning non e' un budget piu' severo, e'
+# solo un budget che non puo' essere rispettato.
+REQUEST_DEADLINE_S = max(
+    int(os.getenv("REQUEST_DEADLINE_S", "0") or 0),
+    INFERENCE_TIMEOUT_REASONING_S + FALLBACK_MIN_ATTEMPT_S,
+)
+
+# Modelli che ragionano: il testo puo' arrivare dopo molti token di thinking.
+# Override da env REASONING_MODELS (lista separata da virgole, "*" = tutti):
+# stessa semantica di TOOL_CAPABLE_MODELS, cosi' un modello nuovo non richiede
+# una patch. deepseek-v4/glm-5/qwen3.8 sono gli alias che usa ds4.
+_REASONING_OVERRIDE = os.getenv("REASONING_MODELS", "")
+_REASONING_PATTERNS = ["qwen3", "deepseek-r1", "deepseek-v4", "deepseek-r1-pro",
+                       "magistral", "glm-5", "qwen3.8"]
+
+def _is_reasoning_model(model_name: str) -> bool:
+    override = _REASONING_OVERRIDE.strip()
+    if override == "*":
+        return True
+    if override:
+        return any(p.strip().lower() and p.strip().lower() in str(model_name).lower()
+                   for p in override.split(","))
+    m = str(model_name or "").lower().split(":")[0]
+    return any(p in m for p in _REASONING_PATTERNS)
+
+def _inference_timeout(model_name: str) -> int:
+    """Secondi concessi a UN tentativo di inferenza, in base al modello."""
+    seconds = INFERENCE_TIMEOUT_REASONING_S if _is_reasoning_model(model_name) \
+        else INFERENCE_TIMEOUT_S
+    return max(10, int(seconds))
+
+class RequestDeadline:
+    """Budget totale condiviso da tutta la catena di fallback di una richiesta.
+
+    Il clock e' iniettabile perche' la logica sia testabile senza attese reali.
+    """
+
+    def __init__(self, total_s: int = None, clock=time.time):
+        self.clock = clock
+        self.total_s = max(10, int(REQUEST_DEADLINE_S if total_s is None else total_s))
+        self.started_at = clock()
+        self.deadline = self.started_at + self.total_s
+
+    def remaining(self) -> float:
+        return self.deadline - self.clock()
+
+    def allows(self, min_s: int = None) -> bool:
+        """True se resta abbastanza budget perche' un altro tentativo abbia
+        senso: sotto la soglia si fallisce subito, invece di sprecare il tempo
+        residuo in un tentativo che non potra' completare."""
+        threshold = FALLBACK_MIN_ATTEMPT_S if min_s is None else min_s
+        return self.remaining() >= max(1, int(threshold))
+
+    def elapsed(self) -> float:
+        return self.clock() - self.started_at
+
+def _is_error_payload(payload) -> bool:
+    """True se la risposta e' un errore travestito da risposta.
+
+    `_run_tool_loop` e i fallback restituiscono `{"error": {...}}` invece di
+    sollevare un'eccezione: senza questo controllo il task veniva marcato `done`
+    e il client riceveva HTTP 200 con un corpo d'errore — un fallimento
+    indistinguibile da un successo se non leggendo il corpo (osservato in
+    sessione di test: due timeout da 180s chiusi come "done").
+    """
+    return isinstance(payload, dict) and bool(payload.get("error"))
+
+def _respond_result(result_json, status_error: int = 502):
+    """Risposta HTTP coerente col payload: un errore non esce come 200."""
+    if _is_error_payload(result_json):
+        return jsonify(result_json), status_error
+    return jsonify(result_json)
+
+def _deadline_exceeded(task, task_id, deadline):
+    """Interrompe la catena di fallback dicendolo, invece di bruciare minuti.
+
+    HTTP 504: il lavoro non e' stato fatto e non e' colpa del client. Un 200 con
+    un corpo d'errore, come accadeva prima, faceva sembrare riuscito un
+    fallimento (verificato in sessione di test).
+    """
+    reason = (f"budget di {deadline.total_s}s esaurito dopo {deadline.elapsed():.0f}s "
+              f"senza un esito: agli stadi restanti non resta tempo per un tentativo utile")
+    task["status"] = "failed"
+    task["error"] = reason
+    db.update_task(task_id, "failed", error=reason)
+    push_log('inter_node_message', f'task {task_id} interrotto per budget di tempo',
+             reason, source='control-plane', target='webui', status='failed')
+    return jsonify({"error": {"message": reason, "type": "deadline_exceeded"}}), 504
+
 def _use_native_chat_fallback(model_name: str) -> bool:
     """True se il fallback Ollama-diretto deve passare dal percorso nativo
     /api/chat. Confronto per substring sul nome base del modello, come
@@ -1505,9 +1613,11 @@ def _call_ollama(ollama_base: str, payload: dict, sign: bool = False, node_id: s
         body = json.dumps(payload, sort_keys=True).encode()
         headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
         headers["Content-Type"] = "application/json"
-        r = requests.post(f"{ollama_base}/v1/chat/completions", data=body, headers=headers, timeout=180)
+        r = requests.post(f"{ollama_base}/v1/chat/completions", data=body, headers=headers,
+                          timeout=_inference_timeout(payload.get("model", "")))
     else:
-        r = requests.post(f"{ollama_base}/v1/chat/completions", json=payload, timeout=180)
+        r = requests.post(f"{ollama_base}/v1/chat/completions", json=payload,
+                          timeout=_inference_timeout(payload.get("model", "")))
 
     if r.status_code == 503:
         try:
@@ -1928,7 +2038,8 @@ def v1_chat_completions():
                     omni_headers["x-omniroute-compression"] = PROMPT_COMPRESSION_MODE
                 try:
                     req = requests.post(f"{OMNIROUTE_URL}/v1/chat/completions",
-                                         json=stream_data, headers=omni_headers, stream=True, timeout=180)
+                                         json=stream_data, headers=omni_headers, stream=True,
+                                         timeout=_inference_timeout(stream_data.get("model", "")))
                     with req as resp:
                         for chunk in resp.iter_content(chunk_size=None):
                             if chunk:
@@ -2000,7 +2111,8 @@ def v1_chat_completions():
                     headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
                     headers["Content-Type"] = "application/json"
                     req = requests.post(f"{endpoint_c}/v1/chat/completions",
-                                        data=body, headers=headers, stream=True, timeout=180)
+                                        data=body, headers=headers, stream=True,
+                                        timeout=_inference_timeout(stream_data.get("model", "")))
                 except Exception:
                     continue  # nodo irraggiungibile, prova il prossimo candidato
 
@@ -2054,7 +2166,8 @@ def v1_chat_completions():
                               "stream": False, "think": bool(stream_data.get("think", False))}
                     if stream_data.get("tools"):
                         native["tools"] = stream_data["tools"]
-                    native_resp = requests.post(f"{ollama_base}/api/chat", json=native, timeout=180)
+                    native_resp = requests.post(f"{ollama_base}/api/chat", json=native,
+                                                timeout=_inference_timeout(model))
                     native_message = (native_resp.json().get("message") or {})
                     if native_message.get("tool_calls"):
                         # Il modello vuole chiamare un tool. Il percorso nativo
@@ -2084,7 +2197,8 @@ def v1_chat_completions():
                     yield f"data: {json.dumps(direct_chunk, ensure_ascii=False)}\n\n".encode()
                     yield b"data: [DONE]\n\n"
                 else:
-                    req = requests.post(f"{ollama_base}/v1/chat/completions", json=stream_data, stream=True, timeout=180)
+                    req = requests.post(f"{ollama_base}/v1/chat/completions", json=stream_data,
+                                        stream=True, timeout=_inference_timeout(model))
                     with req as resp:
                         for chunk in resp.iter_content(chunk_size=None):
                             if chunk:
@@ -2102,6 +2216,12 @@ def v1_chat_completions():
         return Response(stream_with_context(_stream_gen()), headers=_sse_headers())
 
     # ── NON-STREAM ────────────────────────────────────────────────────────────
+    # Budget TOTALE della richiesta, condiviso da tutta la catena di fallback.
+    # Prima ogni stadio aveva il suo timeout e la catena li SOMMAVA: nodo 180s +
+    # OmniRoute + ollama-direct 180s = oltre tre minuti prima di ammettere il
+    # fallimento. Ora si smette appena il tempo residuo non basta piu' per un
+    # tentativo sensato, e lo si dice esplicitamente.
+    deadline = RequestDeadline()
     # Scelta esplicita di 🌐 OmniRoute dal menu: salta mesh e federazione,
     # l'utente ha gia' deciso di voler uscire dalla mesh locale.
     if omniroute_direct:
@@ -2109,7 +2229,7 @@ def v1_chat_completions():
         if omni_result:
             _finalize_task(task, task_id, "omniroute", model, prompt, omni_result)
             push_log('inter_node_message', f'task {task_id} -> omniroute (selezione esplicita)', status='success')
-            return jsonify(omni_result)
+            return _respond_result(omni_result)
         task["status"] = "failed"
         task["error"]  = "OmniRoute non raggiungibile o nessun provider disponibile"
         db.update_task(task_id, "failed", error=task["error"])
@@ -2138,11 +2258,13 @@ def v1_chat_completions():
                      str(result_json.get("error"))[:160], status='warn')
             continue
         _finalize_task(task, task_id, node_id, model, prompt, result_json)
-        return jsonify(result_json)
+        return _respond_result(result_json)
 
     # Nessun nodo locale disponibile: prova la federazione prima di ricadere
     # su Ollama diretto. Un CP federato viene trattato come un "super-nodo":
     # non sappiamo (né ci interessa) quale nodo useranno per eseguirlo.
+    if not deadline.allows():
+        return _deadline_exceeded(task, task_id, deadline)
     fed_result, fed_peer = _try_federated_execution(prompt, model)
     if fed_result:
         node_label = f"federated:{fed_peer['peer_id'][:12]}"
@@ -2150,22 +2272,26 @@ def v1_chat_completions():
         _finalize_task(task, task_id, node_label, model, prompt, inner_result)
         push_log('inter_node_message', f'task {task_id} federato -> {fed_peer.get("label") or node_label}',
                  status='success')
-        return jsonify(inner_result)
+        return _respond_result(inner_result)
 
     # Mesh e federazione hanno fallito entrambe: prova OmniRoute (provider
     # esterni free-tier) prima dell'ultimo fallback locale su Ollama diretto.
+    if not deadline.allows():
+        return _deadline_exceeded(task, task_id, deadline)
     omni_result = _try_omniroute_fallback(data)
     if omni_result:
         _finalize_task(task, task_id, "omniroute", model, prompt, omni_result)
         push_log('inter_node_message', f'task {task_id} -> omniroute (fallback esterno)', status='success')
-        return jsonify(omni_result)
+        return _respond_result(omni_result)
 
     task["node"] = "ollama-direct"
     db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
+    if not deadline.allows():
+        return _deadline_exceeded(task, task_id, deadline)
     try:
         result_json = _run_tool_loop(data, ollama_base, sign=False)
         _finalize_task(task, task_id, "ollama-direct", model, prompt, result_json)
-        return jsonify(result_json)
+        return _respond_result(result_json)
     except Exception as e:
         task["status"] = "failed"
         task["error"]  = str(e)
@@ -2174,6 +2300,20 @@ def v1_chat_completions():
         return jsonify({"error": {"message": str(e), "type": "server_error"}}), 500
 
 def _finalize_task(task, task_id, node_id, model, prompt, result_json):
+    if _is_error_payload(result_json):
+        # Un errore NON e' un completamento: niente memoria, niente log di
+        # successo, stato failed. Prima finiva come "done" con HTTP 200, quindi
+        # un fallimento era indistinguibile da un successo senza leggere il
+        # corpo (osservato in sessione di test: due timeout chiusi come done).
+        detail = str(result_json.get("error"))[:300]
+        task["status"] = "failed"
+        task["error"] = detail
+        task["result"] = result_json
+        task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        db.update_task(task_id, "failed", error=detail)
+        push_log('inter_node_message', f'task {task_id} FAILED su {node_id[:12]}',
+                 detail, source=node_id[:12], target='webui', status='failed')
+        return
     # Normalizza PRIMA di leggere e registrare: i chiamanti fanno
     # `jsonify(result_json)` subito dopo questa funzione, quindi cio' che
     # sistemiamo qui e' anche cio' che riceve il client. Copre in un punto solo

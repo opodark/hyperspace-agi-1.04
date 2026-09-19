@@ -69,6 +69,12 @@ OLLAMA_URL           = os.getenv("OLLAMA_URL", "http://ollama:11434")
 # /api/chat quando qualcuno chiama ollama-proxy direttamente.
 OLLAMA_PROXY_URL     = os.getenv("OLLAMA_PROXY_URL", "http://localhost:11435")
 DEFAULT_MODEL        = os.getenv("OLLAMA_MODEL", "")
+# Deve stare SOPRA il timeout del control-plane: il nodo e' un proxy, e se taglia
+# per primo il CP non ha modo di sapere che il backend era solo lento. Alzato a
+# 600s perche' i modelli reasoning (deepseek-r1, qwen3 col thinking, ds4 dove il
+# thinking e' acceso di default) superano i 180s fissi di prima: verificato in
+# sessione di test con Read timed out su entrambi i percorsi.
+NODE_INFERENCE_TIMEOUT_S = float(os.getenv("NODE_INFERENCE_TIMEOUT_S", "600"))
 HEARTBEAT_EVERY      = int(os.getenv("HEARTBEAT_EVERY", 15))
 PUBLIC_ENDPOINT      = os.getenv("PUBLIC_ENDPOINT", "").strip().rstrip("/")
 BOOT_PEERS           = [p.strip().rstrip("/") for p in os.getenv("BOOT_PEERS", "").split(",") if p.strip()]
@@ -922,7 +928,7 @@ async def v1_chat_completions_proxy(request: Request):
 
         async def _stream_gen():
             try:
-                async with httpx.AsyncClient(timeout=180.0) as client:
+                async with httpx.AsyncClient(timeout=NODE_INFERENCE_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_PROXY_URL}/v1/chat/completions",
                         content=body, headers={"Content-Type": "application/json"},
@@ -939,7 +945,7 @@ async def v1_chat_completions_proxy(request: Request):
     if not await _try_acquire_slot(model):
         return _busy_response()
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=NODE_INFERENCE_TIMEOUT_S) as client:
             r = await client.post(
                 f"{OLLAMA_PROXY_URL}/v1/chat/completions",
                 content=body, headers={"Content-Type": "application/json"},

@@ -34,6 +34,10 @@ CONTROL_PLANE_URL = os.getenv("CONTROL_PLANE_URL", "").rstrip("/")
 NODE_TIER         = os.getenv("NODE_TIER", "leaf")
 PUBLIC_ENDPOINT   = os.getenv("PUBLIC_ENDPOINT", "").rstrip("/")
 PROXY_PORT        = int(os.getenv("PROXY_PORT", 11435))
+# Ultimo hop verso Ollama: sopra il timeout del nodo e del control-plane,
+# altrimenti taglia per primo e i livelli sopra interpretano un backend lento
+# come un backend assente. Vedi NODE_INFERENCE_TIMEOUT_S in node/main.py.
+OLLAMA_TIMEOUT_S  = float(os.getenv("OLLAMA_TIMEOUT_S", "600"))
 
 DATA_DIR   = Path(os.getenv("DATA_DIR", "/app/data"))
 INTERACTION_LOG_FILE = DATA_DIR / "interactions.jsonl"
@@ -246,7 +250,7 @@ async def proxy_generate(request: Request):
             full_response = ""
             tick = _tick_state(iid)
             try:
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_URL}/api/generate", json=body
                     ) as resp:
@@ -274,7 +278,7 @@ async def proxy_generate(request: Request):
         return StreamingResponse(stream_and_log(), media_type="application/x-ndjson")
     else:
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                 r = await client.post(f"{OLLAMA_URL}/api/generate", json=body)
                 data = r.json()
                 dur  = int((time.time() - t0) * 1000)
@@ -308,7 +312,7 @@ async def proxy_chat(request: Request):
             full_response = ""
             tick = _tick_state(iid)
             try:
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_URL}/api/chat", json=body
                     ) as resp:
@@ -337,7 +341,7 @@ async def proxy_chat(request: Request):
         return StreamingResponse(stream_chat_and_log(), media_type="application/x-ndjson")
     else:
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                 r = await client.post(f"{OLLAMA_URL}/api/chat", json=body)
                 data = r.json()
                 dur  = int((time.time() - t0) * 1000)
@@ -395,7 +399,7 @@ async def proxy_openai_chat(request: Request):
             usage = None
             tick = _tick_state(iid)
             try:
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                     async with client.stream(
                         "POST", f"{OLLAMA_URL}/v1/chat/completions", json=body
                     ) as resp:
@@ -433,7 +437,7 @@ async def proxy_openai_chat(request: Request):
         return StreamingResponse(stream_and_log(), media_type="text/event-stream")
     else:
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_S) as client:
                 r = await client.post(f"{OLLAMA_URL}/v1/chat/completions", json=body)
                 dur = int((time.time() - t0) * 1000)
                 try:

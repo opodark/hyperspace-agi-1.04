@@ -127,11 +127,14 @@ class WiringTests(unittest.TestCase):
         self.assertNotIn("reasoning_content", body,
                          "il campo corretto su Ollama e' `reasoning`: non reintrodurre il nome sbagliato")
 
-    def test_non_stream_paths_return_what_they_finalize(self):
+    def test_non_stream_paths_answer_with_what_they_finalize(self):
+        """La risposta nasce dallo stesso oggetto finalizzato, via
+        `_respond_result`: e' lui a scegliere lo status in base al payload, cosi'
+        un errore non esce piu' come HTTP 200 (bug trovato in sessione reale)."""
         body = ast.unparse(self.functions["v1_chat_completions"])
         for variable in ("result_json", "inner_result", "omni_result"):
             with self.subTest(variable=variable):
-                self.assertIn(f"return jsonify({variable})", body)
+                self.assertIn(f"return _respond_result({variable})", body)
 
 
 class NodeProxyTests(unittest.TestCase):
