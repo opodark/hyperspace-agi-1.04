@@ -21,8 +21,11 @@ def _ensure_dir():
 @contextmanager
 def _conn():
     _ensure_dir()
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout = 30000")
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA synchronous = NORMAL")
     try:
         yield con
         con.commit()
