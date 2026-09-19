@@ -146,6 +146,27 @@ def _metrics_from_native_done(chunk: dict, wall_ms: int) -> dict:
         m["prompt_tokens_per_sec"] = round(prompt_count / (prompt_ns / 1e9), 2)
     return m
 
+def _message_text(message, native: bool = False) -> str:
+    """Testo utile di un messaggio assistant, anche quando il modello ragiona.
+
+    Ollama consegna il ragionamento in `reasoning` (percorso OpenAI-compatibile)
+    o in `thinking` (percorso nativo): se il budget di token finisce mentre il
+    modello ragiona, `content` resta VUOTO. Senza questo fallback registreremmo
+    interazioni vuote in memoria e le metriche mostrerebbero risposte vuote,
+    pur essendo la generazione andata a buon fine.
+    """
+    if not isinstance(message, dict):
+        return ""
+    content = str(message.get("content") or "").strip()
+    if content:
+        return content
+    keys = ("thinking",) if native else ("reasoning", "reasoning_content", "thinking")
+    for key in keys:
+        value = str(message.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
 def _metrics_from_usage(usage: dict, wall_ms: int) -> dict:
     """OpenAI-compat (/v1/chat/completions): niente eval_duration nativo, quindi
     tok/s è approssimato dal wall-clock della richiesta (include un filo di
@@ -297,7 +318,7 @@ async def proxy_chat(request: Request):
                                 try:
                                     chunk = json.loads(line)
                                     msg = chunk.get("message", {})
-                                    full_response += msg.get("content", "")
+                                    full_response += _message_text(msg, native=True)
                                     tick["tokens"] += 1
                                     _maybe_tick(tick, model)
                                     if chunk.get("done"):
@@ -320,7 +341,7 @@ async def proxy_chat(request: Request):
                 r = await client.post(f"{OLLAMA_URL}/api/chat", json=body)
                 data = r.json()
                 dur  = int((time.time() - t0) * 1000)
-                content = data.get("message", {}).get("content", "")
+                content = _message_text(data.get("message") or {}, native=True)
                 metrics = _metrics_from_native_done(data, dur)
                 await _record_interaction(
                     prompt_summary, content, model, duration_ms=dur,
@@ -394,7 +415,7 @@ async def proxy_openai_chat(request: Request):
                                         if chunk.get("usage"):
                                             usage = chunk["usage"]
                                         delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                        content = delta.get("content", "")
+                                        content = _message_text(delta)
                                         if content:
                                             full_response += content
                                             tick["tokens"] += 1
@@ -417,7 +438,7 @@ async def proxy_openai_chat(request: Request):
                 dur = int((time.time() - t0) * 1000)
                 try:
                     data    = r.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    content = _message_text((data.get("choices") or [{}])[0].get("message") or {})
                     usage   = data.get("usage")
                 except Exception:
                     content, usage = "", None

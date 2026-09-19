@@ -614,6 +614,57 @@ def _notify_bridge(event_type: str, payload: dict):
     except Exception:
         pass
 
+# ── TESTO DEI MESSAGGI ASSISTANT ──────────────────────────────────────────────
+# I modelli reasoning (qwen3, deepseek-r1) possono consegnare il testo in
+# `reasoning`/`reasoning_content` invece che in `content`. Su Ollama 0.34.2 il
+# percorso OpenAI-compatibile popola SEMPRE `reasoning`, anche con think=false:
+# se il budget di token finisce mentre il modello sta ancora ragionando, il
+# `content` resta VUOTO e il client riceverebbe una risposta vuota senza capire
+# perche'. Verificato: max_tokens=150 -> content 0 char, reasoning 785 char;
+# max_tokens=900 -> content 352 char, reasoning 894 char.
+_REASONING_WARN_AT = 0.0
+_REASONING_WARN_EVERY_S = 60
+
+def _assistant_text(message) -> str:
+    """Il testo utile di un messaggio assistant, qualunque campo l'abbia scritto."""
+    if not isinstance(message, dict):
+        return ""
+    content = str(message.get("content") or "").strip()
+    if content:
+        return content
+    return str(message.get("reasoning") or message.get("reasoning_content") or "").strip()
+
+def _normalize_assistant_message(payload, where: str) -> dict:
+    """Sposta `reasoning` in `content` quando `content` e' vuoto (in place).
+
+    Un client OpenAI-compatibile (Open WebUI in testa) mostra `content`: senza
+    questo passaggio l'utente vedrebbe una risposta VUOTA pur avendo il modello
+    lavorato e consumato token. La mutazione e' in place perche' i chiamanti
+    fanno `jsonify(result_json)` subito dopo: cosi' client, memoria e log
+    vedono tutti la stessa cosa. Il fallback viene segnalato, con rate-limit,
+    perche' questa funzione gira su ogni richiesta.
+    """
+    global _REASONING_WARN_AT
+    try:
+        message = payload["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return payload
+    if not isinstance(message, dict) or str(message.get("content") or "").strip():
+        return payload
+    fallback = _assistant_text(message)
+    if not fallback:
+        return payload
+    message["content"] = fallback
+    message["content_from_reasoning"] = True
+    now = time.time()
+    if now - _REASONING_WARN_AT > _REASONING_WARN_EVERY_S:
+        _REASONING_WARN_AT = now
+        push_log('system', f'{where}: content vuoto, mostro il reasoning',
+                 'Il modello ha esaurito i token ragionando (max_tokens troppo basso) '
+                 'oppure il backend non ha soppresso il thinking: alza max_tokens o usa '
+                 'un modello non-reasoning.', status='warn')
+    return payload
+
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 def _load_memory() -> list:
     if MEMORY_BACKEND == "hermes":
@@ -1832,7 +1883,7 @@ def v1_chat_completions():
                     if isinstance(result_json, dict) and result_json.get("error"):
                         continue
                     message = ((result_json.get("choices") or [{}])[0] or {}).get("message") or {}
-                    content = message.get("content") or message.get("reasoning_content") or ""
+                    content = _assistant_text(message)
                     chunk = {
                         "id": result_json.get("id", f"chatcmpl-{task_id}"),
                         "object": "chat.completion.chunk",
@@ -1934,7 +1985,7 @@ def v1_chat_completions():
                         # Verificato su Ollama 0.34.2.
                         result_json = _run_tool_loop(stream_data, ollama_base)
                         message = ((result_json.get("choices") or [{}])[0] or {}).get("message") or {}
-                        direct_content = message.get("content") or message.get("reasoning_content") or ""
+                        direct_content = _assistant_text(message)
                     else:
                         direct_content = native_message.get("content", "")
                     direct_chunk = {
@@ -2037,6 +2088,12 @@ def v1_chat_completions():
         return jsonify({"error": {"message": str(e), "type": "server_error"}}), 500
 
 def _finalize_task(task, task_id, node_id, model, prompt, result_json):
+    # Normalizza PRIMA di leggere e registrare: i chiamanti fanno
+    # `jsonify(result_json)` subito dopo questa funzione, quindi cio' che
+    # sistemiamo qui e' anche cio' che riceve il client. Copre in un punto solo
+    # tutti i percorsi non-stream (nodo, federazione, omniroute, ollama diretto).
+    if isinstance(result_json, dict):
+        _normalize_assistant_message(result_json, f"task {task_id}")
     try:
         reply_text = result_json["choices"][0]["message"]["content"]
     except Exception:

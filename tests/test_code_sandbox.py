@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -105,9 +106,13 @@ class RunnerTests(unittest.TestCase):
 
     def test_allowed_command_runs_without_shell(self):
         workspace_id = self.create()
+        # Il runner ammette sia `python` sia `python3` (vedi ALLOWED_EXECUTABLES):
+        # nell'immagine sandbox Linux esiste `python`, su macOS solo `python3`.
+        # Fissare "python" qui renderebbe il test non portatile fuori container.
+        python_exe = "python" if shutil.which("python") else "python3"
         result = runner._run({
             "workspace_id": workspace_id,
-            "argv": ["python", "-c", "print('sandbox-ok')"],
+            "argv": [python_exe, "-c", "print('sandbox-ok')"],
             "timeout": 5,
         })
         self.assertTrue(result["ok"])
