@@ -159,16 +159,68 @@ server, nessuna fase di build, e la configurazione arriva a runtime. Per questo
 e' l'unico pezzo del progetto che sta su un host di pagine statiche (Vercel,
 Netlify, Cloudflare Pages, GitHub Pages). Il resto no: vedi l'ultima sezione.
 
-### Vercel
+### Vercel — import e deploy
 
-| Campo del progetto | Valore |
-|---|---|
-| Root Directory | `web-node` |
-| Framework Preset | Other |
-| Build Command | *(vuoto)* |
-| Output Directory | `.` |
+Il componente da deployare e' `web-node/`. La configurazione sta in
+`web-node/vercel.json`, che dichiara di non fare ne' install ne' build (non ci
+sono dipendenze: `npm test` e `npm run check` girano con Node puro) e imposta gli
+header. Non serve nessun `vercel.json` alla radice, e non va toccata.
 
-Nessun `vercel.json` serve. **La Root Directory e' il punto delicato.** Lasciandola
+**Dalla dashboard**
+
+1. vercel.com → **Add New…** → **Project**
+2. **Import Git Repository** → autorizza GitHub se non l'hai gia' fatto → scegli
+   `opodark/hyperspace-agi-1.04`
+3. Nella schermata di configurazione, **prima** di premere Deploy:
+   - **Root Directory** → `Edit` → `web-node`  ← *e' il passo che evita l'errore*
+   - **Framework Preset** → `Other`
+   - **Build and Output Settings** → lascia `Build Command` e `Output Directory`
+     come sono: li governa `web-node/vercel.json`
+   - **Environment Variables** → nessuna: un sito statico non le legge a runtime
+4. **Deploy**
+
+**Dalla riga di comando** (piu' corto: la root del progetto e' la cartella
+corrente, quindi non c'e' niente da configurare a mano):
+
+```bash
+cd web-node
+npx vercel login
+npx vercel --prod
+```
+
+**Verifica dopo il deploy**
+
+```bash
+curl -sI https://<progetto>.vercel.app/ | grep -iE 'referrer|cache-control'
+# atteso: referrer-policy: no-referrer
+#         cache-control: no-cache, must-revalidate
+```
+
+Poi apri la pagina: deve mostrare un `nodeId` e l'elenco delle capability che
+quel browser sa servire (`detectCapabilities`), con sotto una nota se non ne
+trova nessuna. Infine puntala al control-plane:
+
+```
+https://<progetto>.vercel.app/?cp=https://<il-tuo-control-plane>
+```
+
+**Perche' gli header sono questi e non altri.** `Referrer-Policy: no-referrer`
+perche' l'URL del control-plane viaggia in `?cp=`: senza, finirebbe nel `Referer`
+regalato a qualunque risorsa di terze parti. `Cache-Control: no-cache` perche' con
+un `src/index.js` in cache e un `index.html` no si vede la versione vecchia dopo
+un deploy — la stessa classe di problema dell'immagine Docker vecchia. **Non c'e'
+un Content-Security-Policy**, e qui sarebbe teatro: la pagina ha uno
+`<script type="module">` **inline** (servirebbe `'unsafe-inline'`, o un hash che
+cambia a ogni modifica) e deve poter chiamare un control-plane su **un'origine
+arbitraria scelta dall'utente** (servirebbe `connect-src *`). Un CSP con quelle
+due eccezioni non protegge da niente. Diventerebbe utile il giorno in cui lo
+script inline uscisse dal file e il CP avesse un'origine fissa.
+
+**Rebuild inutili.** Vercel ricostruisce a ogni push su `main`, anche quando qui
+non e' cambiato nulla. Per saltare: *Settings → Git → Ignored Build Step* →
+`git diff --quiet HEAD^ HEAD -- .`
+
+**La Root Directory e' il punto delicato.** Lasciandola
 alla radice del repository, Vercel cerca un `Dockerfile` alla radice e non lo
 trova (i Dockerfile stanno dentro le cartelle dei singoli servizi). Puntandola su
 `sandbox` si ottiene l'errore:

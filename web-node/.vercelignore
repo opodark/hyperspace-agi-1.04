@@ -1,0 +1,8 @@
+# Cosa NON serve pubblicare di questo componente.
+#
+# La pagina e' autosufficiente (index.html + src/*.js): i test e il README non
+# hanno motivo di finire su un sito pubblico.
+tests/
+README.md
+*.md
+node_modules/
