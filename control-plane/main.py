@@ -2375,13 +2375,27 @@ def _finalize_task(task, task_id, node_id, model, prompt, result_json):
     _notify_bridge("memory_sync", {"from": node_id[:12], "to": "cp", "entries": 2, "label": "conversation saved"})
 
 # ── OMEGA MCP ─────────────────────────────────────────────────────────────────
+_health_memory_cache = {"ts": 0.0, "count": 0}
+_health_memory_lock = threading.Lock()
+
+
+def _health_memory_count() -> int:
+    now = time.time()
+    if now - _health_memory_cache["ts"] < 10:
+        return int(_health_memory_cache["count"])
+    with _health_memory_lock:
+        now = time.time()
+        if now - _health_memory_cache["ts"] >= 10:
+            _health_memory_cache.update(ts=now, count=len(_load_memory()))
+    return int(_health_memory_cache["count"])
+
+
 @app.route('/health')
 def omega_health():
-    entries      = _load_memory()
     nodes_active = len([n for n in _node_list() if n.get("status") == "active"])
     return jsonify({
         "status": "ok", "engine": "hyperspace-agi", "version": "1.05.0",
-        "memories": len(entries), "nodes_active": nodes_active,
+        "memories": _health_memory_count(), "nodes_active": nodes_active,
         "ttl_days": MEMORY_TTL_DAYS,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
