@@ -175,7 +175,11 @@ header. Non serve nessun `vercel.json` alla radice, e non va toccata.
    - **Root Directory** → `Edit` → `web-node`  ← *e' il passo che evita l'errore*
    - **Framework Preset** → `Other`
    - **Build and Output Settings** → lascia `Build Command` e `Output Directory`
-     come sono: li governa `web-node/vercel.json`
+     come sono: li governa `web-node/vercel.json`. In particolare
+     `outputDirectory` e' `.` (la cartella stessa), perche' qui non c'e' una
+     build che generi un `public/` o un `dist/`: senza quella riga Vercel cerca
+     `public/`, non lo trova, e il deploy fallisce con *"No Output Directory
+     named public found after the Build completed"*.
    - **Environment Variables** → nessuna: un sito statico non le legge a runtime
 4. **Deploy**
 
