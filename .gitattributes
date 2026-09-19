@@ -1,0 +1,23 @@
+# Politica degli a-capo, esplicita e uguale su ogni macchina.
+#
+# Senza questo file conta solo core.autocrlf, che e' config LOCALE: la stessa
+# riga puo' essere LF sul Mac e CRLF su Windows, e `git status` mostra
+# differenze che non esistono. Qui il comportamento non dipende piu' dalla
+# config della singola macchina.
+#
+# Tutti i file tracciati oggi sono LF (verificato con `git ls-files --eol`):
+# questa riga non cambia nulla e rende esplicito lo stato di fatto.
+* text=auto eol=lf
+
+# Binari: git non deve nemmeno provare a convertirli.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.gguf binary
+*.safetensors binary
+
+# Se PowerShell 5.1 sul Windows del collega dovesse inciampare su un .ps1 in LF,
+# la riga da aggiungere e' `*.ps1 text eol=crlf`. Non e' attiva adesso perche'
+# quei file sono LF nel repo e convertirli e' una modifica da provare su
+# Windows, non da decidere da qui.

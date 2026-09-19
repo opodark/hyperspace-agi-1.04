@@ -74,6 +74,7 @@ from shared.web_node import (
     WebTaskRejected,
 )
 from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
+from shared.node_compat import ProtocolWatch
 from shared.mcp_auth import McpAuthPolicy
 import routing as _routing
 from connectors.manager import ConnectorManager
@@ -909,8 +910,15 @@ def _record_routing_pick(node_id: str):
     # ricalcola col nuovo timestamp di routing.
     _invalidate_fleet_scores()
 
+# Compatibilita' di protocollo fra CP e nodi: segnala UNA VOLTA per nodo, e in
+# modalita' advisory (default) lascia passare tutto. Vedi shared/node_compat.py
+# per il perche' non si esclude un nodo che non dichiara la versione: escluderlo
+# espellerebbe dalla mesh un nodo che funziona. NODE_PROTOCOL_MODE=strict filtra.
+_PROTOCOL_WATCH = ProtocolWatch.from_env()
+
 def _active_executable() -> list:
-    return [n for n in _node_list() if n.get("status") == "active" and _best_endpoint(n)]
+    attivi = [n for n in _node_list() if n.get("status") == "active" and _best_endpoint(n)]
+    return _PROTOCOL_WATCH.report(attivi)
 
 def _routing_scores(active_nodes: list, model: str = "") -> list:
     """[(node, score, breakdown)] ordinati per score decrescente. Fonde ogni
