@@ -62,6 +62,18 @@ esito (un fix sembrava non funzionare mentre era solo non caricato).
 
 ## 2. Problema aperto: il nodo dichiara di non avere GPU
 
+> **Correzione (2026-09-19, dopo la connessione della mesh).** La premessa di
+> questa sezione e' **sbagliata**: la GPU del Windows *lavora*. Il `/metrics` del
+> nodo mostra `qwen3.5:4b` caricato con **5.51 GB in VRAM** a 14.47 t/s. Quello
+> che non funziona e' la **dichiarazione**: il nodo annuncia `vram_gb=0.0` e
+> `tier=leaf`, e questo e' vero **ancora dopo un riavvio** — quindi non e' una
+> detection fallita, e' la configurazione che non arriva (sezione 0 e sezione 7).
+> La conseguenza sul routing descritta sotto resta valida: con `vram_gb=0` il
+> control-plane lo tratta come il nodo piu' debole della mesh. Ma il titolo
+> giusto e' "il nodo dichiara male la sua GPU", non "la GPU non va".
+> Lo stesso vale per il **nodo del Mac**, che dichiara `vram_gb=0.0` per lo
+> stesso motivo.
+
 ### Evidenza
 
 ```bash
@@ -150,21 +162,41 @@ python -m unittest discover -s tests     # atteso: tutti verdi
 Un 8B su 3060 deve fare **25-40 t/s**, non ~10. Se resta a ~10 la GPU non e' in
 uso e il problema **non** e' chiuso.
 
-## 5. Cosa installarci (8 GB VRAM + 48 GB RAM)
+## 5. Cosa c'e' GIA' (misurato, 2026-09-19)
 
-| Cosa | Perche' |
+Questa sezione era scritta come "cosa installarci", partendo da un'assunzione
+sbagliata: che la macchina avesse `qwen3:8b` e poco altro. Il `/metrics` del nodo
+dice il contrario — ha una famiglia di modelli **piu' nuova** di quella del Mac.
+I numeri vanno letti, non ipotizzati.
+
+| Modello | t/s misurati |
 |---|---|
-| **7-8B a Q4** — `qwen3:8b` (gia' presente, 5.2 GB), `qwen2.5:7b-instruct`, `llama3.1:8b-instruct` (~4.7 GB) | Entrano **interi** in 8 GB con ~8k di contesto. E' il sweet spot |
-| **MoE con pochi parametri attivi** — es. `qwen3:30b-a3b` (Q4 ~18 GB) | Non entra in VRAM, ma **solo ~3B parametri sono attivi per token**: l'offload su CPU costa molto meno che su un modello denso. **E' il modo migliore di usare i 48 GB.** Da misurare, non da assumere |
-| **3B** — `qwen2.5:3b`, `llama3.2:3b` | Task brevi della mesh, molto veloci |
-| `qwen2:0.5b` (gia' presente) | Titler |
-| **Vision** | L'encoder aggiunge GB: con 8 GB e' stretto (`gemma4:e4b` pesa 9.6 GB e non entra) |
+| `qwen3.5:4b` — **5.51 GB in VRAM** | **14.47** |
+| `hf.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-...:Q2_K_P` (MoE) | **11.04** |
+| `hf.co/Abiray/Qwen3.5-4B-Abliterated-...-Distilled:Q6_K` | 14.12 |
+| `hf.co/Abiray/Qwen3.5-9B-abliterated-GGUF:Q6_K` | 3.00 |
+| `hf.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF:IQ2_S` | da misurare |
+| `qwen2.5-coder:14b-instruct` (denso, Q4) | **0.12** |
+| `huihui_ai/Qwen3.8-abliterated:latest` | 1.20 |
+| `hf.co/bartowski/dolphin-2.9.4-llama3.1-8b-GGUF:Q4_K_M` | 0.08 |
 
-### Cosa NON metterci
+Cosa dicono questi numeri:
 
-- **Modelli densi da 14B+**: a Q4 sono ~9 GB, non entrano in 8 GB di VRAM, Ollama
-  fa uno split su CPU e diventano **piu' lenti** di un 8B interamente su GPU. E'
-  la trappola classica.
+- **Il MoE da 35B a 11 t/s batte il 9B denso a 3 t/s**, pur essendo molto piu'
+  grande: l'ipotesi di questa sezione era giusta, ed e' ora **misurata** invece
+  che da verificare.
+- **I quant a bassissima precisione funzionano**: un 27B in `IQ2_S` e un 35B in
+  `Q2_K_P` girano su 8 GB di VRAM + 48 GB di RAM. La regola "un 14B non entra,
+  quindi serve un 7-8B" valeva **per Q4**, non in assoluto.
+- **Smentito** che la GPU non lavori: `qwen3.5:4b` e' dentro la VRAM a 5.51 GB.
+  Il problema della GPU non era la GPU. Resta da capire solo il 14.47 t/s di un
+  4B su una 3060, che dovrebbe stare piu' in alto (verificare `ollama ps`).
+
+### Da NON installare qui
+- **Densi da 14B+ a Q4**: misurato su questa macchina, `qwen2.5-coder:14b-instruct`
+  fa **0.12 t/s**. La trappola e' reale, e qui c'e' il numero che la dimostra.
+- **`qwen3:8b`**: sta sul Mac, non qui. Tenerlo su entrambi confonde il routing
+  invece di aiutarlo (vedi sezione 8).
 - **ds4 / DwarfStar**: il target piu' piccolo e' ~81 GiB di modello, e il suo
   supporto CUDA punta ad Ada Lovelace e DGX Spark. La 3060 e' **Ampere**: non e'
   questa la macchina per ds4, a prescindere dalla RAM.
@@ -209,10 +241,29 @@ in esecuzione serve riconciliare `.env` — vedi sezione 0.
 - Control-plane sul Mac (16 GB): `MEMORY_BACKEND=legacy` locale, perche' il
   bridge Hermes vive su Windows.
 - Nodo Windows raggiungibile via Tailscale su `100.81.234.102:8081`.
-- Modelli presenti su entrambi: `qwen3:8b`, `qwen3:8b-original`, `gemma4:e4b`,
-  `qwen2:0.5b`. `deepseek-r1:8b` e' stato rimosso da entrambi (su hardware senza
-  GPU dedicata era inutilizzabile: misurato **0.2 t/s** e **0 caratteri utili**,
-  perche' il thinking consuma il budget prima della risposta).
+- Modelli **NON in comune**, come si era assunto: il Mac ha `qwen3:8b`,
+  `qwen3:8b-original`, `gemma4:e4b`, `qwen2:0.5b`; il Windows ha la famiglia
+  Qwen3.5/3.6/3.8 (sezione 5). Nessun modello e' presente su entrambi, quindi
+  oggi il routing e' **deterministico per disponibilita'** — una richiesta puo'
+  andare solo dove il modello esiste — e la scelta **tra** nodi non viene quasi
+  mai esercitata. Per provare davvero il punteggio di routing serve un modello
+  condiviso.
+- `deepseek-r1:8b` e' stato rimosso da entrambi (su hardware senza GPU dedicata
+  era inutilizzabile: misurato **0.2 t/s** e **0 caratteri utili**, perche' il
+  thinking consuma il budget prima della risposta).
+- **Nodo Windows**: id `fc6c821ba7c18667`, `100.64.31.18`. Porte **8081, 8086,
+  8088 raggiungibili**; **8085 in timeout**: la regola firewall di
+  `docs/tailscale-mesh-setup.md:65` elenca `8088,8086,8081,8095,20128` e **non
+  copre la porta del control-plane**.
+- **Nodo Mac**: id `d7bc05baed5b752a`, `http://100.81.234.102:8081`. Dichiara
+  anche lui `vram_gb=0.0` e `tier=leaf` (il suo `.env` ha `VRAM_GB=0`): **lo
+  stesso difetto del Windows, sul lato locale**. I due nodi sono quindi
+  indistinguibili sul 75% del punteggio di routing.
+- **Verifica cross-macchina riuscita**: una richiesta al control-plane del Mac per
+  `qwen3.5:4b` (modello presente **solo** sul Windows) ha incrementato
+  `requests_seen` sul nodo Windows da 1 a 2, in **1.79s** andata e ritorno. La
+  catena CP-Mac → Tailscale → nodo Windows → GPU funziona. Per confronto, il nodo
+  Mac serviva `qwen3:8b` con `latency_ms_ewma` di **12239 ms** e 3.69 t/s.
 - Diagnostica utile: `GET /models/capabilities` sul control-plane elenca per ogni
   modello se ricevera' i tool e **perche'**; un modello nuovo che supporta il
   function calling ma non compare nei pattern perde i tool, e ora lo segnala nei
