@@ -355,6 +355,48 @@ _NATIVE_CHAT_FALLBACK_OVERRIDE  = os.getenv("NATIVE_CHAT_FALLBACK_MODELS", "")
 _NATIVE_CHAT_FALLBACK_PATTERNS  = ["qwen3"]
 
 
+def _tool_capability_reason(model_name: str) -> str:
+    """Perche' questo modello riceve o non riceve i tool (diagnostica).
+
+    Serve al momento del cambio modello: un modello nuovo che supporta il
+    function calling ma non compare in nessun pattern perde i tool IN SILENZIO
+    (il CP li rimuove dalla richiesta), e l'unico sintomo e' "web_search non
+    parte piu'". Qui la ragione diventa esplicita, e finisce nei log.
+    """
+    override = _TOOL_CAPABLE_OVERRIDE.strip()
+    if override == "*":
+        return "override: tutti i modelli"
+    if override:
+        for p in override.split(","):
+            p = p.strip().lower()
+            if p and p in model_name.lower():
+                return f"override TOOL_CAPABLE_MODELS: {p}"
+    m = model_name.lower().split(":")[0]
+    vision = next((p for p in _VISION_PATTERNS if p in m), None)
+    if vision:
+        return f"escluso: variante vision ({vision})"
+    matched = next((p for p in _TOOL_CAPABLE_PATTERNS if p in m), None)
+    if matched:
+        return f"pattern: {matched}"
+    return "NESSUN pattern corrisponde"
+
+# Un modello a cui togliamo i tool deve dirlo: al cambio modello il sintomo
+# sarebbe altrimenti solo "web_search non parte piu'". Rate-limit per modello,
+# cosi' una chat lunga non riempie il DB di log.
+_TOOL_STRIPPED_WARN_AT: dict = {}
+_TOOL_STRIPPED_WARN_EVERY_S = 300
+
+def _warn_tools_stripped(model: str) -> None:
+    now = time.time()
+    if now - _TOOL_STRIPPED_WARN_AT.get(model, 0.0) < _TOOL_STRIPPED_WARN_EVERY_S:
+        return
+    _TOOL_STRIPPED_WARN_AT[model] = now
+    push_log('system', f'{model}: tool rimossi dalla richiesta',
+             f"motivo: {_tool_capability_reason(model)}. Se il modello supporta il "
+             f"function calling, aggiungilo a TOOL_CAPABLE_MODELS (env, tab Setup); "
+             f"elenco completo su GET /models/capabilities.",
+             status='warn')
+
 def _use_native_chat_fallback(model_name: str) -> bool:
     """True se il fallback Ollama-diretto deve passare dal percorso nativo
     /api/chat. Confronto per substring sul nome base del modello, come
@@ -1703,6 +1745,37 @@ def _compress_prompt_via_omniroute(text: str) -> str:
     return text
 
 # ── /v1/models ────────────────────────────────────────────────────────────────
+@app.route('/models/capabilities')
+def model_capabilities():
+    """Per ogni modello della mesh: ricevera' i tool? e perche' no?
+
+    Diagnostica nata dal piano di cambio modelli. Un modello nuovo che supporta
+    il function calling ma non compare in nessun pattern perde i tool IN
+    SILENZIO: qui si vede in anticipo, con la ragione, e si corregge da env
+    (TOOL_CAPABLE_MODELS / NATIVE_CHAT_FALLBACK_MODELS) senza toccare il codice.
+    """
+    try:
+        known = sorted(set(_aggregate_mesh_models().get("bare") or []))
+        error = ""
+    except Exception as exc:
+        known, error = [], str(exc)
+    models = [{
+        "model": name,
+        "tool_capable": _model_supports_tools(name),
+        "reason": _tool_capability_reason(name),
+        "native_chat_fallback": _use_native_chat_fallback(name),
+    } for name in known]
+    return jsonify({
+        "models": models,
+        "not_tool_capable": [m["model"] for m in models if not m["tool_capable"]],
+        "tool_capable_patterns": _TOOL_CAPABLE_PATTERNS,
+        "tool_capable_override": _TOOL_CAPABLE_OVERRIDE,
+        "vision_patterns": _VISION_PATTERNS,
+        "native_fallback_patterns": _NATIVE_CHAT_FALLBACK_PATTERNS,
+        "default_model": DEFAULT_MODEL,
+        "error": error,
+    })
+
 @app.route('/v1/models')
 def v1_models():
     # 🕸️ = servito dalla mesh locale, 🌐 = OmniRoute (provider esterni) —
@@ -1762,6 +1835,7 @@ def v1_chat_completions():
     #    (reasoning e tool-calling sono mutuamente esclusivi), altrimenti
     #    rispetta la richiesta esplicita del client, altrimenti OFF.
     tools_available = []
+    client_had_tools = bool(data.get("tools"))
     if _model_supports_tools(model):
         client_tools = data.get("tools") or []
         client_names = {t.get("function", {}).get("name") for t in client_tools}
@@ -1772,6 +1846,10 @@ def v1_chat_completions():
         data["tools"] = tools_available
     else:
         data.pop("tools", None)
+        # Il client aveva chiesto dei tool e li stiamo togliendo: senza questo
+        # avviso un modello nuovo non tool-capable fallirebbe in silenzio.
+        if client_had_tools:
+            _warn_tools_stripped(model)
 
     data["think"] = _decide_thinking(model, data, messages, tools_available)
     push_log('system',

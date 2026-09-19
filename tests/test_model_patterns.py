@@ -8,7 +8,7 @@ CONSTS = {
     "_TOOL_CAPABLE_OVERRIDE", "_TOOL_CAPABLE_PATTERNS", "_VISION_PATTERNS",
     "_NATIVE_CHAT_FALLBACK_OVERRIDE", "_NATIVE_CHAT_FALLBACK_PATTERNS",
 }
-FUNCS = {"_model_supports_tools", "_use_native_chat_fallback"}
+FUNCS = {"_model_supports_tools", "_use_native_chat_fallback", "_tool_capability_reason"}
 
 
 def _load(tool_override="", native_override=""):
@@ -106,6 +106,44 @@ class NativeChatFallbackPatternTests(unittest.TestCase):
         for blank in ("", "   ", ","):
             s = _load(native_override=blank)
             self.assertTrue(s["_use_native_chat_fallback"]("qwen3:8b"), repr(blank))
+
+
+class ToolCapabilityReasonTests(unittest.TestCase):
+    """La ragione mostrata dai log/diagnostica deve combaciare col verdetto.
+
+    E' la garanzia che al cambio modello il messaggio "tool rimossi" spieghi
+    davvero il perche' (pattern mancante, variante vision o override).
+    """
+
+    def test_a_known_pattern_is_named(self):
+        s = _load()
+        self.assertEqual(s["_tool_capability_reason"]("qwen3:8b"), "pattern: qwen3")
+
+    def test_a_vision_variant_explains_the_exclusion(self):
+        s = _load()
+        self.assertIn("vision", s["_tool_capability_reason"]("qwen2.5vl:3b"))
+
+    def test_an_unknown_model_says_so_loudly(self):
+        s = _load()
+        self.assertEqual(s["_tool_capability_reason"]("modello-nuovo:14b"),
+                         "NESSUN pattern corrisponde")
+
+    def test_override_is_reported(self):
+        s = _load(tool_override="modello-nuovo")
+        self.assertIn("override", s["_tool_capability_reason"]("modello-nuovo:14b"))
+        wildcard = _load(tool_override="*")
+        self.assertIn("tutti i modelli", wildcard["_tool_capability_reason"]("qualsiasi:1b"))
+
+    def test_reason_agrees_with_the_verdict(self):
+        for override in ("", "modello-nuovo", "*"):
+            s = _load(tool_override=override)
+            for model in ("qwen3:8b", "qwen2:0.5b", "qwen2.5vl:3b", "modello-nuovo:14b",
+                          "gguf-ignoto:7b"):
+                with self.subTest(override=override, model=model):
+                    capable = s["_model_supports_tools"](model)
+                    reason = s["_tool_capability_reason"](model)
+                    self.assertEqual(capable, "NESSUN pattern" not in reason and "vision" not in reason,
+                                     f"{model}: capable={capable} reason={reason!r}")
 
 
 if __name__ == "__main__":
