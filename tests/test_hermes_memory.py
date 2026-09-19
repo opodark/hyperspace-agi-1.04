@@ -6,6 +6,8 @@ import types
 from pathlib import Path
 from unittest import TestCase, mock
 
+import requests
+
 from shared.hermes_memory import HermesMemoryClient, HermesMemoryError
 
 
@@ -30,6 +32,19 @@ class HermesMemoryClientTests(TestCase):
         request.side_effect = RuntimeError("connection refused")
         with self.assertRaises(RuntimeError):
             HermesMemoryClient("http://bridge", "token").health()
+
+    @mock.patch("shared.hermes_memory.time.sleep")
+    @mock.patch("shared.hermes_memory.requests.request")
+    def test_client_retries_transient_connection_errors(self, request, sleep):
+        response = mock.Mock()
+        response.json.return_value = {"ok": True, "entries": 3}
+        request.side_effect = [requests.ConnectionError("network unreachable"), response]
+
+        result = HermesMemoryClient("http://bridge", "token").stats()
+
+        self.assertEqual(result["entries"], 3)
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(0.1)
 
 
 class FakeDB:

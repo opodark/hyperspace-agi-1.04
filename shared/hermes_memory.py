@@ -9,6 +9,7 @@ Hermes' MEMORY.md/state.db from a container.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -40,11 +41,20 @@ class HermesMemoryClient:
         timeout = float(kwargs.pop("timeout", self.timeout))
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        response = None
         try:
-            response = requests.request(
-                method, f"{self.base_url}{path}", headers=headers,
-                timeout=timeout, **kwargs,
-            )
+            for attempt in range(3):
+                try:
+                    response = requests.request(
+                        method, f"{self.base_url}{path}", headers=headers,
+                        timeout=timeout, **kwargs,
+                    )
+                    break
+                except requests.ConnectionError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.1 * (attempt + 1))
+            assert response is not None
             response.raise_for_status()
             body = response.json()
         except (requests.RequestException, ValueError) as exc:
