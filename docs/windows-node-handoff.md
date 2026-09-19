@@ -6,15 +6,20 @@ da solo, senza il contesto della sessione che l'ha prodotto.
 
 ## 0. Prima di tutto: `.env` non si aggiorna da solo
 
+**Non e' la causa di un incidente passato**: all'handoff il `git pull` funzionava
+e le commit sono state trovate regolarmente. E' una **trappola strutturale di
+questo setup**, verificata in `setup.ps1:48`, che va conosciuta prima di
+modificare qualsiasi variabile.
+
 `.env.windows` **non e' la configurazione attiva**. Il compose legge `.env`, e
 `setup.ps1` copia `.env.windows` → `.env` **solo se `.env` non esiste**
 (`Ensure-EnvFile`). `.env` e' in `.gitignore`, quindi **nessun `git pull` lo
 tocca mai**.
 
-Conseguenza: i fix in questo documento sono nel repo, ma su una macchina gia'
-avviata **non hanno effetto** finche' `.env` non viene riconciliato. Se "non
-vedi le modifiche", nella quasi totalita' dei casi e' questo — non il pull,
-non il checkout, non la cache di Docker.
+Conseguenza concreta: i fix di questo documento sono nel repo, ma su una macchina
+gia' avviata **non arrivano al processo in esecuzione** finche' `.env` non viene
+riconciliato. Vale per `VRAM_GB`/`NODE_TIER` (sezione 2) come per qualunque
+variabile aggiunta in futuro.
 
 ```powershell
 git fetch origin --prune
@@ -183,13 +188,21 @@ uso e il problema **non** e' chiuso.
   backend memoria di default e' **Hermes** (per il quale serve il bridge
   attivo), non `legacy`.
 
-## 7. Discrepanze note in `.env.windows`
+## 7. Discrepanze in `.env.windows` — risolte nel repo
 
-All'handoff quel profilo dichiara come modelli di riferimento
+All'handoff quel profilo dichiarava come modelli di riferimento
 `qwen3-14b-uncensored` e `qwen2.5-coder-14b-abliterated`, ma sulla macchina ci
-sono `qwen3:8b`, `gemma4:e4b`, `qwen2:0.5b`. Due problemi distinti: **non sono
-installati**, e **un 14B Q4 non entra in 8 GB di VRAM** (vedi sezione 5). Presente
-anche `HOST_NAME=changeme-host`, mai valorizzato. Da allineare alla realta'.
+sono `qwen3:8b`, `gemma4:e4b`, `qwen2:0.5b`. Due problemi distinti: **non erano
+installati**, e **un 14B Q4 non entra in 8 GB di VRAM** (vedi sezione 5).
+
+Corrette nel repo (commit `1eaba92`): `HS_MODEL_GENERAL=qwen3:8b`, modelli coder
+commentati (nessuno installato), `HOST_NAME`/`TS_HOSTNAME` valorizzati con
+l'hostname reale, `VRAM_GB=8` e `NODE_TIER=hub` dichiarati, `TITLER_ENABLED=false`
+(era rimasto `true` su questo profilo: il fix precedente era arrivato solo al
+compose generico).
+
+Attenzione: sono correzioni a `.env.windows`. Perche' arrivino anche al processo
+in esecuzione serve riconciliare `.env` — vedi sezione 0.
 
 ## 8. Stato della mesh al momento dell'handoff
 
