@@ -309,16 +309,49 @@ _TOOL_CAPABLE_PATTERNS = [
 _VISION_PATTERNS = ["vl", "vision", "llava"]
 
 def _model_supports_tools(model_name: str) -> bool:
-    if _TOOL_CAPABLE_OVERRIDE == "*":
+    override = _TOOL_CAPABLE_OVERRIDE.strip()
+    if override == "*":
         return True
-    if _TOOL_CAPABLE_OVERRIDE:
-        for p in _TOOL_CAPABLE_OVERRIDE.split(","):
-            if p.strip().lower() in model_name.lower():
+    if override:
+        for p in override.split(","):
+            p = p.strip().lower()
+            # `if p` non e' cosmetico: con TOOL_CAPABLE_MODELS="qwen3," (o con
+            # soli spazi) il pattern vuoto sarebbe substring di QUALSIASI nome
+            # modello, abilitando le tool call su tutti i modelli per sbaglio.
+            if p and p in model_name.lower():
                 return True
     m = model_name.lower().split(":")[0]
     if any(p in m for p in _VISION_PATTERNS):
         return False
     return any(p in m for p in _TOOL_CAPABLE_PATTERNS)
+
+# Modelli per cui il fallback "Ollama diretto" (nessun nodo mesh disponibile)
+# usa il percorso NATIVO /api/chat invece di quello OpenAI-compatibile. Serve
+# ai modelli reasoning, per i quali il CP vuole pilotare esplicitamente `think`:
+# sul percorso OpenAI il campo `reasoning` resta comunque popolato.
+# L'elenco NON e' cablato nel codice: i modelli reasoning distillati cambiano
+# in fretta. Override da env NATIVE_CHAT_FALLBACK_MODELS (lista separata da
+# virgole, "*" = tutti i modelli), modificabile da tab Setup.
+_NATIVE_CHAT_FALLBACK_OVERRIDE  = os.getenv("NATIVE_CHAT_FALLBACK_MODELS", "")
+_NATIVE_CHAT_FALLBACK_PATTERNS  = ["qwen3"]
+
+
+def _use_native_chat_fallback(model_name: str) -> bool:
+    """True se il fallback Ollama-diretto deve passare dal percorso nativo
+    /api/chat. Confronto per substring sul nome base del modello, come
+    _model_supports_tools(): cosi' "qwen3:8b", "qwen3-16k" e i futuri
+    distillati "qwen3.8-..." restano coperti senza toccare il codice."""
+    override = _NATIVE_CHAT_FALLBACK_OVERRIDE.strip()
+    if override == "*":
+        return True
+    # Un override di soli spazi, o con solo virgole, produce una lista vuota:
+    # in quel caso NON deve disabilitare in silenzio il fallback, ma tornare ai
+    # pattern di default (stesso motivo del `if p` in _model_supports_tools).
+    parsed = [p.strip().lower() for p in override.split(",") if p.strip()] if override else []
+    patterns = parsed or _NATIVE_CHAT_FALLBACK_PATTERNS
+    m = model_name.lower().split(":")[0]
+    return any(p in m for p in patterns)
+
 
 def _requested_thinking(data: dict, messages: list) -> bool:
     """Legge la richiesta di reasoning ESPLICITA del client (flag JSON `think`
@@ -1730,7 +1763,11 @@ def v1_chat_completions():
             # chunk al client. Per i modelli tool-capable usa quindi il loop
             # non-streaming interno e riconfeziona solo il risultato finale
             # come SSE: web_search viene realmente eseguito anche da WebUI.
-            if model.lower().startswith("qwen3") or _model_supports_tools(model):
+            # La scelta e' pattern-driven (_model_supports_tools), non legata a
+            # un singolo modello: i distillati in arrivo (qwen3.8, deepseek4.1,
+            # ...) si coprono aggiornando _TOOL_CAPABLE_PATTERNS o la env
+            # TOOL_CAPABLE_MODELS, senza toccare questo ramo.
+            if _model_supports_tools(model):
                 for candidate in candidates:
                     node_id_c = candidate.get("node_id", "cp")
                     endpoint_c = _best_endpoint(candidate)
@@ -1818,10 +1855,12 @@ def v1_chat_completions():
             task["node"] = "ollama-direct"
             db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
             try:
-                if model.lower().startswith("qwen3"):
-                    # Fallback nativo (/api/chat) per qwen3, usato SOLO quando
-                    # non c'e' nessun nodo mesh disponibile. Anche il body
-                    # nativo accetta i tool nello stesso formato funzione
+                if _use_native_chat_fallback(model):
+                    # Fallback nativo (/api/chat) per i modelli reasoning
+                    # (elenco in _NATIVE_CHAT_FALLBACK_PATTERNS, estendibile via
+                    # env), usato SOLO quando non c'e' nessun nodo mesh
+                    # disponibile. Anche il body nativo accetta i tool nello
+                    # stesso formato funzione
                     # dell'API OpenAI, quindi li inoltriamo: senza di essi il
                     # modello non potrebbe mai chiamare web_search in questo
                     # percorso (il vecchio ramo li ometteva del tutto).
@@ -3175,6 +3214,10 @@ _ENV_META = [
      "label": "Modelli tool-capable (override)",
      "hint": "'*' abilita le tool call su TUTTI i modelli; vuoto = usa i pattern automatici (qwen3, llama3.x, mistral, phi4...). Utile per modelli che supportano il function calling ma non sono nei pattern.",
      "default": ""},
+    {"section": "Mesh", "key": "NATIVE_CHAT_FALLBACK_MODELS", "type": "str",
+     "label": "Fallback nativo /api/chat (override)",
+     "hint": "Modelli per cui il fallback Ollama-diretto usa il percorso nativo /api/chat invece dell'OpenAI-compatibile. Vuoto = pattern automatici (qwen3). '*' = tutti. Aggiungi qui i distillati reasoning in arrivo (es. qwen3.8-..., deepseek4.1-...), separati da virgole, senza toccare il codice.",
+     "default": ""},
 ]
 
 _ENV_ROUTING_WEIGHT_KEYS = {
@@ -3220,6 +3263,7 @@ _ENV_RUNTIME_GET = {
     "FEDERATION_PUBLIC_URL": lambda: FEDERATION_PUBLIC_URL,
     "NODE_ENDPOINTS": lambda: ",".join(NODE_ENDPOINTS),
     "TOOL_CAPABLE_MODELS": lambda: _TOOL_CAPABLE_OVERRIDE,
+    "NATIVE_CHAT_FALLBACK_MODELS": lambda: _NATIVE_CHAT_FALLBACK_OVERRIDE,
 }
 
 def _coerce_env_val(meta: dict, raw):
@@ -3250,7 +3294,7 @@ def _apply_env_runtime(meta: dict, cv) -> None:
     global OMNIROUTE_URL, OMNIROUTE_API_KEY, OMNIROUTE_MODEL, OMNIROUTE_ENABLED
     global PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MODE, PROMPT_COMPRESSION_MIN_CHARS
     global FEDERATION_ENABLED, FEDERATION_PUBLIC_URL
-    global NODE_ENDPOINTS, _TOOL_CAPABLE_OVERRIDE, _ROUTING_WEIGHTS, _SCORE_CACHE_TTL
+    global NODE_ENDPOINTS, _TOOL_CAPABLE_OVERRIDE, _NATIVE_CHAT_FALLBACK_OVERRIDE, _ROUTING_WEIGHTS, _SCORE_CACHE_TTL
 
     key = meta["key"]
     os.environ[key] = str(cv)
@@ -3315,6 +3359,8 @@ def _apply_env_runtime(meta: dict, cv) -> None:
             _known_endpoints.add(_normalize_endpoint(ep))
     elif key == "TOOL_CAPABLE_MODELS":
         _TOOL_CAPABLE_OVERRIDE = str(cv)
+    elif key == "NATIVE_CHAT_FALLBACK_MODELS":
+        _NATIVE_CHAT_FALLBACK_OVERRIDE = str(cv).strip()
 
     if changed_weights:
         _ROUTING_WEIGHTS.update({
