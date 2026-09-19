@@ -189,124 +189,49 @@ end-to-end sull'app vera sta in `scripts/verify_web_node_e2e.py`.
 
 This component is intentionally kept small and optional. It is an **addition** to the mesh, not a core dependency.
 
-## Deploy di questa pagina (e cosa NON sta altrove)
+## Come si usa: servita dal tailnet
 
-Questo componente e' un **sito statico**: `index.html` + `src/*.js`, nessun
-server, nessuna fase di build, e la configurazione arriva a runtime. Per questo
-e' l'unico pezzo del progetto che sta su un host di pagine statiche (Vercel,
-Netlify, Cloudflare Pages, GitHub Pages). Il resto no: vedi l'ultima sezione.
-
-### Vercel — import e deploy
-
-Il componente da deployare e' `web-node/`. La configurazione sta in
-`web-node/vercel.json`, che dichiara di non fare ne' install ne' build (non ci
-sono dipendenze: `npm test` e `npm run check` girano con Node puro) e imposta gli
-header. Non serve nessun `vercel.json` alla radice, e non va toccata.
-
-**Dalla dashboard**
-
-1. vercel.com → **Add New…** → **Project**
-2. **Import Git Repository** → autorizza GitHub se non l'hai gia' fatto → scegli
-   `opodark/hyperspace-agi-1.04`
-3. Nella schermata di configurazione, **prima** di premere Deploy:
-   - **Root Directory** → `Edit` → `web-node`  ← *e' il passo che evita l'errore*
-   - **Framework Preset** → `Other`
-   - **Build and Output Settings** → lascia `Build Command` e `Output Directory`
-     come sono: li governa `web-node/vercel.json`. In particolare
-     `outputDirectory` e' `.` (la cartella stessa), perche' qui non c'e' una
-     build che generi un `public/` o un `dist/`: senza quella riga Vercel cerca
-     `public/`, non lo trova, e il deploy fallisce con *"No Output Directory
-     named public found after the Build completed"*.
-   - **Environment Variables** → nessuna: un sito statico non le legge a runtime
-4. **Deploy**
-
-**Dalla riga di comando** (piu' corto: la root del progetto e' la cartella
-corrente, quindi non c'e' niente da configurare a mano):
+Il modo previsto per usare questa pagina, e l'unico che funziona senza
+compromessi, e' servirla **da una macchina della mesh** e aprirla con Tailscale
+connesso sul dispositivo.
 
 ```bash
-cd web-node
-npx vercel login
-npx vercel --prod
+cd web-node && npm run serve      # http.server su 0.0.0.0:8790
+tailscale ip -4                   # l'indirizzo su cui raggiungerla
 ```
 
-**Verifica dopo il deploy**
-
-```bash
-curl -sI https://<progetto>.vercel.app/ | grep -iE 'referrer|cache-control'
-# atteso: referrer-policy: no-referrer
-#         cache-control: no-cache, must-revalidate
-```
-
-Poi apri la pagina: deve mostrare un `nodeId` e l'elenco delle capability che
-quel browser sa servire (`detectCapabilities`), con sotto una nota se non ne
-trova nessuna. Infine puntala al control-plane:
+Poi, dal telefono o da un altro computer **con Tailscale attivo**:
 
 ```
-https://<progetto>.vercel.app/?cp=https://<il-tuo-control-plane>
+http://<ip-tailscale>:8790
 ```
 
-**Perche' gli header sono questi e non altri.** `Referrer-Policy: no-referrer`
-perche' l'URL del control-plane viaggia in `?cp=`: senza, finirebbe nel `Referer`
-regalato a qualunque risorsa di terze parti. `Cache-Control: no-cache` perche' con
-un `src/index.js` in cache e un `index.html` no si vede la versione vecchia dopo
-un deploy — la stessa classe di problema dell'immagine Docker vecchia. **Non c'e'
-un Content-Security-Policy**, e qui sarebbe teatro: la pagina ha uno
-`<script type="module">` **inline** (servirebbe `'unsafe-inline'`, o un hash che
-cambia a ogni modifica) e deve poter chiamare un control-plane su **un'origine
-arbitraria scelta dall'utente** (servirebbe `connect-src *`). Un CSP con quelle
-due eccezioni non protegge da niente. Diventerebbe utile il giorno in cui lo
-script inline uscisse dal file e il CP avesse un'origine fissa.
+**Non serve configurare l'URL del control-plane.** Il fallback nel codice e'
+`` `${location.protocol}//${location.hostname}:8085` ``: una pagina servita da
+`<ip>:8790` cerca il CP su `<ip>:8085` e lo trova, perche' il control-plane
+pubblica la 8085 su `0.0.0.0`. E' letteralmente il caso per cui quel fallback
+esiste: pagina e control-plane sulla stessa macchina, tutto in HTTP.
 
-**Rebuild inutili.** Vercel ricostruisce a ogni push su `main`, anche quando qui
-non e' cambiato nulla. Per saltare: *Settings → Git → Ignored Build Step* →
-`git diff --quiet HEAD^ HEAD -- .`
+Il campo `?cp=` resta utile quando il CP **non** e' sullo stesso host della
+pagina: e' l'unico modo per puntarlo altrove.
 
-**La Root Directory e' il punto delicato.** Lasciandola
-alla radice del repository, Vercel cerca un `Dockerfile` alla radice e non lo
-trova (i Dockerfile stanno dentro le cartelle dei singoli servizi). Puntandola su
-`sandbox` si ottiene l'errore:
+Superficie esposta: **nessuna**. Nessun certificato, nessun tunnel, nessuna porta
+in piu' di quelle che il tailnet gia' espone. `npm run serve` non e' un server di
+produzione, ma per uso personale puo' restare su.
 
-```
-Error: building at STEP "COPY sandbox/requirements.txt /app/requirements.txt":
-copier: stat: "/sandbox/requirements.txt": no such file or directory
-```
+### Perche' non su un host pubblico
 
-Quel `Dockerfile` e' scritto per avere la **radice del repo** come contesto di
-build — il compose lo fa con `context: .`, e deve, perche' contiene `COPY . /seed`
-(la sandbox semina l'intero progetto in `/seed`). Vercel invece usa come contesto
-la cartella del Dockerfile, quindi `sandbox/requirements.txt` diventa
-`sandbox/sandbox/requirements.txt`. Non e' correggibile dall'interno del
-Dockerfile: nessun percorso puo' risalire sopra il contesto.
+Una pagina servita in **HTTPS** non puo' chiamare un control-plane in `http://`:
+il browser blocca la richiesta come *mixed content* prima che il codice parta.
+Non e' un bug del client e non si aggira dal lato pagina. Un deploy su Vercel e'
+stato provato e poi rimosso esattamente per questo: la pagina funzionava, ma da
+li' non poteva raggiungere il CP.
 
-### Puntare la pagina al control-plane
+E anche risolto il problema del protocollo resterebbe quello dell'esposizione:
+`/v1/models` e `/v1/chat/completions` **non hanno autenticazione ne' rate limit**,
+quindi un control-plane pubblicato e' una GPU che chiunque puo' far lavorare. Se
+un giorno servisse davvero un accesso dall'esterno, la strada e' un proxy con
+whitelist di **due rotte** piu' un token per utente che la pagina chiede e
+conserva in `localStorage` — *non* l'esposizione della porta del CP, che
+pubblica anche `/logs` e `/federation/peers` senza autenticazione.
 
-L'URL si sceglie a runtime, in ordine di priorita' (`index.html`, righe 104-107):
-
-1. `?cp=...` nella URL — es. `https://<deploy>.vercel.app/?cp=https://cp.example.com`
-2. `localStorage` (`hyperspace.webNodeUrl`): quello scritto l'ultima volta
-3. fallback `` `${location.protocol}//${location.hostname}:8085` ``
-
-### Il vincolo che frega dopo: HTTPS contro HTTP
-
-Il fallback (3) su una pagina servita in **HTTPS** non funziona **mai**: punterebbe
-a `https://<deploy>.vercel.app:8085`, e comunque il browser blocca una richiesta
-`http://` da una pagina `https://` come **mixed content**. Quindi su un deploy
-Vercel il control-plane deve essere raggiungibile in **HTTPS** (Tailscale Funnel,
-un tunnel Cloudflare, o un reverse proxy con certificato). In locale, dove servi
-la pagina in HTTP, il problema non esiste.
-
-L'estensione MV3 in `apps/extension/` non passa da qui: si carica *unpacked* nel
-browser, e Vercel non la deploya.
-
-### Perche' il resto non sta su Vercel
-
-Il repository e' un compose con **24 servizi** (control-plane, registry, node,
-memory-graph, onboarding, searxng, bridge, obsidian, quattro varianti di Ollama,
-open-webui, code-sandbox, omniroute, federation-gateway), 6 volumi, e una mesh
-Tailscale/WireGuard. Il control-plane tiene lo stato in **SQLite su file**
-(`shared/db.py`, `DB_PATH=./data/hyperspace.db`) e ha loop che vivono a lungo
-(heartbeat, dream worker, monitor QoS); il nodo ha bisogno di **Ollama e di una
-GPU**. Vercel esegue asset statici e funzioni di breve durata, con filesystem
-effimero e senza processi persistenti: non e' un Dockerfile da sistemare, e' il
-carico che non e' quello. Per avere lo stack intero online serve un host che
-esegua `docker compose up -d` (una VPS, Fly, Railway, una VM Oracle Free).
