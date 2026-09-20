@@ -51,6 +51,8 @@ Il preset di analisi Python include `bandit==1.8.6` (Apache-2.0), con
 `stevedore` (Apache-2.0), `PyYAML` (MIT), `rich` (MIT) e `pygments`
 (BSD-2-Clause): licenze verificate nel metadata locale il 20/09/2026.
 `markdown-it-py` e `mdurl` sono MIT, verificati nei file LICENSE installati.
+Il preset di lint include `ruff==0.14.10` (MIT), verificato nel metadata locale
+e nella licenza del progetto Astral.
 
 ## web-node
 

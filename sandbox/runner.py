@@ -263,7 +263,26 @@ def _run(job: dict) -> dict:
 
 
 TOOL_MODULES = {"pytest": "pytest", "unittest": "unittest",
-                "profile": "cProfile", "bandit": "bandit"}
+                "profile": "cProfile", "bandit": "bandit", "ruff": "ruff"}
+
+
+def _python_files(repo: Path, target: Path) -> list[Path]:
+    """Return scan candidates and reject symlink escapes before a tool sees them."""
+    if target.is_file():
+        if target.suffix != ".py":
+            raise ValueError("path must be a Python file or a directory")
+        return [target]
+    if not target.is_dir():
+        raise ValueError("path is not a file or directory")
+    files = []
+    for path in target.rglob("*"):
+        if path.is_symlink():
+            _safe_path(repo, path.relative_to(repo).as_posix(), must_exist=True)
+        elif path.is_file() and path.suffix == ".py":
+            files.append(path)
+    if not files:
+        raise ValueError("no Python files found")
+    return files
 
 
 def _catalog(_job: dict) -> dict:
@@ -272,7 +291,7 @@ def _catalog(_job: dict) -> dict:
         available = (Path(sys.executable).name in ALLOWED_EXECUTABLES
                      and importlib.util.find_spec(module) is not None)
         try:
-            version = importlib.metadata.version(module) if tool in {"pytest", "bandit"} else sys.version.split()[0]
+            version = importlib.metadata.version(module) if tool in {"pytest", "bandit", "ruff"} else sys.version.split()[0]
         except importlib.metadata.PackageNotFoundError:
             version = None
         items.append({"tool_id": tool, "available": available, "version": version})
@@ -294,7 +313,7 @@ def _check(job: dict) -> dict:
         return {**result, "error": "tool unavailable; rebuild the sandbox image"}
     argv = [sys.executable] + (["-I"] if tool == "bandit" else []) + ["-m", TOOL_MODULES[tool]]
     if tool == "pytest":
-        argv += ["-q", "--", str(target)]
+        argv += ["-q", "-p", "no:cacheprovider", "--", str(target)]
     elif tool == "unittest":
         if not target.is_dir():
             raise ValueError("unittest path must be a discovery directory")
@@ -303,13 +322,13 @@ def _check(job: dict) -> dict:
         if not target.is_file() or target.suffix != ".py":
             raise ValueError("profile path must be a Python file")
         argv += ["-s", "cumulative", str(target)]
-    else:
-        if target.is_dir():
-            for path in target.rglob("*"):
-                if path.is_symlink():
-                    _safe_path(repo, path.relative_to(repo).as_posix(), must_exist=True)
+    elif tool == "bandit":
+        _python_files(repo, target)
         # Ignore repo-controlled suppressions and do not mix diagnostics into JSON.
         argv += ["-r", "-f", "json", "--ignore-nosec", "--ini", os.devnull, str(target)]
+    else:
+        _python_files(repo, target)
+        argv += ["check", "--no-cache", "--output-format", "json", str(target)]
     env = {"PATH": os.defpath, "HOME": str(root), "TMPDIR": "/tmp",
            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "NO_COLOR": "1"}
@@ -321,10 +340,32 @@ def _check(job: dict) -> dict:
         summary = re.search(r"^Ran (\d+) tests? in ", execution["stderr"], re.M)
         if not summary or int(summary.group(1)) == 0:
             result.update(ok=False, passed=False, error="no verified unittest results")
-    if tool != "bandit" or not execution["completed"]:
+    if tool not in {"bandit", "ruff"} or not execution["completed"]:
         return result
     try:
         report = json.loads(execution["output"])
+        if tool == "ruff":
+            if not isinstance(report, list):
+                raise ValueError("invalid report structure")
+            findings = []
+            for issue in report:
+                path = Path(issue["filename"])
+                if not path.is_absolute():
+                    path = repo / path
+                relative = path.resolve().relative_to(repo.resolve()).as_posix()
+                location = issue.get("location", {})
+                line = location.get("row")
+                if not isinstance(line, int) or line < 1 or not path.is_file():
+                    raise ValueError("invalid finding location")
+                findings.append({"path": relative, "line": line, "rule": issue["code"],
+                                 "message": issue["message"]})
+            completed = execution["exit_code"] in {0, 1}
+            result.update(findings=findings, completed=completed, ok=completed,
+                          passed=completed and not findings and execution["exit_code"] == 0)
+            result.pop("output", None)
+            if not completed:
+                result["error"] = "incomplete Ruff scan"
+            return result
         if not isinstance(report, dict) or not isinstance(report.get("results"), list) or not isinstance(report.get("errors"), list):
             raise ValueError("invalid report structure")
         metrics = report.get("metrics", {}).get("_totals", {})
@@ -356,6 +397,37 @@ def _check(job: dict) -> dict:
                       error=f"invalid Bandit report: {error}")
         result.pop("output", None)
     return result
+
+
+def _verify(job: dict) -> dict:
+    """Run an explicit, bounded verification plan inside one disposable workspace."""
+    checks = job.get("checks")
+    if not isinstance(checks, list) or not 1 <= len(checks) <= 6:
+        raise ValueError("checks must contain between one and six checks")
+    workspace_id = job.get("workspace_id")
+    results = []
+    total_duration = 0
+    for requested in checks:
+        if not isinstance(requested, dict):
+            raise ValueError("each check must be an object")
+        tool_id, path = requested.get("tool_id"), requested.get("path", ".")
+        if tool_id not in TOOL_MODULES or not isinstance(path, str):
+            raise ValueError("each check requires a known tool_id and path")
+        check_job = {"workspace_id": workspace_id, "tool_id": tool_id, "path": path}
+        if "timeout" in requested:
+            check_job["timeout"] = requested["timeout"]
+        try:
+            checked = _check(check_job)
+        except (OSError, ValueError, TypeError) as error:
+            checked = {"tool_id": tool_id, "path": path, "ok": False, "completed": False,
+                       "passed": False, "findings": [], "error": str(error), "duration_ms": 0}
+        checked["path"] = path
+        total_duration += int(checked.get("duration_ms", 0))
+        results.append(checked)
+    complete = all(item.get("completed") for item in results)
+    passed = complete and all(item.get("passed") for item in results)
+    return {"ok": complete, "completed": complete, "passed": passed,
+            "checks": results, "duration_ms": total_duration}
 
 
 def _file_map(root: Path) -> dict[str, Path]:
@@ -417,6 +489,7 @@ def _status(_job: dict) -> dict:
 ACTIONS = {
     "catalog": _catalog,
     "check": _check,
+    "verify": _verify,
     "create": _create,
     "list": _list,
     "read": _read,

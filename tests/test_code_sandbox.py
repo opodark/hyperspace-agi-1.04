@@ -185,6 +185,88 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertFalse(result["completed"])
 
+    def test_ruff_parses_findings_and_never_passes_invalid_reports(self):
+        report = json.dumps([{
+            "filename": "sample.py", "location": {"row": 1, "column": 1},
+            "end_location": {"row": 1, "column": 2}, "code": "F401",
+            "message": "unused import", "fix": None, "noqa_row": 1, "url": "https://example.test/F401",
+        }])
+        with patch.object(runner, "_catalog", return_value={"tools": [
+                {"tool_id": "ruff", "version": "test", "available": True}]}), \
+             patch.object(runner, "_capture", return_value={"ok": False, "completed": True,
+                 "exit_code": 1, "output": report, "stderr": "", "truncated": False, "duration_ms": 1}):
+            result = self.check("ruff", "import unused\n")
+        self.assertTrue(result["completed"], result)
+        self.assertFalse(result["passed"], result)
+        self.assertEqual(result["findings"], [{"path": "sample.py", "line": 1,
+                                                "rule": "F401", "message": "unused import"}])
+        with patch.object(runner, "_catalog", return_value={"tools": [
+                {"tool_id": "ruff", "version": "test", "available": True}]}), \
+             patch.object(runner, "_capture", return_value={"ok": True, "completed": True,
+                 "exit_code": 0, "output": "not json", "stderr": "", "truncated": False, "duration_ms": 1}):
+            result = self.check("ruff", "value = 42\n")
+        self.assertFalse(result["completed"], result)
+        self.assertFalse(result["passed"], result)
+
+    def test_check_presets_do_not_create_tool_caches_in_the_diff(self):
+        workspace_id = self.create()
+        repo = self.workspaces / workspace_id / "repo"
+        (repo / "sample.py").write_text("VALUE = 42\n", encoding="utf-8")
+        captured = []
+
+        def fake_capture(argv, cwd, env, timeout):
+            captured.append(argv)
+            return {"ok": True, "completed": True, "exit_code": 0, "output": "[]",
+                    "stderr": "", "truncated": False, "duration_ms": 1}
+
+        with patch.object(runner, "_catalog", return_value={"tools": [
+                {"tool_id": "ruff", "version": "test", "available": True}]}), \
+             patch.object(runner, "_capture", side_effect=fake_capture):
+            runner._check({"workspace_id": workspace_id, "tool_id": "ruff", "path": "sample.py"})
+        self.assertIn("--no-cache", captured[0])
+
+        with patch.object(runner, "_catalog", return_value={"tools": [
+                {"tool_id": "pytest", "version": "test", "available": True}]}), \
+             patch.object(runner, "_capture", side_effect=fake_capture):
+            runner._check({"workspace_id": workspace_id, "tool_id": "pytest", "path": "."})
+        self.assertIn("no:cacheprovider", captured[1])
+
+    @unittest.skipUnless(runner.importlib.util.find_spec("ruff"), "Ruff not installed")
+    def test_ruff_finds_lint_and_accepts_clean_code(self):
+        result = self.check("ruff", "import unused\n")
+        self.assertTrue(result["completed"], result)
+        self.assertFalse(result["passed"], result)
+        self.assertTrue(any(f["rule"] == "F401" for f in result["findings"]), result)
+        clean = self.check("ruff", "value = 42\n")
+        self.assertTrue(clean["passed"], clean)
+
+    def test_verify_requires_every_explicit_check_to_pass(self):
+        workspace_id = self.create()
+        runner._write({"workspace_id": workspace_id, "path": "test_sample.py", "content":
+                       "def test_ok():\n    assert True\n"})
+        with patch.object(runner, "_check", side_effect=[
+                {"tool_id": "pytest", "completed": True, "passed": True, "duration_ms": 2},
+                {"tool_id": "bandit", "completed": True, "passed": False, "duration_ms": 3,
+                 "findings": [{"rule": "B307"}]}]):
+            result = runner._verify({"workspace_id": workspace_id, "checks": [
+                {"tool_id": "pytest", "path": "test_sample.py"},
+                {"tool_id": "bandit", "path": "."},
+            ]})
+        self.assertTrue(result["completed"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["duration_ms"], 5)
+
+    def test_verify_collects_unavailable_or_bad_paths_as_not_completed(self):
+        workspace_id = self.create()
+        result = runner._verify({"workspace_id": workspace_id, "checks": [
+            {"tool_id": "ruff", "path": "missing.py"},
+        ]})
+        self.assertFalse(result["completed"])
+        self.assertFalse(result["passed"])
+        self.assertIn("path not found", result["checks"][0]["error"])
+        with self.assertRaises(ValueError):
+            runner._verify({"workspace_id": workspace_id, "checks": []})
+
     @unittest.skipUnless(runner.importlib.util.find_spec("pytest"), "pytest not installed")
     def test_pytest_pass_fail_and_no_tests(self):
         for source, passed, code in (("def test_ok(): assert 1 == 1\n", True, 0),
@@ -256,6 +338,20 @@ class ControlPlanePresetTests(unittest.TestCase):
         self.assertEqual(backend.calls[-1], ("check", {"tool_id": "bandit", "path": "shared",
                                                         "workspace_id": "docker:12345678"}))
 
+    def test_handler_forwards_verify_plan(self):
+        tree = ast.parse((ROOT / "control-plane/main.py").read_text())
+        function = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "_tool_code_sandbox")
+        backend = FakeBackend("docker", True)
+        namespace = {"code_sandbox": backend, "json": json,
+                     "push_log": lambda *args, **kwargs: None, "SandboxUnavailable": SandboxUnavailable}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "handler", "exec"), namespace)
+        plan = [{"tool_id": "ruff", "path": "shared"}, {"tool_id": "bandit", "path": "shared"}]
+        namespace["_tool_code_sandbox"]({"action": "verify", "checks": plan,
+                                         "workspace_id": "docker:12345678"})
+        self.assertEqual(backend.calls[-1], ("verify", {"checks": plan,
+                                                        "workspace_id": "docker:12345678"}))
+
 
 class ClientTests(unittest.TestCase):
     def setUp(self):
@@ -320,6 +416,8 @@ class HybridClientTests(unittest.TestCase):
         client.call("check", {"workspace_id": created["workspace_id"], "tool_id": "bandit"})
         self.assertEqual(fallback.calls[-1][0], "check")
         unsupported = client.call("check", {"workspace_id": "sbx:workspace-1"})
+        self.assertFalse(unsupported["passed"])
+        unsupported = client.call("verify", {"workspace_id": "sbx:workspace-1", "checks": []})
         self.assertFalse(unsupported["passed"])
         self.assertEqual(primary.calls, [])
 

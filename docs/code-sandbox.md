@@ -62,6 +62,13 @@ da clonare; per default hostctl usa la root di HyperSpace.
 Ricostruire `control-plane` e `code-sandbox`. Lo stato è disponibile su
 `GET /sandbox/status`; il tool `code_sandbox` compare anche via MCP.
 
+La dashboard espone lo stesso contratto nella scheda **Dev Sandbox**. Da lì
+l'operatore può creare un workspace Docker, esplorare e modificare file,
+eseguire Ruff, Bandit, pytest, unittest e cProfile, lanciare un piano `verify`,
+leggere i finding per file e riga e ispezionare il diff. **Salva diff nel
+Forge** registra la patch come draft inerte `.diff`; non modifica il checkout
+reale e non installa né esegue l'artefatto.
+
 ## Workflow del tool
 
 Il tool usa una singola API con azioni esplicite:
@@ -74,8 +81,10 @@ Il tool usa una singola API con azioni esplicite:
    Python, Node/npm, pytest e Git; l'immagine include inoltre il sottoinsieme
    locale delle dipendenze Python usate dai servizi HyperSpace. La rete resta
    assente anche per questi processi;
-5. `diff` restituisce file modificati e patch unificata;
-6. `discard` elimina il workspace.
+5. `catalog`, `check` e `verify` espongono i preset di sviluppo installati e i
+   relativi report strutturati;
+6. `diff` restituisce file modificati e patch unificata;
+7. `discard` elimina il workspace.
 
 I workspace sono limitati e non vengono promossi automaticamente. Prima di
 applicare una proposta al repository operativo vanno verificati diff e test da

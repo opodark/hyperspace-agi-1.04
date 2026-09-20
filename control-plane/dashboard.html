@@ -247,6 +247,7 @@ main{padding:18px 20px;display:grid}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .inactive-nodes{margin-top:18px}.inactive-nodes summary{cursor:pointer;color:var(--text-muted);padding:12px 0}.inactive-nodes .node-card,.inactive-nodes .mx-node-card{opacity:.5}.inactive-nodes .node-card:hover,.inactive-nodes .mx-node-card:hover{opacity:1}.diag-node-fields{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}.diag-node-fields .fg{flex:1;min-width:180px}
 .forge-layout{display:grid;grid-template-columns:minmax(300px,1fr) minmax(360px,1.35fr);gap:14px}.forge-editor{min-height:340px;font-family:var(--font-mono);font-size:.75rem;line-height:1.55}.forge-list{display:flex;flex-direction:column;gap:8px;max-height:610px;overflow:auto}.forge-item{padding:11px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)}.forge-item-head{display:flex;gap:8px;align-items:center;justify-content:space-between}.forge-meta{font-size:.75rem;color:var(--text-muted);font-family:var(--font-mono);margin-top:5px}.forge-badge{font-size:.75rem;text-transform:uppercase;padding:2px 6px;border:1px solid var(--border);border-radius:99px}.forge-badge.approved{color:var(--success);border-color:var(--success)}.forge-badge.review{color:var(--warning);border-color:var(--warning)}.forge-validation{white-space:pre-wrap;font-family:var(--font-mono);font-size:.75rem;margin-top:7px;color:var(--text-muted)}@media(max-width:900px){.forge-layout{grid-template-columns:1fr}}
+.sandbox-toolbar{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px}.sandbox-toolbar .fg{min-width:180px;flex:1}.sandbox-workspace-id{font-family:var(--font-mono);font-size:.75rem;color:var(--text-muted);overflow-wrap:anywhere}.sandbox-layout{display:grid;grid-template-columns:minmax(220px,.55fr) minmax(420px,1.45fr);gap:14px}.sandbox-files{display:flex;flex-direction:column;gap:3px;max-height:560px;overflow:auto;margin-top:10px}.sandbox-file{border:0;background:transparent;color:var(--text-muted);font-family:var(--font-mono);font-size:.75rem;text-align:left;padding:6px 8px;border-radius:var(--radius);cursor:pointer;overflow-wrap:anywhere}.sandbox-file:hover,.sandbox-file.active{background:var(--surface3);color:var(--text)}.sandbox-editor{width:100%;min-height:380px;resize:vertical;font-family:var(--font-mono);font-size:.78rem;line-height:1.55;tab-size:4}.sandbox-checks{display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:.8rem;color:var(--text-muted)}.sandbox-checks label{display:flex;gap:5px;align-items:center;cursor:pointer}.sandbox-output{white-space:pre-wrap;overflow:auto;max-height:440px;min-height:130px;font-family:var(--font-mono);font-size:.75rem;line-height:1.5}.sandbox-result-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}.sandbox-finding{display:block;width:100%;text-align:left;border:0;border-top:1px solid var(--border);background:transparent;color:var(--text);padding:7px 3px;font-family:var(--font-mono);font-size:.75rem;cursor:pointer}.sandbox-finding:hover{color:var(--primary)}@media(max-width:900px){.sandbox-layout{grid-template-columns:1fr}.sandbox-editor{min-height:300px}}
 /* Readable controls and navigation on laptop screens and at browser zoom. */
 body{line-height:1.5}
 header{height:auto;min-height:58px;flex-wrap:wrap;padding:10px 20px;gap:10px 16px}
@@ -284,6 +285,7 @@ main,.panel,.card{min-width:0}
     <button onclick="showPanel('logs',this)">&#128203; Logs</button>
     <button onclick="showPanel('metrics',this)">&#9889; Metrics</button>
     <button onclick="showPanel('forge',this)">&#128736; Forge</button>
+    <button onclick="showPanel('sandbox',this)">&#129514; Dev Sandbox</button>
     <button onclick="showPanel('diag',this)">&#128295; Diagnostics</button>
     <button onclick="showPanel('network',this)">&#128225; Network</button>
     <button onclick="showPanel('setup',this)">&#9881;&#65039; Setup</button>
@@ -558,7 +560,7 @@ main,.panel,.card{min-width:0}
   </div>
 </div>
 
-<!-- SETUP -->
+<!-- TOOL & SKILL FORGE -->
 <div id="panel-forge" class="panel">
   <div class="sec-title">Tool &amp; Skill Forge</div>
   <p class="hint">Il modello crea solo bozze inerti. Nessun sorgente viene importato o eseguito automaticamente.</p>
@@ -567,7 +569,7 @@ main,.panel,.card{min-width:0}
       <div class="card-title">Nuovo artefatto</div>
       <div class="setup-grid">
         <label class="fg">Nome<input id="forgeName" class="inp" placeholder="es. GitHub issue triage"/></label>
-        <label class="fg">Tipo<select id="forgeType" class="inp"><option value="skill">Skill Markdown</option><option value="tool">Tool Python</option></select></label>
+        <label class="fg">Tipo<select id="forgeType" class="inp"><option value="skill">Skill Markdown</option><option value="tool">Tool Python</option><option value="patch">Patch sandbox</option></select></label>
       </div>
       <label class="fg">Descrizione<textarea id="forgeDescription" class="inp" rows="4" placeholder="Cosa deve fare, input, output e vincoli"></textarea></label>
       <label class="fg">Sorgente<textarea id="forgeSource" class="inp forge-editor" placeholder="Genera con il modello oppure scrivi qui..."></textarea></label>
@@ -584,6 +586,74 @@ main,.panel,.card{min-width:0}
       <label class="fg">Token approvazione<input id="forgeToken" type="password" class="inp" autocomplete="off" placeholder="FORGE_ADMIN_TOKEN"/></label>
       <button class="btn btn-ghost btn-sm" onclick="forgeImportEcc()">Importa skill ECC come draft</button>
       <div id="forgeList" class="forge-list"><div class="hint">Caricamento...</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- DEV SANDBOX -->
+<div id="panel-sandbox" class="panel">
+  <div class="sec-title">Dev Sandbox</div>
+  <p class="hint">Modifica e verifica una copia usa-e-getta del repository. Le operazioni restano isolate finché non esporti il diff nel Forge.</p>
+  <div class="card">
+    <div class="sandbox-toolbar">
+      <label class="fg">Etichetta workspace<input id="sandboxLabel" class="inp" value="dashboard-session" maxlength="120"/></label>
+      <button class="btn btn-primary" onclick="sandboxCreate()">Crea workspace</button>
+      <button class="btn btn-danger" id="sandboxDiscardButton" onclick="sandboxDiscard()" disabled>Elimina</button>
+      <button class="btn btn-ghost" onclick="sandboxLoad()">&#8634; Stato</button>
+    </div>
+    <div class="row" style="justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <span id="sandboxStatus" class="hint">Stato non caricato.</span>
+      <span id="sandboxWorkspaceId" class="sandbox-workspace-id">Nessun workspace attivo</span>
+    </div>
+  </div>
+  <div class="sandbox-layout">
+    <div class="card">
+      <div class="card-title">File</div>
+      <div class="row" style="gap:6px">
+        <input id="sandboxPattern" class="inp inp-mono" value="*.py" aria-label="Pattern file"/>
+        <button class="btn btn-ghost btn-sm" onclick="sandboxRefreshFiles()">&#8634;</button>
+      </div>
+      <div id="sandboxFiles" class="sandbox-files"><div class="hint">Crea un workspace per esplorare i file.</div></div>
+    </div>
+    <div>
+      <div class="card">
+        <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <label class="fg" style="flex:1">Percorso file<input id="sandboxPath" class="inp inp-mono" placeholder="es. scripts/model_bench.py"/></label>
+          <button class="btn btn-ghost" onclick="sandboxOpenPath()">Apri</button>
+          <button class="btn btn-primary" onclick="sandboxSave()">Salva</button>
+        </div>
+        <textarea id="sandboxEditor" class="inp sandbox-editor" spellcheck="false" aria-label="Editor del file sandbox" placeholder="Seleziona un file oppure indica un nuovo percorso..."></textarea>
+      </div>
+      <div class="card">
+        <div class="card-title">Ispezione e verifica</div>
+        <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <label class="fg" style="flex:1;min-width:220px">Percorso da verificare<input id="sandboxCheckPath" class="inp inp-mono" value="."/></label>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('ruff')">Ruff</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('bandit')">Bandit</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('pytest')">pytest</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('unittest')">unittest</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('profile')">Profile file</button>
+        </div>
+        <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:10px">
+          <div class="sandbox-checks">
+            <b>Verify:</b>
+            <label><input id="sandboxVerifyRuff" type="checkbox" checked/> Ruff</label>
+            <label><input id="sandboxVerifyBandit" type="checkbox" checked/> Bandit</label>
+            <label><input id="sandboxVerifyPytest" type="checkbox"/> pytest</label>
+            <label><input id="sandboxVerifyUnittest" type="checkbox"/> unittest</label>
+          </div>
+          <div class="row" style="gap:6px;flex-wrap:wrap">
+            <button class="btn btn-success" onclick="sandboxVerify()">Esegui verify</button>
+            <button class="btn btn-ghost" onclick="sandboxDiff()">Mostra diff</button>
+            <button class="btn btn-warn" onclick="sandboxSaveDiffToForge()">Salva diff nel Forge</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="sandbox-result-head"><div class="card-title" style="margin:0">Risultato</div><span id="sandboxResultSummary" class="hint"></span></div>
+        <div id="sandboxFindings"></div>
+        <pre id="sandboxOutput" class="diag-out sandbox-output">Nessuna operazione eseguita.</pre>
+      </div>
     </div>
   </div>
 </div>
@@ -680,11 +750,183 @@ function showPanel(name,btn){
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
   if(name==='forge')forgeLoad();
+  if(name==='sandbox')sandboxLoad();
   if(name==='setup'){loadCfg();loadEnv();}
   if(name==='network'){
     document.getElementById('netAdminToken').value=networkToken();
     refreshNetwork();refreshBottles();
   }
+}
+
+// ── DEV SANDBOX ───────────────────────────────────────────────────────────
+window.sandboxWorkspaceId=null;
+window.sandboxCurrentPath=null;
+window.sandboxLastDiff=null;
+
+function sandboxRequireWorkspace(){
+  if(!window.sandboxWorkspaceId)throw new Error('Crea prima un workspace sandbox.');
+  return window.sandboxWorkspaceId;
+}
+async function sandboxRequest(args){
+  var response=await fetch('/tools/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_name:'code_sandbox',args:args})});
+  var envelope=await response.json();
+  if(!response.ok)throw new Error(envelope.error||('HTTP '+response.status));
+  var result=envelope.result;
+  if(typeof result==='string'){
+    try{result=JSON.parse(result);}catch(error){throw new Error(result||'Risposta sandbox non valida.');}
+  }
+  if(!result||typeof result!=='object')throw new Error('Risposta sandbox non valida.');
+  return result;
+}
+function sandboxSetBusy(message){
+  document.getElementById('sandboxResultSummary').textContent=message||'';
+}
+function sandboxCollectFindings(result){
+  var checks=Array.isArray(result.checks)?result.checks:[result],findings=[];
+  checks.forEach(function(check){
+    (check.findings||[]).forEach(function(item){findings.push(item);});
+  });
+  return findings;
+}
+function sandboxRenderResult(result,title){
+  var findings=sandboxCollectFindings(result),summary=[];
+  if(title)summary.push(title);
+  if(typeof result.passed==='boolean')summary.push(result.passed?'PASS':'FAIL');
+  if(typeof result.duration_ms==='number')summary.push(result.duration_ms+' ms');
+  if(Array.isArray(result.changed_files))summary.push(result.changed_files.length+' file modificati');
+  document.getElementById('sandboxResultSummary').textContent=summary.join(' · ');
+  document.getElementById('sandboxOutput').textContent=JSON.stringify(result,null,2);
+  document.getElementById('sandboxFindings').innerHTML=findings.map(function(item){
+    var target=JSON.stringify(item.path||'');
+    return '<button class="sandbox-finding" onclick="sandboxOpenFinding('+forgeEsc(target)+','+Number(item.line||1)+')">'
+      +forgeEsc((item.path||'?')+':'+(item.line||'?')+' · '+(item.rule||'finding')+' · '+(item.message||''))+'</button>';
+  }).join('');
+}
+function sandboxRenderError(error){
+  document.getElementById('sandboxResultSummary').textContent='Errore';
+  document.getElementById('sandboxOutput').textContent=error.message||String(error);
+}
+async function sandboxLoad(){
+  var status=document.getElementById('sandboxStatus');
+  status.textContent='Controllo sandbox...';
+  try{
+    var response=await fetch('/sandbox/status'),data=await response.json();
+    var backend=data.backend||'nessuno';
+    status.textContent=(data.available?'Disponibile':'Non disponibile')+' · backend '+backend+(data.error?' · '+data.error:'');
+    if(data.available){
+      var catalog=await sandboxRequest({action:'catalog'});
+      var available=(catalog.tools||[]).filter(function(tool){return tool.available;}).map(function(tool){return tool.tool_id+' '+(tool.version||'');});
+      status.textContent+=' · '+available.join(', ');
+    }
+  }catch(error){status.textContent='Errore stato: '+error.message;}
+}
+async function sandboxCreate(){
+  sandboxSetBusy('Creazione workspace...');
+  try{
+    if(window.sandboxWorkspaceId)throw new Error('Elimina il workspace attivo prima di crearne un altro.');
+    var result=await sandboxRequest({action:'create',backend:'docker',label:document.getElementById('sandboxLabel').value.trim()||'dashboard-session'});
+    window.sandboxWorkspaceId=result.workspace_id;
+    window.sandboxLastDiff=null;
+    document.getElementById('sandboxWorkspaceId').textContent=result.workspace_id;
+    document.getElementById('sandboxDiscardButton').disabled=false;
+    sandboxRenderResult(result,'Workspace creato');
+    await sandboxRefreshFiles();
+  }catch(error){sandboxRenderError(error);}
+}
+async function sandboxDiscard(){
+  try{
+    var workspaceId=sandboxRequireWorkspace();
+    if(!window.confirm('Eliminare il workspace usa-e-getta '+workspaceId+'?'))return;
+    sandboxSetBusy('Eliminazione workspace...');
+    var result=await sandboxRequest({action:'discard',workspace_id:workspaceId});
+    window.sandboxWorkspaceId=null;window.sandboxCurrentPath=null;window.sandboxLastDiff=null;
+    document.getElementById('sandboxWorkspaceId').textContent='Nessun workspace attivo';
+    document.getElementById('sandboxDiscardButton').disabled=true;
+    document.getElementById('sandboxFiles').innerHTML='<div class="hint">Crea un workspace per esplorare i file.</div>';
+    document.getElementById('sandboxPath').value='';document.getElementById('sandboxEditor').value='';
+    sandboxRenderResult(result,'Workspace eliminato');
+  }catch(error){sandboxRenderError(error);}
+}
+async function sandboxRefreshFiles(){
+  try{
+    var result=await sandboxRequest({action:'list',workspace_id:sandboxRequireWorkspace(),pattern:document.getElementById('sandboxPattern').value.trim()||'*',limit:500});
+    var host=document.getElementById('sandboxFiles'),files=result.files||[];
+    if(!files.length){host.innerHTML='<div class="hint">Nessun file per questo pattern.</div>';return;}
+    host.innerHTML=files.map(function(path){return '<button class="sandbox-file'+(path===window.sandboxCurrentPath?' active':'')+'" onclick="sandboxOpenFile('+forgeEsc(JSON.stringify(path))+')">'+forgeEsc(path)+'</button>';}).join('');
+  }catch(error){sandboxRenderError(error);}
+}
+async function sandboxOpenPath(){
+  var path=document.getElementById('sandboxPath').value.trim();
+  if(!path){sandboxRenderError(new Error('Indica un percorso file.'));return;}
+  await sandboxOpenFile(path);
+}
+async function sandboxOpenFile(path){
+  try{
+    sandboxSetBusy('Lettura '+path+'...');
+    var result=await sandboxRequest({action:'read',workspace_id:sandboxRequireWorkspace(),path:path});
+    window.sandboxCurrentPath=result.path;
+    document.getElementById('sandboxPath').value=result.path;
+    document.getElementById('sandboxEditor').value=result.content;
+    document.getElementById('sandboxResultSummary').textContent='Aperto '+result.path;
+    await sandboxRefreshFiles();
+  }catch(error){sandboxRenderError(error);}
+}
+async function sandboxOpenFinding(path,line){
+  await sandboxOpenFile(path);
+  var editor=document.getElementById('sandboxEditor'),lines=editor.value.split('\n'),start=0;
+  for(var i=0;i<Math.max(0,line-1)&&i<lines.length;i++)start+=lines[i].length+1;
+  editor.focus();editor.setSelectionRange(start,start+(lines[line-1]||'').length);
+}
+async function sandboxSave(){
+  try{
+    var path=document.getElementById('sandboxPath').value.trim();
+    if(!path)throw new Error('Indica il percorso del file da salvare.');
+    sandboxSetBusy('Salvataggio '+path+'...');
+    var result=await sandboxRequest({action:'write',workspace_id:sandboxRequireWorkspace(),path:path,content:document.getElementById('sandboxEditor').value});
+    window.sandboxCurrentPath=result.path;window.sandboxLastDiff=null;
+    sandboxRenderResult(result,'File salvato');await sandboxRefreshFiles();
+  }catch(error){sandboxRenderError(error);}
+}
+async function sandboxCheck(toolId){
+  try{
+    var path=toolId==='profile'?(window.sandboxCurrentPath||document.getElementById('sandboxPath').value.trim()):document.getElementById('sandboxCheckPath').value.trim();
+    if(!path)throw new Error('Indica il percorso da verificare.');
+    sandboxSetBusy('Esecuzione '+toolId+'...');
+    var result=await sandboxRequest({action:'check',workspace_id:sandboxRequireWorkspace(),tool_id:toolId,path:path,timeout:120});
+    sandboxRenderResult(result,toolId);
+  }catch(error){sandboxRenderError(error);}
+}
+function sandboxVerifyPlan(){
+  var path=document.getElementById('sandboxCheckPath').value.trim()||'.',checks=[];
+  [['sandboxVerifyRuff','ruff'],['sandboxVerifyBandit','bandit'],['sandboxVerifyPytest','pytest'],['sandboxVerifyUnittest','unittest']].forEach(function(spec){
+    if(document.getElementById(spec[0]).checked)checks.push({tool_id:spec[1],path:path,timeout:120});
+  });
+  return checks;
+}
+async function sandboxVerify(){
+  try{
+    var checks=sandboxVerifyPlan();if(!checks.length)throw new Error('Seleziona almeno un controllo.');
+    sandboxSetBusy('Verifica combinata in corso...');
+    var result=await sandboxRequest({action:'verify',workspace_id:sandboxRequireWorkspace(),checks:checks});
+    sandboxRenderResult(result,'Verify');
+  }catch(error){sandboxRenderError(error);}
+}
+async function sandboxDiff(){
+  try{
+    sandboxSetBusy('Calcolo diff...');
+    var result=await sandboxRequest({action:'diff',workspace_id:sandboxRequireWorkspace()});
+    window.sandboxLastDiff=result;sandboxRenderResult(result,'Diff');return result;
+  }catch(error){sandboxRenderError(error);return null;}
+}
+async function sandboxSaveDiffToForge(){
+  try{
+    var diff=await sandboxDiff();if(!diff)return;
+    if(!diff.diff)throw new Error('Il workspace non contiene modifiche da salvare.');
+    var stamp=new Date().toISOString().replace(/[:.]/g,'-');
+    var payload={name:'Sandbox patch '+stamp,type:'patch',description:'Diff prodotto dal workspace '+sandboxRequireWorkspace(),source:diff.diff,generator:'dev-sandbox-ui'};
+    var item=await forgeRequest('/forge/artifacts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    document.getElementById('sandboxResultSummary').textContent='Draft Forge '+item.id+' creato · '+(item.validation.valid?'valido':'non valido');
+  }catch(error){sandboxRenderError(error);}
 }
 
 // ── TOOL & SKILL FORGE ────────────────────────────────────────────────────

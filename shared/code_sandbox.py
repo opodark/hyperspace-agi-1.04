@@ -168,7 +168,7 @@ class HybridCodeSandboxClient:
                     pass
             return self._tag(self.fallback.call(action, arguments, timeout), "docker")
         backend, raw_id = self._split_workspace(arguments.get("workspace_id"))
-        if action == "check" and backend == "sbx":
+        if action in {"check", "verify"} and backend == "sbx":
             return {"ok": False, "completed": False, "passed": False, "backend": "sbx",
                     "error": "development presets require a docker workspace"}
         arguments["workspace_id"] = raw_id

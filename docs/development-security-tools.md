@@ -35,6 +35,12 @@ Il tool `code_sandbox` espone ora `catalog` e `check`. Ricostruire il servizio
 il Control Plane per aggiornare il contratto dei tool. Abilitare
 `CODE_SANDBOX_ENABLED=true` e configurare `FORGE_ADMIN_TOKEN` nel `.env` locale.
 
+La scheda **Dev Sandbox** del dashboard rende disponibile lo stesso workflow
+all'utente: editor sulla copia usa-e-getta, lista file, preset singoli, piano
+`verify`, finding navigabili e diff. Il diff può essere registrato nel Forge
+come draft `patch`; questa operazione conserva una proposta `.diff` per review
+senza applicarla al repository reale.
+
 Sequenza di argomenti da inviare al tool:
 
 ```json
@@ -43,7 +49,8 @@ Sequenza di argomenti da inviare al tool:
 {"action": "check", "workspace_id": "docker:<id restituito>", "tool_id": "bandit", "path": "shared", "timeout": 60}
 {"action": "check", "workspace_id": "docker:<id restituito>", "tool_id": "pytest", "path": "tests", "timeout": 120}
 {"action": "check", "workspace_id": "docker:<id restituito>", "tool_id": "unittest", "path": "tests"}
-{"action": "check", "workspace_id": "docker:<id restituito>", "tool_id": "profile", "path": "example.py"}
+{"action": "check", "workspace_id": "docker:<id restituito>", "tool_id": "ruff", "path": "shared"}
+{"action": "verify", "workspace_id": "docker:<id restituito>", "checks": [{"tool_id":"ruff","path":"shared"},{"tool_id":"bandit","path":"shared"},{"tool_id":"pytest","path":"tests","timeout":120}]}
 {"action": "discard", "workspace_id": "docker:<id restituito>"}
 ```
 
@@ -59,10 +66,20 @@ completare correttamente con finding e quindi `passed: false`. I finding
 includono percorso relativo, riga, regola, gravità, confidenza e messaggio.
 Scansioni vuote, errori di parsing e report troncati non passano.
 
+`ruff` applica la configurazione presente nel workspace (`pyproject.toml`,
+`ruff.toml` o `.ruff.toml`) e restituisce finding con percorso, riga, regola e
+messaggio. `verify` riceve da una a sei check espliciti e passa solo se tutti
+sono completati e passano; il suo report conserva il risultato di ogni check.
+Questo rende eseguibile la parte di lint, test e security della skill ECC
+`verification-loop`, senza inventare build, coverage o type-check che non sono
+stati richiesti o configurati dal progetto.
+
 Bandit non esegue il sorgente; i preset di test e profiling lo eseguono. Per
 Bandit si ignorano le soppressioni `nosec` e il file `.bandit` del workspace.
 Per pytest l'autocaricamento dei plugin installati è disabilitato; i progetti
 che richiedono plugin specifici possono usare il comando `run` preesistente.
+Ruff e pytest hanno le rispettive cache disabilitate nei preset, così una
+verifica non aggiunge file tecnici al diff del workspace.
 Output e traceback dei test restano output del codice eseguito: non è ancora
 implementata una redazione generale dei segreti né persistenza dei report.
 
@@ -168,6 +185,7 @@ misurabile il beneficio delle skill su strumenti realmente disponibili.
 - [ECC security-review](https://github.com/affaan-m/ECC/blob/main/skills/security-review/SKILL.md).
 - [ECC verification-loop](https://github.com/affaan-m/ECC/blob/main/skills/verification-loop/SKILL.md).
 - [Bandit](https://github.com/PyCQA/bandit).
+- [Ruff](https://github.com/astral-sh/ruff).
 - [pip-audit](https://github.com/pypa/pip-audit).
 - [Playwright Trace Viewer](https://playwright.dev/docs/trace-viewer).
 - [Nmap Reference Guide](https://nmap.org/book/man.html).
