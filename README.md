@@ -100,6 +100,17 @@ cp .env.example .env   # or .env.mac / .env.ubuntu / .env.windows depending on h
 # or
 .\setup.ps1  # Windows
 
+.\scripts\start.ps1  # Windows - one command for the whole stack
+# containers, wait, verdict (services, channels, identity). Also:
+#   .\scripts\start.ps1 -Profile nvidia   # GPU profile for a dockerized Ollama
+#   .\scripts\start.ps1 -Check            # do not start anything: report what runs
+#   .\scripts\start.ps1 -Driver           # ...and start the channel driver too
+#   .\scripts\start.ps1 -Stop             # stop everything (volumes stay)
+#
+# quick commands from the terminal (status, mode, logs, memory, dreams, host):
+#   python scripts/hs.py status
+#   python scripts/hs.py mode off          # make the room bot stop talking
+
 # or directly, once .env is in place:
 docker compose up -d --build
 ```

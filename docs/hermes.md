@@ -148,12 +148,17 @@ Da PowerShell nella root del repository:
 .\scripts\start_hermes_memory_bridge.ps1
 ```
 
-Con i path predefiniti del profilo Windows usare invece
-`.\scripts\start_hermes_memory_bridge.ps1 -TokenFile 'C:\HyperSpace\data\hermes-memory.token'`.
 
 Il launcher usa `127.0.0.1`: su Docker Desktop `host.docker.internal` riesce a
 raggiungerlo, ma la LAN no. Non allargare il bind senza una regola firewall
 precisa. Verifica: `GET /health` con header `Authorization: Bearer <token>`.
+
+Una sola fonte di verita' (aggiornato 2026-09-20): il token vive in
+`%HS_DATA_DIR%/hermes-memory.token` (default `data/runtime/data/hermes-memory.token`),
+letto sia dal control-plane (mount `/app/data`) sia dal bridge (via `--token-file`).
+Non generare un secondo file separato: disallinea i token e causa
+`401 Unauthorized` sul bridge.
+
 
 ## Migrazione legacy
 

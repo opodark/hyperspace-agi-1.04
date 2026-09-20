@@ -16,6 +16,9 @@ The control plane is the orchestration core. It routes tasks, manages connectors
 
 The node and worker layers are the execution runtime of the mesh. They handle task execution, model access, and lower-level agent behavior.
 
+**Reasoning control on the node path (`shared/ollama_native.py`).** The control plane decides whether a request may reason (`_decide_thinking`) and puts `think` in the payload; the OpenAI-compatible endpoint of Ollama *ignores* that flag (measured: with `think=false` the answer comes back with an empty `content` and everything in `reasoning`), so on the node path `think=false` used to still produce reasoning — the model burned its token budget thinking and the reply arrived after minutes (the live-chat timeouts). For non-stream requests with an explicit `think=false` the node now translates the payload to Ollama's native `/api/chat`, calls it through **ollama-proxy** (so instrumentation, logs and shared memory are unchanged) and translates the answer back to OpenAI shape, including `tool_calls` — where the second round of the tool loop must be normalised (`arguments` as object, `tool_name` instead of `tool_call_id`), otherwise the native endpoint answers 400. The control plane uses the same module for channel replies. Streaming, `think` absent and `think=true` keep the previous path; if the native call fails the node falls back to the compatible one and says so in the log.
+
+
 ### Registry
 
 The registry is the discovery and membership layer. It keeps track of active nodes and provides a shared view of who is online, what they can do, and how they should be reached.

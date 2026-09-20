@@ -451,6 +451,26 @@ services:
       - "${MESH_BIND_IP:-127.0.0.1}:8091:3000"
     shm_size: "1gb"
 
+  # -- Web Node (hosting statico della pagina browser) -------------------------
+  # Il nodo gira nel BROWSER del client; qui si servono solo i file statici
+  # (index.html + src/). Porta 8790 su MESH_BIND_IP, cosi' e' raggiungibile come
+  # il resto dello stack. Il fallback del control-plane nella pagina
+  # (${location.hostname}:8085) funziona da solo perche' pagina e CP condividono
+  # lo stesso host.
+  hyperspace-web-node:
+    build:
+      context: ./web-node
+    container_name: hyperspace-web-node
+    restart: ${RESTART_POLICY}
+    ports:
+      - "${MESH_BIND_IP:-127.0.0.1}:8790:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
 volumes:
   obsidian_config:
   omniroute_data:

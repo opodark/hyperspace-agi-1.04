@@ -4711,6 +4711,14 @@ _ENV_META = [
      "label": "Max voci in memoria",
      "hint": "Numero massimo di voci conservate: oltre questo tetto vengono potate le più vecchie.",
      "default": "200"},
+    {"section": "Memoria a lungo termine", "key": "MEMORY_BACKEND", "type": "str",
+     "label": "Backend memoria",
+     "hint": "\"hermes\" = il bridge Hermes (serve il servizio attivo: senza, le scritture si perdono in silenzio e l'agente non ricorda la stanza). \"legacy\" = file locale gzip, nessun servizio in più: metti MEMORY_FILE dentro un volume, altrimenti si perde a ogni ricostruzione. Vale da subito.",
+     "default": "hermes"},
+    {"section": "Memoria a lungo termine", "key": "MEMORY_FILE", "type": "str",
+     "label": "File memoria (legacy)",
+     "hint": "Percorso del file gzip quando il backend è \"legacy\". Vuoto = $APP_DIR/memory.json.gz (dentro il container NON è un volume: si perde al rebuild). Per la memoria durevole usa /app/memory/memory.json.gz, che è montato.",
+     "default": ""},
     # Telemetria nodi
     {"section": "Telemetria nodi (/metrics)", "key": "METRICS_POLL_INTERVAL_S", "type": "int",
      "label": "Poll /metrics (s)",
@@ -5050,6 +5058,7 @@ def _apply_env_runtime(meta: dict, cv) -> None:
     global OMNIROUTE_URL, OMNIROUTE_API_KEY, OMNIROUTE_MODEL, OMNIROUTE_ENABLED
     global PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MODE, PROMPT_COMPRESSION_MIN_CHARS
     global FEDERATION_ENABLED, FEDERATION_PUBLIC_URL, FEDERATION_VIEW_ENABLED, FEDERATION_VIEW_TTL_S
+    global MEMORY_BACKEND, MEMORY_FILE_GZ
     global NODE_ENDPOINTS, _TOOL_CAPABLE_OVERRIDE, _NATIVE_CHAT_FALLBACK_OVERRIDE, _ROUTING_WEIGHTS, _SCORE_CACHE_TTL
 
     key = meta["key"]
@@ -5068,6 +5077,13 @@ def _apply_env_runtime(meta: dict, cv) -> None:
         MEMORY_TTL_DAYS = int(cv)
     elif key == "MEMORY_MAX_ENTRIES":
         MEMORY_MAX_ENTRIES = int(cv)
+    elif key == "MEMORY_BACKEND":
+        MEMORY_BACKEND = str(cv).strip().lower()
+    elif key == "MEMORY_FILE":
+        # Il percorso si legge a chiamata: cambiarlo qui vale subito, senza
+        # riavviare (una voce "salvata ma inerte" è il difetto da evitare).
+        MEMORY_FILE_GZ = (str(cv).strip()
+                          or os.path.join(BASE_DIR, "memory.json.gz"))
     elif key == "SEARXNG_URL":
         SEARXNG_URL = str(cv).rstrip("/")
     elif key in _ENV_ROUTING_WEIGHT_KEYS:
