@@ -77,6 +77,12 @@ from shared.web_node import (
 from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
 from shared.node_compat import ProtocolWatch
 from shared.mcp_auth import McpAuthPolicy
+from shared.persona import PersonaStore, audit_reply, should_disclose
+from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
+from shared.persona_dream import PersonaDream
+from shared.channel import (COMANDI_DRIVER, ChannelGuard, ChannelPolicy, ChannelRuntime,
+                            ReplyPacing)
+from shared import ollama_native
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -97,7 +103,8 @@ FORGE_ADMIN_TOKEN  = os.getenv("FORGE_ADMIN_TOKEN", "").strip()
 FORGE_MODEL        = os.getenv("HS_MODEL_CODER", DEFAULT_MODEL)
 CODE_SERVER_PORT   = os.getenv("CODE_SERVER_PORT", "8443").strip()
 
-MEMORY_FILE_GZ     = os.path.join(BASE_DIR, "memory.json.gz")
+MEMORY_FILE_GZ     = (os.getenv("MEMORY_FILE", "").strip()
+                      or os.path.join(BASE_DIR, "memory.json.gz"))
 MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
 MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
 MEMORY_BACKEND     = os.getenv("MEMORY_BACKEND", "hermes").strip().lower()
@@ -624,7 +631,473 @@ print(f"[CP] Federation identity: {CP_ID[:20]}... (federation={'ON' if FEDERATIO
 # Ognuno si auto-abilita solo se le sue env var/credenziali sono presenti
 # (BaseConnector.enabled -> is_available()); quelli senza credenziali non
 # finiscono nel tool loop. I loro tool vengono aggiunti a BUILTIN_TOOLS piu' sotto.
-connector_manager = ConnectorManager()
+# ── IDENTITÀ DICHIARATA DELL'AGENTE (shared/persona.py) ──────────────────────
+# Chi è l'agente, cosa non fa, e quando DEVE dire di essere un'IA. Il documento
+# vive sotto DATA_DIR (volume), quindi l'identità sopravvive ai riavvii; le
+# annotazioni su di sé le aggiunge l'agente stesso col tool persona_note.
+persona_store = PersonaStore.load()
+
+
+def _persona_enabled() -> bool:
+    """Letto a ogni richiesta: la spunta della tab Setup ha effetto immediato.
+
+    Una copia in una globale renderebbe il toggle 'salvato ma inerte fino al
+    riavvio', che è il difetto che stiamo evitando per i connettori.
+    """
+    return str(os.getenv("PERSONA_ENABLED", "true")).strip().lower() != "false"
+
+
+def _reload_persona() -> None:
+    """Rilegge identità e annotazioni dal disco (dopo un salvataggio in Setup)."""
+    global persona_store
+    try:
+        persona_store = PersonaStore.load()
+        _reload_persona_dream()
+        push_log('system', 'Persona ricaricata',
+                 detail=f"name={persona_store.persona.name} "
+                        f"osservazioni={len(persona_store.persona.observations)}",
+                 status='success')
+    except Exception as e:
+        push_log('system', 'Reload persona fallito', str(e), status='warn')
+
+
+def _persona_dream_int(nome: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(nome, "") or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _persona_dream_enabled() -> bool:
+    return str(os.getenv("PERSONA_DREAM_ENABLED", "false")).strip().lower() == "true"
+
+
+def _dream_model() -> str:
+    """Modello della riflessione: più grande di quello della stanza, e va bene così.
+
+    Una battuta in chat ha un limite di tempo (il driver oltre ~20s cade sul
+    modello locale): il sogno invece gira di notte, nessuno aspetta. Separe i due
+    modelli è misurato, non teorico: sullo stesso contesto da 20 messaggi il 4B
+    risponde in ~15s e il 9B in ~21s — in stanza il secondo verrebbe scartato.
+    """
+    return (os.getenv("PERSONA_DREAM_MODEL", "").strip() or CHANNEL_MODEL
+            or DEFAULT_MODEL)
+
+
+def _proponi_identita(prompt: str) -> str:
+    """La riflessione: UNA chiamata al modello, senza tool e senza streaming.
+
+    Stesso percorso nativo di /channel/reply e per lo stesso motivo misurato:
+    l'endpoint OpenAI-compatibile ignora `think=false`, quindi con i modelli che
+    ragionano il testo utile finirebbe in `reasoning` e la proposta sarebbe
+    spazzatura. Qui non si taglia corto sulla latenza (nessuno sta aspettando):
+    sbagliare una riflessione notturna costa meno di un self-model falsato.
+    """
+    payload = {"model": _dream_model(),
+               "messages": [{"role": "user", "content": prompt}],
+               "stream": False, "think": False,
+               "max_tokens": _persona_dream_int("PERSONA_DREAM_MAX_TOKENS", 320),
+               "options": {"num_ctx": _channel_num_ctx()}}
+    base = advanced_config["ollama"]["url"].rstrip("/")
+    try:
+        if ollama_native.needs_native_path(payload):
+            risposta = requests.post(f"{base}/api/chat",
+                                     json=ollama_native.to_native_chat(payload),
+                                     timeout=_inference_timeout(payload["model"]))
+            risposta.raise_for_status()
+            risposta = ollama_native.to_openai_chat(risposta.json(), payload["model"])
+        else:
+            risposta = _call_ollama(base, payload, sign=False)
+    except Exception as e:
+        raise RuntimeError(f"modello non raggiungibile: {str(e)[:160]}") from e
+    messaggio = ((risposta.get("choices") or [{}])[0] or {}).get("message") or {}
+    return " ".join(_assistant_text(messaggio).split())
+
+
+def _materiale_identita(limit: int = 12) -> dict:
+    """Il materiale del sogno: solo quello che l'agente ha davvero visto.
+
+    La notte non è un'occasione per immaginare: se una cosa non è nella memoria
+    della stanza, nelle annotazioni o nei contatori della guardia, non esiste per
+    la riflessione. È il vincolo che rende la proposta verificabile da un umano.
+    """
+    try:
+        voci = [e for e in _load_memory() if isinstance(e, dict) and e.get("channel")]
+    except Exception as e:
+        push_log('dream', 'Memoria non leggibile per la riflessione', str(e)[:120],
+                 source='persona-dream', status='warn')
+        voci = []
+    memoria = []
+    for voce in voci[-max(1, int(limit)):]:
+        contenuto = " ".join(str(voce.get("content", "")).split())[:200]
+        if contenuto:
+            memoria.append(f"{contenuto} ({str(voce.get('ts', ''))[:10]})")
+    return {"memoria": memoria,
+            "osservazioni": [str(o.get("text", "")) for o in persona_store.persona.observations],
+            "guardia": channel_guard.snapshot()}
+
+
+def _initialize_persona_dream():
+    """Costruisce il sogno di identità col diario accanto al documento di identità.
+
+    Spento di default: la riflessione spende inferenza e scrive proposte che
+    qualcuno deve leggere. `enabled` è riletto a ogni ricostruzione, così la
+    spunta in Setup ha effetto senza riavviare — un sogno notturno che si accende
+    solo al reboot è un sogno che non si accende mai.
+    """
+    global _persona_dream
+    _persona_dream = PersonaDream(
+        os.path.dirname(persona_store.path) or ".", _proponi_identita,
+        enabled=_persona_dream_enabled(),
+        start_hour=_persona_dream_int("PERSONA_DREAM_START_HOUR", 4),
+        end_hour=_persona_dream_int("PERSONA_DREAM_END_HOUR", 7),
+        idle_seconds=_persona_dream_int("PERSONA_DREAM_IDLE_S", 1800),
+        nome=persona_store.persona.name,
+    )
+    return _persona_dream
+
+
+def _safe_initialize_persona_dream() -> bool:
+    """Inizializza il sogno senza poter fermare lo startup per un file storto.
+
+    Un diario illeggibile o un ambiente malformato non devono impedire al
+    control-plane di partire: il sogno è una funzione in più, non un requisito.
+    """
+    try:
+        _initialize_persona_dream()
+        return True
+    except Exception as e:
+        push_log('dream', 'Sogno di identità non inizializzato', str(e)[:160],
+                 source='persona-dream', status='warn')
+        return False
+
+
+def _reload_persona_dream() -> None:
+    """Riallinea il sogno dopo un salvataggio in Setup, mai durante una riflessione."""
+    if _persona_dream is not None and _persona_dream.running:
+        return
+    _safe_initialize_persona_dream()
+
+
+def _last_user_text(messages) -> str:
+    """Testo dell'ultimo messaggio utente (le parti multimodali vengono unite)."""
+    for message in reversed(list(messages or [])):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(str(part.get("text", "")) for part in content
+                            if isinstance(part, dict) and part.get("type") == "text")
+        return str(content or "")
+    return ""
+
+
+def _with_persona(messages, user_text: str = "") -> list:
+    """Messaggi con il blocco di identità in testa.
+
+    Se il client ha già un system message il blocco viene APPESO a quello invece
+    di sostituirlo: il prompt dell'utente resta suo, l'identità è un'aggiunta.
+    """
+    blocco = persona_store.system_block(user_text)
+    out = [dict(m) if isinstance(m, dict) else m for m in (messages or [])]
+    for index, message in enumerate(out):
+        if (isinstance(message, dict) and message.get("role") == "system"
+                and isinstance(message.get("content"), str)):
+            out[index] = {**message, "content": message["content"].rstrip() + "\n\n" + blocco}
+            return out
+    return [{"role": "system", "content": blocco}] + out
+
+
+def _audit_persona_reply(response: dict) -> None:
+    """Registra se la RISPOSTA rivendica di essere umano.
+
+    Non blocca e non riscrive nulla: il vincolo sta nel prompt, questo è il
+    controllo che lo rende verificabile. Copre il percorso non-stream, da cui
+    passa ogni risposta completa; in streaming il CP inoltra i chunk senza
+    comporli, quindi lì il controllo non si applica — ed è scritto, non
+    sottinteso (vedi docs/persona.md).
+    """
+    try:
+        content = response["choices"][0]["message"].get("content") or ""
+    except Exception:
+        return
+    offese = audit_reply(content)
+    if offese:
+        push_log('system', 'Persona: la risposta rivendica di essere umano',
+                 detail="; ".join(offese)[:160], status='warn')
+
+
+def _tool_persona_get(args) -> str:
+    persona = persona_store.persona
+    righe = [f"Identità: {persona.name} (IA)", f"Scopo: {persona.purpose}"]
+    if persona.values:
+        righe.append("Valori: " + "; ".join(persona.values))
+    if persona.boundaries:
+        righe.append("Confini: " + "; ".join(persona.boundaries))
+    if persona.capabilities:
+        righe.append("Capacità reali: " + "; ".join(persona.capabilities))
+    if persona.limitations:
+        righe.append("Limiti reali: " + "; ".join(persona.limitations))
+    if persona.observations:
+        righe.append("Annotazioni recenti: "
+                     + "; ".join(o.get("text", "") for o in persona.observations[-5:]))
+    return "\n".join(righe)
+
+
+def _tool_persona_note(args) -> str:
+    args = args or {}
+    osservazione = persona_store.observe(args.get("note", ""),
+                                        args.get("kind", "self_observation"))
+    if osservazione is None:
+        return ("Nessuna annotazione salvata: nota vuota, oppure identica all'ultima "
+                "già registrata (il self-model non accumula ripetizioni).")
+    push_log('system', 'Persona: annotazione', osservazione["text"][:120], status='info')
+    return f"Annotato: {osservazione['text']}"
+
+
+# ── CANALI ESTERNI (shared/channel.py) ───────────────────────────────────────
+# Una superficie di conversazione che il CP NON può raggiungere da solo: la chat
+# di una stanza, i suoi messaggi privati, un bot altrove. Il driver del canale
+# tira le decisioni da qui e pubblica l'esito; la policy sui token è fail-closed
+# come quella di MCP — senza CHANNEL_CLIENTS non c'è nessun canale servito.
+#
+# Perché le soglie sono lette con un helper e non come costanti: la tab Setup le
+# salva, e un salvataggio deve valere SUBITO (stessa disciplina di persona e
+# connettori). Gli strike già contati non si azzerano: `reconfigure`, non un
+# guard nuovo.
+_CHANNEL_TOKEN_HEADER = "X-Hyperspace-Channel-Token"
+
+
+def _channel_int(nome: str, default: int) -> int:
+    try:
+        return int(os.getenv(nome, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _channel_float(nome: str, default: float) -> float:
+    try:
+        return float(os.getenv(nome, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+channel_policy = ChannelPolicy.from_env()
+channel_guard = ChannelGuard(flood_max=_channel_int("CHANNEL_FLOOD_MAX", 6),
+                             flood_window_s=_channel_float("CHANNEL_FLOOD_WINDOW_S", 15.0),
+                             strike_mute=_channel_int("CHANNEL_STRIKE_MUTE", 2),
+                             strike_ban=_channel_int("CHANNEL_STRIKE_BAN", 3))
+channel_pacing = ReplyPacing(
+    min_interval_s=_channel_float("CHANNEL_MIN_REPLY_INTERVAL_S", 25.0),
+    batch_max_age_s=_channel_float("CHANNEL_BATCH_MAX_AGE_S", 6.0),
+    batch_max_messages=_channel_int("CHANNEL_BATCH_MAX_MESSAGES", 6),
+    probability=_channel_float("CHANNEL_REPLY_PROBABILITY", 1.0),
+)
+# Stato vivo del driver e comandi dell'operatore: il driver li ritira al giro
+# successivo (nessuna porta aperta sulla macchina col browser).
+channel_runtime = ChannelRuntime()
+CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
+CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
+
+
+def _channel_context_messages() -> int:
+    """Quanti messaggi entrano nel contesto: letto a CHIAMATA, non all'import.
+
+    Un valore congelato all'avvio renderebbe la voce in Setup "salvata ma inerte
+    fino al riavvio", che è il difetto che evitiamo altrove. Il tetto difende il
+    prompt: la cronologia di una stanza non deve diventare un romanzo.
+    """
+    return max(2, min(_channel_int("CHANNEL_CONTEXT_MESSAGES", 20), 80))
+
+
+def _channel_context_chars() -> int:
+    return max(40, min(_channel_int("CHANNEL_CONTEXT_CHARS", 400), 2000))
+
+
+def _channel_num_ctx() -> int:
+    """Finestra di contesto chiesta al modello (token).
+
+    Senza `num_ctx` esplicito Ollama usa il suo default (spesso 4096): con
+    identità, ricordi della stanza e 20 messaggi di cronologia si finisce a
+    tagliare l'INIZIO del prompt, che è la parte con l'identità dentro. Qui si
+    chiede una finestra dichiarata, e chi ha una macchina piccola la abbassa.
+    """
+    return max(1024, min(_channel_int("CHANNEL_NUM_CTX", 8192), 65536))
+
+
+def _reload_channel_config() -> None:
+    """Rilegge token e soglie dopo un salvataggio in Setup."""
+    global channel_policy, channel_pacing
+    channel_policy = ChannelPolicy.from_env()
+    channel_pacing = ReplyPacing(
+        min_interval_s=_channel_float("CHANNEL_MIN_REPLY_INTERVAL_S", 25.0),
+        batch_max_age_s=_channel_float("CHANNEL_BATCH_MAX_AGE_S", 6.0),
+        batch_max_messages=_channel_int("CHANNEL_BATCH_MAX_MESSAGES", 6),
+        probability=_channel_float("CHANNEL_REPLY_PROBABILITY", 1.0),
+    )
+    channel_guard.reconfigure(strike_mute=_channel_int("CHANNEL_STRIKE_MUTE", 2),
+                              strike_ban=_channel_int("CHANNEL_STRIKE_BAN", 3),
+                              flood_max=_channel_int("CHANNEL_FLOOD_MAX", 6),
+                              flood_window_s=_channel_float("CHANNEL_FLOOD_WINDOW_S", 15.0))
+    push_log('channel', 'Configurazione canali ricaricata',
+             detail=f"canali={sorted(channel_policy.clients)}", status='success')
+
+
+def _channel_error():
+    """Risposta Flask se il chiamante non è un canale autorizzato, altrimenti None."""
+    if not channel_policy.enabled:
+        return jsonify({"ok": False, "error": "canali disattivati "
+                                              "(CHANNEL_ENABLED=false)"}), 503
+    if not channel_policy.configured:
+        return jsonify({"ok": False, "error": "nessun canale configurato: serve un token "
+                                              "di almeno 32 caratteri in CHANNEL_CLIENTS"}), 503
+    if not channel_policy.authenticate(request.headers.get(_CHANNEL_TOKEN_HEADER, "")):
+        push_log('channel', 'Token di canale assente o non valido',
+                 detail=f"from={request.remote_addr}", status='warn')
+        return jsonify({"ok": False, "error": "token di canale mancante o non valido"}), 401
+    return None
+
+
+def _channel_name() -> str:
+    return (channel_policy.authenticate(request.headers.get(_CHANNEL_TOKEN_HEADER, ""))
+            or "")
+
+
+def _channel_remember(channel: str, key: str, kind: str, text: str, **extra) -> bool:
+    """Scrive UN fatto della stanza nella memoria condivisa, con debounce.
+
+    In memoria NON va ogni messaggio: ci vanno le cose che ha senso ricordare
+    domani — un'ondata di spam, un'azione di moderazione, un tip. Il debounce
+    per chiave evita che lo stesso fatto venga riscritto in loop mentre la
+    condizione resta vera (un'ondata dura dieci minuti: una riga, non cento).
+    """
+    if not channel_guard.should_remember(key=f"{channel}:{key}"):
+        return False
+    entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "type": "channel", "channel": channel, "kind": kind,
+             "content": f"[{channel}] {text}", "source": f"channel:{channel}"}
+    entry.update(extra)
+    try:
+        _memory_append(entry)
+    except Exception as e:
+        push_log('channel', 'Memoria non aggiornata', str(e)[:120],
+                 source=f"channel:{channel}", status='warn')
+        return False
+    return True
+
+
+def _channel_memories(channel: str, limit: int = 5) -> list:
+    """Ultimi ricordi di questo canale (i più recenti in coda).
+
+    Usa `_load_memory()`, lo stesso percorso di /memory: si filtra solo per
+    canale, senza ricerca full-text, perché il prompt di una battuta non deve
+    dipendere dalla disponibilità di un backend di ricerca.
+    """
+    try:
+        voci = [e for e in _load_memory()
+                if isinstance(e, dict) and str(e.get("channel", "")) == channel]
+    except Exception:
+        return []
+    return [str(e.get("content", ""))[:160] for e in voci[-max(0, int(limit)):]
+            if e.get("content")]
+
+
+# Tetto sugli eventi per chiamata: un batch enorme è un abuso, non un caso d'uso.
+CHANNEL_INGEST_MAX_EVENTS = _channel_int("CHANNEL_INGEST_MAX_EVENTS", 100)
+
+
+def _trascrizione(context) -> str:
+    """Trascrizione compatta: ultimi N messaggi, ognuno troncato.
+
+    N e lunghezza si leggono a chiamata (`CHANNEL_CONTEXT_MESSAGES` /
+    `CHANNEL_CONTEXT_CHARS`): sono le due manopole che si toccano quando il bot
+    "non ricorda" cosa si è detto due battute fa.
+    """
+    righe = []
+    for evento in list(context)[-_channel_context_messages():]:
+        autore = str(evento.get("author", "")).strip()[:40] or "anonimo"
+        testo = " ".join(str(evento.get("text", "")).split())[:_channel_context_chars()]
+        if testo:
+            righe.append(f"{autore}: {testo}")
+    return "\n".join(righe)
+
+
+def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
+                   force: bool) -> dict:
+    """Genera la risposta del canale: identità dichiarata e audit attivi.
+
+    Differenze volute rispetto alla chat normale:
+      - `think=False` ESPLICITO: in una stanza non si aspetta, ed è esattamente
+        il caso che il percorso nativo del nodo ora rispetta;
+      - nessun tool: qui si conversa, non si esegue codice né si cerca sul web;
+      - l'audit di disclosure si applica PRIMA di restituire il testo, e una
+        battuta che rivendica di essere umano non esce da qui (fail-closed).
+
+    Il modello è quello di default, salvo `CHANNEL_MODEL`: una stanza può volere
+    un modello piccolo e veloce invece di quello buono per il lavoro.
+    """
+    ultimo = str((context[-1] if context else {}).get("text", ""))
+    decisione = should_disclose(ultimo)
+    superficie = ("chat pubblica" if str(surface).lower() == "chat"
+                  else "messaggistica privata")
+    blocco = [
+        persona_store.system_block(ultimo),
+        f"Stai scrivendo nella {superficie} di un canale esterno ({channel}).",
+        f"Massimo {max(0, int(max_chars))} caratteri, UNA sola battuta, "
+        "niente elenchi e niente ragionamento ad alta voce.",
+    ]
+    # Memoria della stanza: senza questo, ogni sera riparte da zero e ripete le
+    # stesse battute. Poche righe, le più recenti: è un promemoria, non un
+    # archivio da leggere.
+    ricordi = _channel_memories(channel)
+    if ricordi:
+        blocco.append("Cose che ricordi di questa stanza (dalla tua memoria):\n"
+                      + "\n".join(f"- {riga}" for riga in ricordi))
+    nota_tip = channel_guard.nota_tip(channel=channel)
+    if nota_tip:
+        blocco.append(nota_tip)
+    messaggi = [
+        {"role": "system", "content": "\n\n".join(blocco)},
+        {"role": "user", "content": f"Ultimi messaggi:\n{_trascrizione(context)}\n\n"
+                                    "Rispondi con una battuta, nel tuo tono."},
+    ]
+    payload = {"model": CHANNEL_MODEL or DEFAULT_MODEL, "messages": messaggi,
+               "stream": False, "think": False, "max_tokens": CHANNEL_MAX_TOKENS,
+               "options": {"num_ctx": _channel_num_ctx()}}
+    base = advanced_config["ollama"]["url"].rstrip("/")
+    try:
+        if ollama_native.needs_native_path(payload):
+            # Il percorso OpenAI-compatibile IGNORA think=false: misurato, con
+            # questo modello la risposta torna con `content` VUOTO e tutto il
+            # ragionamento in `reasoning` (che _assistant_text ripiega nel
+            # content pur di non mostrare il vuoto). Per una battuta in chat
+            # sarebbe testo sbagliato, quindi si parla nativo — la stessa
+            # traduzione che usa il nodo.
+            risposta = requests.post(f"{base}/api/chat",
+                                     json=ollama_native.to_native_chat(payload),
+                                     timeout=_inference_timeout(payload["model"]))
+            risposta.raise_for_status()
+            risposta = ollama_native.to_openai_chat(risposta.json(), payload["model"])
+        else:
+            risposta = _call_ollama(base, payload, sign=False)
+    except Exception as e:
+        return {"action": "error", "reason": f"modello non raggiungibile: {str(e)[:120]}"}
+    messaggio = ((risposta.get("choices") or [{}])[0] or {}).get("message") or {}
+    testo = " ".join(_assistant_text(messaggio).split())
+    if not testo:
+        return {"action": "error", "reason": "risposta vuota dal modello"}
+    if max_chars and len(testo) > int(max_chars):
+        testo = testo[:int(max_chars)].rstrip()
+    offese = audit_reply(testo)
+    if offese:
+        return {"action": "skip", "reason": f"audit: {', '.join(offese)[:80]}",
+                "disclosure": decisione.to_dict()}
+    return {"action": "reply", "text": testo, "disclosure": decisione.to_dict(),
+            "model": payload["model"], "forced": bool(force)}
+
+
 code_sandbox = HybridCodeSandboxClient()
 # Registry in memoria dei web node e dei task web-safe. Volutamente NON
 # persistito: un web node e' una scheda del browser e non deve mai essere
@@ -639,6 +1112,9 @@ web_registry = WebNodeRegistry(
 _last_foreground_activity = time.time()
 _development_dream = None
 _development_dream_lock = threading.Lock()
+# Sogno di identità: inizializzato allo startup (accanto al sogno di sviluppo).
+_persona_dream = None
+_persona_dream_lock = threading.Lock()
 
 
 @app.before_request
@@ -1251,7 +1727,7 @@ def _sse_headers():
 # sbagliato e non e' piu' filtrabile da /logs?type=. tests/test_log_types.py
 # estrae i tipi usati dalle route e verifica che siano tutti elencati.
 LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
-             "webui_interaction", "dream", "node_chat", "web_task", "mcp"}
+             "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel"}
 
 def push_log(type_, summary, detail="", source="control-plane", target="", status="info", trace_id=""):
     entry = {
@@ -1489,7 +1965,13 @@ def _tool_code_sandbox(args: dict) -> str:
         return f"Sandbox error: {error}"
 
 # ── TOOL DEFINITIONS ─────────────────────────────────────────────────────────
-BUILTIN_TOOLS = [
+# I tool NATIVI stanno in una lista a parte perché il catalogo è composto a
+# RUNTIME: i tool dei connettori cambiano quando l'operatore salva le
+# credenziali nella tab Setup. _sync_connector_tools() ricostruisce
+# BUILTIN_TOOLS *in place* (BUILTIN_TOOLS[:] = ...) così ogni call-site già
+# esistente — tool loop chat (non-stream e stream), _mcp_tools(),
+# CODE_SANDBOX_TOOL — resta valido senza riassegnazioni da inseguire.
+_NATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -1569,8 +2051,36 @@ BUILTIN_TOOLS = [
                 "required": ["action"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "persona_get",
+            "description": "Legge la propria identità dichiarata: nome, scopo, valori, confini, capacità e limiti reali. Usalo quando serve restare coerenti con chi sei, invece di improvvisare una risposta su di te.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "persona_note",
+            "description": "Annota un fatto su di sé: una preferenza appresa, un limite incontrato, una correzione ricevuta. Entra nel self-model persistente e nelle richieste successive. Solo fatti verificabili, non impressioni.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string", "description": "Il fatto da annotare, in una frase."},
+                    "kind": {"type": "string", "default": "self_observation",
+                             "description": "Categoria: self_observation, preference, limit, feedback."}
+                },
+                "required": ["note"]
+            }
+        }
     }
-] + connector_manager.get_all_tools()
+]
+
+# Catalogo completo: nativi + connettori (GitHub/Google/Office365 — i loro tool
+# compaiono solo se le credenziali sono presenti, vedi connectors/base.py).
+BUILTIN_TOOLS = _NATIVE_TOOLS + connector_manager.get_all_tools()
 CODE_SANDBOX_TOOL = next(tool for tool in BUILTIN_TOOLS
                          if tool.get("function", {}).get("name") == "code_sandbox")
 
@@ -1587,6 +2097,8 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         "omega_store":     _omega_store,
         "get_mesh_status": _tool_get_mesh_status,
         "code_sandbox":    _tool_code_sandbox,
+        "persona_get":     _tool_persona_get,
+        "persona_note":    _tool_persona_note,
     }
     handler = handlers.get(tool_name)
     if handler:
@@ -1616,6 +2128,357 @@ def tools_execute():
         return jsonify({"error": "missing tool_name"}), 400
     result = _execute_tool_call(tool_name, tool_args)
     return jsonify({"result": result})
+
+
+@app.route('/persona')
+def persona_status():
+    """Identità dichiarata dell'agente: chi è, i confini, le regole di
+    disclosure e le annotazioni su di sé.
+
+    Diagnostica per l'operatore, senza segreti (qui non ce ne sono) e senza
+    token: serve a rispondere alla domanda "cosa crede di essere, questo
+    agente?" prima di metterlo davanti a una persona. `enabled` dice se il
+    blocco viene davvero iniettato nelle richieste.
+    """
+    payload = persona_store.describe()
+    payload["enabled"] = _persona_enabled()
+    payload["dream"] = (_persona_dream.status() if _persona_dream is not None
+                        else {"enabled": False, "running": False, "pending_review": 0})
+    return jsonify(payload)
+
+
+@app.route('/persona/dreams')
+def persona_dreams_list():
+    """Le riflessioni su di sé: proposte, scarti e motivi dello scarto.
+
+    Sola lettura e senza segreti, come /persona. Mostra anche gli scarti di
+    proposito: \"il modello ha proposto 6 cose, 4 erano fumo\" è l'informazione
+    che dice se il filtro e il prompt stanno lavorando.
+    """
+    if _persona_dream is None:
+        return jsonify({"ok": False, "error": "sogno di identità non inizializzato"}), 503
+    limite = max(1, min(_persona_dream_int("PERSONA_DREAM_LIST_LIMIT", 20), 100))
+    return jsonify({"ok": True, "dream": _persona_dream.status(),
+                    "max_proposals_per_dream": PERSONA_DREAM_MAX_PROPOSALS,
+                    "dreams": _persona_dream.journal.list(request.args.get("status", ""),
+                                                          limite)})
+
+
+@app.route('/persona/dreams/<dream_id>/review', methods=['POST'])
+def persona_dream_review(dream_id):
+    """Promuove o scarta una riflessione: l'unico punto in cui tocca l'identità.
+
+    Token umano obbligatorio (DREAM_REVIEW_TOKEN, come /dreams/<id>/review) perché
+    qui una macchina modifica ciò che l'agente crede di essere: è precisamente
+    l'atto che non deve poter fare da sola. L'ordine conta: prima si scrive
+    l'identità, poi si registra la revisione. Al contrario il diario potrebbe dire
+    \"promossa\" una cosa mai entrata nel documento.
+    """
+    errore = _dream_review_auth_error()
+    if errore:
+        return errore
+    if _persona_dream is None:
+        return jsonify({"ok": False, "error": "sogno di identità non inizializzato"}), 503
+    data = request.get_json(force=True, silent=True) or {}
+    azione = str(data.get("action", "")).strip().lower()
+    if azione not in ("promote", "reject"):
+        return jsonify({"ok": False, "error": "action deve essere promote o reject"}), 400
+    candidata = next((r for r in _persona_dream.journal.list("candidate", 100)
+                      if r.get("id") == dream_id), None)
+    if candidata is None:
+        return jsonify({"ok": False, "error": "riflessione inesistente o già revisionata"}), 404
+    promosse, scartate = [], []
+    if azione == "promote":
+        for proposta in candidata.get("proposals", []):
+            testo = str(proposta.get("text", ""))
+            if persona_store.observe(testo, str(proposta.get("kind", "self_observation")),
+                                     persist=False):
+                promosse.append(testo)
+            else:
+                scartate.append(testo[:120])
+        try:
+            # Un salvataggio solo per tutte le annotazioni: l'identità è un
+            # documento, non un log da appendere una riga alla volta.
+            if promosse:
+                persona_store.save()
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"identità non salvata: {str(e)[:160]}"}), 500
+    try:
+        record = _persona_dream.journal.review(
+            dream_id, azione, reviewer=str(data.get("reviewer", "operatore"))[:64],
+            rationale=str(data.get("rationale", ""))[:400])
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    push_log('dream', f'Sogno di identità revisionato: {record.get("status")}',
+             detail=json.dumps({"id": dream_id, "promoted": promosse,
+                                "skipped": scartate,
+                                "identity_version": persona_store.persona.version},
+                               ensure_ascii=False)[:2000],
+             source='persona-dream',
+             status=('success' if azione == "promote" else 'info'))
+    return jsonify({"ok": True, "status": record.get("status"), "reviewed_at":
+                    record.get("reviewed_at"), "promoted": promosse, "skipped": scartate,
+                    "identity_version": persona_store.persona.version})
+
+
+@app.route('/persona/dream', methods=['POST'])
+def persona_dream_run():
+    """Avvia UNA riflessione adesso, invece di aspettare la notte.
+
+    Serve a provare il sogno (e a rigenerarlo dopo un rifiuto). Richiede stato
+    attivo: spento in Setup, il sogno non si sveglia nemmeno a mano.
+    """
+    errore = _dream_review_auth_error()
+    if errore:
+        return errore
+    if _persona_dream is None or not _persona_dream.enabled:
+        return jsonify({"ok": False,
+                        "error": "sogni di identità disattivati (PERSONA_DREAM_ENABLED=false)"}), 503
+    if _persona_dream.running or not _persona_dream_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "una riflessione è già in corso"}), 409
+    try:
+        materiale = _materiale_identita()
+        report = _persona_dream.run_once(materiale)
+    finally:
+        _persona_dream_lock.release()
+    push_log('dream', f'Sogno di identità: {report.get("status")}',
+             detail=json.dumps({"id": report.get("id"), "material": report.get("material"),
+                                "proposals": [p.get("text", "") for p in
+                                              report.get("proposals", [])],
+                                "discarded": [d.get("reason", "") for d in
+                                              report.get("discarded", [])],
+                                "error": report.get("error", "")},
+                               ensure_ascii=False)[:2000],
+             source='persona-dream',
+             status=('success' if report.get("status") == "candidate" else 'warn'))
+    return jsonify({"ok": report.get("status") != "failed", "dream": _persona_dream.status(),
+                    "report": report})
+
+
+@app.route('/channel/status')
+def channel_status():
+    """Stato dei canali: quali token esistono, quanto spam, quali azioni.
+
+    Nessun segreto (nomi, contatori, motivi) e in sola lettura, come /connectors
+    e /mcp/status: serve all'operatore per rispondere a "perché il bot non ha
+    risposto a quella persona?" senza aprire i log.
+    """
+    return jsonify({
+        "ok": True,
+        "policy": channel_policy.describe(),
+        "guard": channel_guard.snapshot(),
+        # Ondata in corso per canale: l'operatore la vuole vedere qui, non solo
+        # dentro la risposta all'ingest.
+        "waves": {nome: channel_guard.spam_wave(nome)
+                  for nome in sorted(channel_policy.clients)},
+        "pacing": {"min_interval_s": channel_pacing.min_interval_s,
+                   "batch_max_age_s": channel_pacing.batch_max_age_s,
+                   "batch_max_messages": channel_pacing.batch_max_messages,
+                   "probability": channel_pacing.probability},
+        # Stato riportato dai driver e comandi in attesa: è quello che rende
+        # possibile rispondere dal terminale a "che modo ha?" e "perché tace?".
+        "runtime": channel_runtime.describe(),
+        "commands_available": sorted(COMANDI_DRIVER),
+        "model": CHANNEL_MODEL or DEFAULT_MODEL,
+        "max_tokens": CHANNEL_MAX_TOKENS,
+        "context": {"messages": _channel_context_messages(),
+                    "chars": _channel_context_chars(),
+                    "num_ctx": _channel_num_ctx()},
+    })
+
+
+@app.route('/channel/ingest', methods=['POST'])
+def channel_ingest():
+    """Eventi dalla superficie di un canale: messaggi, privati, tip, ingressi.
+
+    Il verdetto (ok/spam) e l'eventuale azione di moderazione li decide il CP; il
+    driver esegue e riferisce con /channel/result. Un log per BATCH e non per
+    messaggio: una stanza attiva scriverebbe centinaia di righe al minuto, e i
+    log diventerebbero inutili proprio nel momento in cui servono.
+    """
+    errore = _channel_error()
+    if errore:
+        return errore
+    canale = _channel_name()
+    data = request.get_json(force=True, silent=True) or {}
+    superficie = str(data.get("surface", "chat")).strip().lower() or "chat"
+    eventi = data.get("events")
+    if not isinstance(eventi, list) or not eventi:
+        return jsonify({"ok": False, "error": "events mancante o vuoto"}), 400
+
+    risultati, azioni, spam = [], [], 0
+    for evento in eventi[:CHANNEL_INGEST_MAX_EVENTS]:
+        if not isinstance(evento, dict):
+            continue
+        autore = str(evento.get("author", ""))[:64]
+        tipo_evento = str(evento.get("kind", "message")).strip().lower() or "message"
+        if tipo_evento == "tip":
+            # Un tip non è un messaggio da classificare: si registra (serve alla
+            # nota di ringraziamento dentro la prossima risposta) e si ricorda.
+            # Non entra nella coda delle risposte e non conta come traffico.
+            importo = evento.get("amount")
+            channel_guard.registra_tip(channel=canale, author=autore, importo=importo)
+            _channel_remember(canale, f"tip:{autore}", "tip",
+                              f"{autore} ha donato {importo if importo else 'un tip'}")
+            risultati.append({"author": autore, "kind": "tip", "verdict": "ok",
+                              "reasons": [], "strikes": 0, "action": None,
+                              "key": str(evento.get("key", ""))[:64]})
+            continue
+        esito = channel_guard.observe(channel=canale, surface=superficie,
+                                      author=autore,
+                                      text=str(evento.get("text", ""))[:1000])
+        esito["key"] = str(evento.get("key", ""))[:64]
+        esito["kind"] = tipo_evento
+        if esito["verdict"] == "spam":
+            spam += 1
+        if esito["action"]:
+            azioni.append(esito["action"])
+        risultati.append(esito)
+
+    # Un'ondata è un fatto della stanza degno di memoria — UNA riga (debounce),
+    # non una per messaggio: la condizione resta vera per minuti.
+    ondata = channel_guard.spam_wave(canale)
+    if ondata and _channel_remember(canale, "spam_wave", "spam_wave",
+                                    f"ondata di spam: {ondata['count']} messaggi sospetti "
+                                    f"in {int(ondata['window_s'] / 60)} minuti"):
+        push_log('channel', f"{canale}: ondata di spam registrata in memoria",
+                 detail=f"count={ondata['count']}", source=f"channel:{canale}",
+                 status='warn')
+
+    motivi = sorted({m for r in risultati for m in r["reasons"]})
+    push_log('channel', f"{canale}/{superficie}: {len(risultati)} eventi",
+             detail=f"spam={spam} motivi={','.join(motivi) or '-'} azioni={len(azioni)}",
+             source=f"channel:{canale}", status='warn' if spam else 'info')
+    for azione in azioni:
+        push_log('channel', f"{canale}: {azione['action']} su {azione['user']}",
+                 detail=f"motivo={azione['reason']}", source=f"channel:{canale}",
+                 status='warn')
+    return jsonify({"ok": True, "channel": canale, "surface": superficie,
+                    "accepted": len(risultati) - spam, "spam": spam,
+                    "results": risultati, "actions": azioni,
+                    "wave": channel_guard.spam_wave(canale),
+                    "guard": channel_guard.snapshot(canale)})
+
+
+@app.route('/channel/reply', methods=['POST'])
+def channel_reply():
+    """"Cosa scrivo adesso?": il CP decide il ritmo, genera e verifica.
+
+    Il contesto lo manda il driver (è lui che sa chi ha scritto e da quanto); la
+    politica sul RITMO sta qui e torna con il motivo, così nei log si legge
+    perché il bot è stato zitto invece di doverlo dedurre.
+    """
+    errore = _channel_error()
+    if errore:
+        return errore
+    canale = _channel_name()
+    data = request.get_json(force=True, silent=True) or {}
+    contesto = [e for e in (data.get("context") or []) if isinstance(e, dict)]
+    pendenti = int(data.get("pending") or len(contesto) or 0)
+    eta_piu_vecchio = max(0.0, float(data.get("oldest_age_s") or 0.0))
+    forza = bool(data.get("force"))
+    max_chars = int(data.get("max_chars") or 0) or 90
+
+    decisione = channel_pacing.decide(channel=canale, pending=pendenti,
+                                      oldest_age_s=eta_piu_vecchio, force=forza)
+    if decisione["action"] != "reply":
+        return jsonify({"ok": True, "channel": canale, "action": decisione["action"],
+                        "reason": decisione["reason"]})
+
+    esito = _channel_reply(channel=canale, surface=str(data.get("surface", "chat")),
+                           context=contesto, max_chars=max_chars, force=forza)
+    if esito["action"] == "reply":
+        # Il cooldown parte all'INTENTO di inviare, non alla conferma: se il
+        # driver muore dopo la generazione, il CP non deve restare senza freno.
+        channel_pacing.note_reply(canale)
+    push_log('channel', f"{canale}: risposta generata" if esito["action"] == "reply"
+             else f"{canale}: risposta non inviata ({esito['action']})",
+             detail=(esito.get("text", "") or esito.get("reason", ""))[:120],
+             source=f"channel:{canale}",
+             status='success' if esito["action"] == "reply" else 'warn')
+    return jsonify({"ok": esito["action"] != "error", "channel": canale, **esito})
+
+
+@app.route('/channel/result', methods=['POST'])
+def channel_result():
+    """Esito dell'azione eseguita dal driver: chiude il ciclo e alimenta i log.
+
+    Un selettore non trovato è un guasto del DRIVER, non del modello: tenerli
+    distinti è ciò che permette di capire se si è rotto il DOM della piattaforma
+    o il ragionamento dell'agente.
+    """
+    errore = _channel_error()
+    if errore:
+        return errore
+    canale = _channel_name()
+    data = request.get_json(force=True, silent=True) or {}
+    tipo = str(data.get("kind", "reply")).strip().lower() or "reply"
+    ok = bool(data.get("ok"))
+    target = str(data.get("target", ""))[:64]
+    if tipo == "reply" and ok:
+        channel_pacing.note_reply(canale)
+    if tipo == "moderate" and ok and target:
+        # Una moderazione riuscita è un fatto della stanza: in memoria, così
+        # domani l'agente sa che quella persona era già stata espulsa.
+        _channel_remember(canale, f"mod:{target}", "moderation",
+                          f"moderazione su {target} dopo ripetute violazioni")
+    push_log('channel', f"{canale}: {tipo} {'eseguita' if ok else 'FALLITA'}",
+             detail=f"target={target} "
+                    f"err={str(data.get('error', ''))[:80]} "
+                    f"ms={data.get('duration_ms')}",
+             source=f"channel:{canale}", status='success' if ok else 'warn')
+    return jsonify({"ok": True, "channel": canale})
+
+
+@app.route('/channel/state', methods=['POST'])
+def channel_state():
+    """La fotografia del driver: che modo ha, se è attivo, a che ritmo va.
+
+    Esiste per rispondere dal terminale a "perché non risponde?" senza aprire i
+    log né il browser. Il driver la manda quando qualcosa cambia (o ogni tanto),
+    non a ogni giro: un report al secondo sarebbe rumore.
+    """
+    errore = _channel_error()
+    if errore:
+        return errore
+    canale = _channel_name()
+    data = request.get_json(force=True, silent=True) or {}
+    stato = channel_runtime.report(canale, data if isinstance(data, dict) else {})
+    push_log('channel', f"{canale}: stato del driver",
+             detail=json.dumps({k: v for k, v in stato.items() if k != "ts"},
+                               ensure_ascii=False)[:200],
+             source=f"channel:{canale}", status='info')
+    return jsonify({"ok": True, "channel": canale, "state": stato})
+
+
+@app.route('/channel/commands', methods=['GET', 'POST'])
+def channel_commands():
+    """I comandi dell'operatore (POST) e la loro consegna al driver (GET).
+
+    La direzione è quella di tutto il resto: il driver tira, l'operatore deposita.
+    Un comando deposto e mai ritirato scade da solo (TTL): eseguire "metti in
+    pausa" tre ore dopo sarebbe peggio che non eseguirlo.
+    """
+    errore = _channel_error()
+    if errore:
+        return errore
+    canale = _channel_name()
+    if request.method == 'GET':
+        comandi = channel_runtime.pending(canale, drain=True)
+        return jsonify({"ok": True, "channel": canale, "commands": comandi,
+                        "available": sorted(COMANDI_DRIVER)})
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        comando = channel_runtime.queue(canale, str(data.get("command", "")),
+                                        note=str(data.get("note", "")),
+                                        source=str(data.get("source", "cli"))[:64])
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200],
+                        "available": sorted(COMANDI_DRIVER)}), 400
+    push_log('channel', f"{canale}: comando in coda -> {comando['command']}",
+             detail=str(data.get("note", ""))[:120], source=f"channel:{canale}",
+             status='info')
+    return jsonify({"ok": True, "channel": canale, "queued": comando})
 
 
 @app.route('/sandbox/status')
@@ -1665,9 +2528,13 @@ def _call_ollama(ollama_base: str, payload: dict, sign: bool = False, node_id: s
     if not raw:
         raise ValueError(f"Ollama body vuoto (HTTP {r.status_code})")
     try:
-        return r.json()
+        parsed = r.json()
     except Exception:
         raise ValueError(f"Risposta non-JSON da Ollama (HTTP {r.status_code}): {raw[:200]}")
+    # Unico punto da cui passa ogni risposta NON-stream (nodo, ollama-direct,
+    # fallback): è qui che l'audit di disclosure vede il testo dell'agente.
+    _audit_persona_reply(parsed)
+    return parsed
 
 def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: bool = False,
                    node_id: str = "", builtin_tools=None) -> dict:
@@ -1963,6 +2830,21 @@ def v1_chat_completions():
         clean_model = raw_model[len(MESH_MODEL_ICON):] if raw_model.startswith(MESH_MODEL_ICON) else raw_model
         model, pinned_node_id = _parse_model_node_ref(clean_model)
     data      = {**data, "model": model}   # a valle il nodo riceve solo il nome modello "pulito"
+
+    # ── IDENTITÀ: un punto solo, prima di tool e thinking ────────────────────
+    # Il blocco di identità entra qui e da qui lo ereditano tutti i percorsi
+    # (tool loop e streaming, che parte da dict(data)). Il vincolo di disclosure
+    # viene deciso sul testo dell'utente e LOGGATO: una decisione che non lascia
+    # traccia non è verificabile.
+    if _persona_enabled():
+        user_text = _last_user_text(messages)
+        decisione = should_disclose(user_text)
+        messages = _with_persona(messages, user_text)
+        data = {**data, "messages": messages}
+        if decisione.required:
+            push_log('system', 'Persona: disclosure richiesta',
+                     detail=f'regola={decisione.rule} match="{decisione.matched[:60]}"',
+                     status='info')
 
     # ── DECISIONE DEL CONTROL-PLANE: tool e reasoning ────────────────────────
     # Il CP è l'unico a decidere se questa richiesta può chiamare tool e se il
@@ -3854,7 +4736,107 @@ _ENV_META = [
      "label": "Fallback nativo /api/chat (override)",
      "hint": "Modelli per cui il fallback Ollama-diretto usa il percorso nativo /api/chat invece dell'OpenAI-compatibile. Vuoto = pattern automatici (qwen3). '*' = tutti. Aggiungi qui i distillati reasoning in arrivo (es. qwen3.8-..., deepseek4.1-...), separati da virgole, senza toccare il codice.",
      "default": ""},
+    # ── Persona: identità dichiarata dell'agente (shared/persona.py) ─────────
+    # Chi è l'agente, cosa non fa, e quando DEVE dire di essere un'IA. Il blocco
+    # viene iniettato nel system prompt delle richieste di chat; stato completo e
+    # annotazioni su `GET /persona`. Guida: docs/persona.md
+    {"section": "Persona", "key": "PERSONA_ENABLED", "type": "bool",
+     "label": "Identità dichiarata attiva",
+     "hint": "true: a ogni richiesta di chat il control-plane aggiunge il blocco di identità (nome, valori, confini, capacità e limiti reali) al system prompt, e se la domanda riguarda cosa è l'agente, il vincolo a dichiararsi IA. Il toggle ha effetto immediato.",
+     "default": "true"},
+    {"section": "Persona", "key": "PERSONA_NAME", "type": "str",
+     "label": "Nome dell'agente",
+     "hint": "Come si chiama l'agente nella sua identità dichiarata. Usato quando il documento di identità non esiste ancora: dopo la prima annotazione il nome vive nel file.",
+     "default": "HyperSpace"},
+    {"section": "Persona", "key": "PERSONA_FILE", "type": "str",
+     "label": "File identità (opzionale)",
+     "hint": "Percorso del documento JSON di identità e annotazioni. Vuoto = $DATA_DIR/persona.json (volume, sopravvive ai riavvii).",
+     "default": ""},
+    {"section": "Persona", "key": "PERSONA_DREAM_ENABLED", "type": "bool",
+     "label": "Sogno di identità attivo",
+     "hint": "true: quando nessuno usa l'agente (idle) e siamo nella finestra oraria, l'agente riflette su di sé e scrive PROPOSTE di annotazioni in un diario. Nessuna proposta entra nell'identità da sola: serve la revisione umana (POST /persona/dreams/<id>/review con DREAM_REVIEW_TOKEN). Spento = nessuna inferenza notturna.",
+     "default": "false"},
+    {"section": "Persona", "key": "PERSONA_DREAM_START_HOUR", "type": "int",
+     "label": "Sogno: ora di inizio",
+     "hint": "Ora locale (0-23) da cui il sogno può partire. Con l'ora di fine forma la finestra: fuori da lì non si sogna, anche se l'agente è fermo.",
+     "default": "4"},
+    {"section": "Persona", "key": "PERSONA_DREAM_END_HOUR", "type": "int",
+     "label": "Sogno: ora di fine",
+     "hint": "Ora locale (0-24) entro cui il sogno deve partire. Finestra che scavalca la mezzanotte: metti inizio 23 e fine 6.",
+     "default": "7"},
+    {"section": "Persona", "key": "PERSONA_DREAM_IDLE_S", "type": "int",
+     "label": "Sogno: inattività richiesta (s)",
+     "hint": "Secondi senza richieste di chat prima che il sogno possa partire: non si sogna mentre qualcuno sta parlando con l'agente.",
+     "default": "1800"},
+    {"section": "Persona", "key": "PERSONA_DREAM_MAX_TOKENS", "type": "int",
+     "label": "Sogno: token massimi",
+     "hint": "Tetto della risposta del modello per una riflessione. Al massimo 3 proposte: un tetto alto qui non produce un self-model migliore, solo più fumo da filtrare.",
+     "default": "320"},
+    {"section": "Persona", "key": "PERSONA_DREAM_MODEL", "type": "str",
+     "label": "Sogno: modello",
+     "hint": "Modello della riflessione notturna. Vuoto = quello dei canali. Di notte nessuno aspetta, quindi qui conviene il modello più grande che hai (misurato: 4B ~15s contro 9B ~21s su 20 messaggi di contesto: in chat il secondo viene scartato, nel sogno no).",
+     "default": ""},
+
+    # ── Canali esterni: chat/privati di una piattaforma che il CP non raggiunge
+    # Il driver del canale tira le decisioni da /channel/* e pubblica l'esito.
+    # Guida: docs/channel.md
+    {"section": "Canali esterni", "key": "CHANNEL_CLIENTS", "type": "password",
+     "label": "Token dei canali",
+     "hint": "Elenco nella forma \"cam4=<token>;cb=<token>\": un token di almeno 32 caratteri per canale. Senza questa voce nessuna route /channel/* risponde (fail-closed), come per MCP. Genera con: python -c \"import secrets; print(secrets.token_hex(32))\".",
+     "default": ""},
+    {"section": "Canali esterni", "key": "CHANNEL_ENABLED", "type": "bool",
+     "label": "Canali attivi",
+     "hint": "false chiude tutte le route /channel/* senza cancellare i token.",
+     "default": "true"},
+    {"section": "Canali esterni", "key": "CHANNEL_MODEL", "type": "str",
+     "label": "Modello dei canali",
+     "hint": "Modello che scrive nelle chat dei canali. Vuoto = modello di default del control-plane. In una stanza conviene un modello piccolo e veloce: le risposte sono una battuta.",
+     "default": ""},
+    {"section": "Canali esterni", "key": "CHANNEL_CONTEXT_MESSAGES", "type": "int",
+     "label": "Messaggi nel contesto",
+     "hint": "Quanti degli ultimi messaggi della stanza entrano nel prompt. Alzalo se il bot \"non ricorda\" cosa si è detto due battute fa; abbassalo se il modello perde il filo (più contesto, meno attenzione su ognuno). Vale subito.",
+     "default": "20"},
+    {"section": "Canali esterni", "key": "CHANNEL_CONTEXT_CHARS", "type": "int",
+     "label": "Caratteri per messaggio",
+     "hint": "Troncamento di ogni messaggio nel contesto: evita che un singolo papiro saturi il prompt. Vale subito.",
+     "default": "400"},
+    {"section": "Canali esterni", "key": "CHANNEL_NUM_CTX", "type": "int",
+     "label": "Finestra di contesto (token)",
+     "hint": "Finestra chiesta al modello (num_ctx). Senza, Ollama usa il suo default (spesso 4096) e taglia l'INIZIO del prompt: identità e confini sono lì dentro. 8192 è prudente; su una macchina piccola abbassala, altrimenti alzala.",
+     "default": "8192"},
+    {"section": "Canali esterni", "key": "CHANNEL_MIN_REPLY_INTERVAL_S", "type": "int",
+     "label": "Intervallo minimo fra risposte (s)",
+     "hint": "Il control-plane non genera una nuova risposta prima di questi secondi dall'ultima: è il freno che evita di parlare addosso alla stanza.",
+     "default": "25"},
+    {"section": "Canali esterni", "key": "CHANNEL_REPLY_PROBABILITY", "type": "float",
+     "label": "Probabilità di rispondere",
+     "hint": "1.0 = risponde sempre quando il batch è maturo; valori più bassi ogni tanto lasciano correre (stesso effetto del vecchio PROB_RISPOSTA_BATCH, ma deciso dal CP).",
+     "default": "1.0"},
+    {"section": "Canali esterni", "key": "CHANNEL_FLOOD_MAX", "type": "int",
+     "label": "Messaggi per raffica",
+     "hint": "Oltre questo numero di messaggi dalla stessa persona nella finestra di raffica, l'autore viene segnato come spam. Non punisce da solo: conta gli strike.",
+     "default": "6"},
+    {"section": "Canali esterni", "key": "CHANNEL_STRIKE_MUTE", "type": "int",
+     "label": "Strike per il mute",
+     "hint": "Strike (violazioni ravvicinate) a cui il control-plane chiede al driver di silenziare l'autore. Al primo colpo non si punisce: si smette solo di rispondere.",
+     "default": "2"},
+    {"section": "Canali esterni", "key": "CHANNEL_STRIKE_BAN", "type": "int",
+     "label": "Strike per il ban",
+     "hint": "Strike a cui il control-plane chiede al driver di espellere l'autore. Gli strike decadono da soli dopo 30 minuti senza nuove violazioni.",
+     "default": "3"},
 ]
+
+# Chiavi della sezione "Persona": cambiarle non tocca i connettori, ma richiede
+# di rileggere il documento di identità (nome, file, annotazioni) e di rivedere
+# il blocco iniettato nella chat.
+_PERSONA_ENV_SECTION = "Persona"
+_PERSONA_ENV_KEYS = {m["key"] for m in _ENV_META if m["section"] == _PERSONA_ENV_SECTION}
+
+# Chiavi della sezione "Canali esterni": token e soglie vanno riletti subito
+# (senza riavvio), ma gli strike già contati NON si azzerano: vedi
+# _reload_channel_config().
+_CHANNEL_ENV_SECTION = "Canali esterni"
+_CHANNEL_ENV_KEYS = {m["key"] for m in _ENV_META if m["section"] == _CHANNEL_ENV_SECTION}
 
 _ENV_ROUTING_WEIGHT_KEYS = {
     "ROUTING_WEIGHT_VRAM", "ROUTING_WEIGHT_LOAD", "ROUTING_WEIGHT_TIER",
@@ -4126,6 +5108,12 @@ def set_config_env():
                 continue
             _apply_env_runtime(meta, cv)
             applied[key] = _env_str(meta, cv)
+    # Stessa logica per l'identità: nome o file cambiati = documento da rileggere.
+    if _PERSONA_ENV_KEYS & set(applied):
+        _reload_persona()
+    # E per i canali: token e soglie si rileggono, gli strike restano.
+    if _CHANNEL_ENV_KEYS & set(applied):
+        _reload_channel_config()
     if errors:
         return jsonify({"ok": False, "error": "; ".join(errors),
                         "applied": list(applied.keys())}), 400
@@ -5195,6 +6183,43 @@ def development_dream_loop():
                      source='development-dream', status='failed')
         time.sleep(60)
 
+def _run_persona_dream_once() -> None:
+    """UNA riflessione su di sé, con il lock: due sogni insieme non hanno senso."""
+    if _persona_dream is None or not _persona_dream_lock.acquire(blocking=False):
+        return
+    try:
+        report = _persona_dream.run_once(_materiale_identita())
+        push_log(
+            'dream', f'Sogno di identità: {report.get("status")}',
+            detail=json.dumps({
+                "id": report.get("id"), "material": report.get("material"),
+                "proposals": [p.get("text", "") for p in report.get("proposals", [])],
+                "discarded": [d.get("reason", "") for d in report.get("discarded", [])],
+                "error": report.get("error", ""),
+            }, ensure_ascii=False)[:2000],
+            source='persona-dream',
+            status=('success' if report.get("status") == 'candidate' else 'warn'),
+        )
+    finally:
+        _persona_dream_lock.release()
+
+def persona_dream_loop():
+    """Sveglia il sogno di identità: idle + finestra oraria, decise da `due()`.
+
+    Il controllo è lo stesso del sogno di sviluppo (nessuna attività in
+    foreground da `idle_seconds`), ma il passo è più lento: una riflessione su di
+    sé non ha scadenza, e chiederla più spesso di così produrrebbe ripetizioni.
+    """
+    time.sleep(30)
+    while True:
+        try:
+            if _persona_dream and _persona_dream.due(_last_foreground_activity):
+                _run_persona_dream_once()
+        except Exception as error:
+            push_log('dream', 'Persona dream scheduler error', str(error),
+                     source='persona-dream', status='failed')
+        time.sleep(120)
+
 def heartbeat_loop():
     time.sleep(3)
     push_log('system', 'Control-plane v1.05 started',
@@ -5272,9 +6297,11 @@ if __name__ == '__main__':
     _load_aliases_from_db()
     _register_local_node()
     _initialize_development_dream()
+    _safe_initialize_persona_dream()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=metrics_loop, daemon=True).start()
     threading.Thread(target=development_dream_loop, daemon=True).start()
+    threading.Thread(target=persona_dream_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=8085, debug=False)
 else:
     _load_nodes_from_db()
@@ -5282,6 +6309,8 @@ else:
     _load_aliases_from_db()
     _register_local_node()
     _initialize_development_dream()
+    _safe_initialize_persona_dream()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=metrics_loop, daemon=True).start()
     threading.Thread(target=development_dream_loop, daemon=True).start()
+    threading.Thread(target=persona_dream_loop, daemon=True).start()
