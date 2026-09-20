@@ -151,5 +151,13 @@ check("ogni modello e' una option selezionabile anche nel picker mobile", () => 
   assert.equal(options.length, 17); // nessuna voce del CP diventa una testata non cliccabile
 });
 
+check("una voce esterna senza 'base' non scrive 'undefined' nella tendina", () => {
+  const options = selectableModelOptions({ groups: [], external: [{ id: "🌐 OmniRoute (auto)" }] });
+  assert.equal(options.length, 1);
+  assert.ok(!options[0].label.includes("undefined"));
+  assert.equal(options[0].model, "🌐 OmniRoute (auto)");
+  assert.equal(options[0].route, "external");
+});
+
 console.log(`\nPASS modelli: ${passed} check su raggruppamento, etichette e dedupe`);
 if (process.exitCode) process.exit(process.exitCode);

@@ -152,10 +152,13 @@ export function selectableModelOptions(catalog) {
     }
   }
   for (const entry of (catalog && catalog.external) || []) {
+    // `base` lo mette buildCatalog; se arrivasse un catalogo senza, meglio l'id
+    // che la parola "undefined" dentro la tendina di un telefono.
+    const base = entry.base || entry.id || "esterno";
     options.push({
       value: entry.id,
-      label: `${entry.base} · provider esterni`,
-      model: entry.base,
+      label: `${base} · provider esterni`,
+      model: base,
       route: "external",
     });
   }
