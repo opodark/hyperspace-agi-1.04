@@ -16,6 +16,12 @@ Sicurezza, non negoziabile:
     piu' largamente del previsto;
   - azioni da una whitelist fissa, mai un comando costruito da input libero:
     ogni azione e' un argv list precompilato, zero shell=True;
+  - l'unica eccezione e' `shell_run`, che accetta un argv dal chiamante e in
+    cambio paga tre pareti: allowlist di eseguibili PER NOME, cwd dentro le
+    directory ammesse, output e tempo limitati — piu' SHELL_RUN_ENABLED, che
+    nasce false. Gira sull'host con i permessi di chi avvia l'agent: e' una
+    capability da accendere sapendo cosa significa (vedi docs/host-access.md),
+    non un default;
   - controlla SOLO la macchina locale — non esiste un modo di chiedere a
     questo agent di toccare la rete di un'altra macchina della mesh.
 
@@ -515,6 +521,144 @@ def action_sbx_sandbox(params: dict) -> dict:
     raise ValueError(f"unsupported sbx sandbox operation: {operation}")
 
 
+# ── shell_run: comandi reali senza una shell (Stage 1 di docs/host-access.md) ─
+# Le mani dell'agente, con le stesse pareti del resto di questo file: argv
+# precalcolato (mai `shell=True`), allowlist di eseguibili PER NOME e di
+# directory per il cwd, output e tempo limitati. La differenza da sbx_sandbox
+# e' che qui NON c'e' una microVM: il comando gira sull'host, con i permessi di
+# chi ha avviato l'agent. Per questo nasce SPENTO (SHELL_RUN_ENABLED=false):
+# accenderlo e' una decisione, non un default.
+_SHELL_DEFAULT_EXECUTABLES = frozenset({"python", "python3", "node", "npm", "npx", "pytest", "git"})
+_SHELL_METACHARACTERS = frozenset({
+    "|", "||", "&", "&&", ";", ";;", "<", ">", ">>", "<<", "1>", "2>", "2>&1", "$(", "`",
+})
+_SHELL_MAX_ARGS = 32
+_SHELL_MAX_ARG_CHARS = 4096
+_SHELL_WINDOWS_SUFFIXES = (".exe", ".cmd", ".bat", ".com")
+
+
+def _shell_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(config_value(name, str(default))), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _shell_allowed_executables() -> frozenset:
+    configured = config_value("SHELL_ALLOWED_EXECUTABLES", "").strip()
+    if not configured:
+        return _SHELL_DEFAULT_EXECUTABLES
+    return frozenset(item.strip().lower() for item in configured.split(",") if item.strip())
+
+
+def _shell_executable_name(value: object) -> str:
+    """Il nome con cui ragiona l'allowlist: basename, minuscolo, senza suffisso."""
+    name = Path(str(value)).name.lower()
+    for suffix in _SHELL_WINDOWS_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _shell_argv(params: dict) -> list[str]:
+    """Valida l'argv. Il confine vero e' `shell=False` + allowlist: questi
+    controlli servono a dire *no* in modo leggibile quando il chiamante crede di
+    parlare con una shell, non a fare pattern-matching di sicurezza."""
+    argv = params.get("argv")
+    if isinstance(argv, str) or not isinstance(argv, (list, tuple)) or not argv:
+        raise ValueError("argv deve essere una lista non vuota di argomenti (nessuna stringa di shell)")
+    values = [str(item) for item in argv]
+    if len(values) > _SHELL_MAX_ARGS:
+        raise ValueError(f"argv troppo lungo: massimo {_SHELL_MAX_ARGS} argomenti")
+    for index, item in enumerate(values):
+        if not item.strip():
+            raise ValueError(f"argv[{index}] e' vuoto")
+        if len(item) > _SHELL_MAX_ARG_CHARS:
+            raise ValueError(f"argv[{index}] supera {_SHELL_MAX_ARG_CHARS} caratteri")
+        if any(char in item for char in ("\x00", "\n", "\r")):
+            raise ValueError(f"argv[{index}] contiene un carattere di controllo")
+        if item in _SHELL_METACHARACTERS:
+            raise ValueError(f"argv[{index}] e' un operatore di shell ({item!r}): "
+                             "questo percorso esegue comandi, non stringhe di shell")
+    return values
+
+
+def _shell_cwd(params: dict) -> Path:
+    """cwd dentro una delle directory ammesse (default: la radice del repo)."""
+    roots = []
+    for item in config_value("SHELL_ALLOWED_DIRS", "").split(","):
+        if item.strip():
+            roots.append(Path(item.strip()).expanduser().resolve())
+    if not roots:
+        roots = [BASE_DIR]
+    raw = str(params.get("cwd", "") or "").strip()
+    if not raw:
+        return roots[0]
+    candidate = Path(raw).expanduser().resolve()
+    for root in roots:
+        if candidate == root or root in candidate.parents:
+            if not candidate.is_dir():
+                raise ValueError(f"cwd non e' una directory: {candidate}")
+            return candidate
+    raise ValueError(f"cwd fuori dalle directory ammesse: {candidate} (vedi SHELL_ALLOWED_DIRS)")
+
+
+def _shell_cap(text: str, max_bytes: int) -> tuple[str, bool]:
+    raw = str(text or "").encode("utf-8", errors="replace")
+    if len(raw) <= max_bytes:
+        return str(text or ""), False
+    return raw[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+def _shell_run_exec(argv: list, cwd: Path, timeout: int, max_bytes: int) -> dict:
+    """L'unico punto di questa azione che lancia un processo."""
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "GIT_TERMINAL_PROMPT": "0",
+           "GIT_PAGER": "cat", "PAGER": "cat"}
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(argv, cwd=str(cwd), env=env, shell=False,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        parziale, _ = _shell_cap((error.stdout or "") + (error.stderr or ""), max_bytes)
+        return {"ok": False, "timed_out": True, "exit_code": None,
+                "error": f"timeout dopo {timeout}s", "output": parziale}
+    except FileNotFoundError:
+        return {"ok": False, "error": f"comando non trovato: {argv[0]}"}
+    except OSError as error:
+        return {"ok": False, "error": f"esecuzione fallita: {error}"}
+    stdout, out_truncated = _shell_cap(proc.stdout, max_bytes)
+    stderr, err_truncated = _shell_cap(proc.stderr, max_bytes)
+    return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
+            "stdout": stdout, "stderr": stderr, "output": stdout + stderr,
+            "truncated": out_truncated or err_truncated,
+            "duration_ms": int((time.monotonic() - started) * 1000)}
+
+
+def action_shell_run(params: dict) -> dict:
+    """Esegue un comando come argv sull'host. Spento finche' non lo si accende."""
+    if config_value("SHELL_RUN_ENABLED", "false").strip().lower() != "true":
+        return {"ok": False, "enabled": False,
+                "error": "shell_run disabilitato: imposta SHELL_RUN_ENABLED=true per accenderlo"}
+    argv = _shell_argv(params)
+    name = _shell_executable_name(argv[0])
+    if name not in _shell_allowed_executables():
+        raise ValueError(f"eseguibile non ammesso: {name!r} (vedi SHELL_ALLOWED_EXECUTABLES)")
+    resolved = shutil.which(argv[0])
+    if not resolved:
+        return {"ok": False, "error": f"comando non trovato: {argv[0]}"}
+    cwd = _shell_cwd(params)
+    timeout = _shell_int("SHELL_MAX_TIMEOUT", 60, 1, 600)
+    if params.get("timeout") is not None:
+        try:
+            timeout = max(1, min(int(params["timeout"]), timeout))
+        except (TypeError, ValueError):
+            raise ValueError("timeout deve essere un intero (secondi)")
+    max_bytes = _shell_int("SHELL_MAX_OUTPUT_BYTES", 65536, 1024, 1048576)
+    result = _shell_run_exec([resolved, *argv[1:]], cwd, timeout, max_bytes)
+    return {"enabled": True, "argv0": name, "cwd": str(cwd), "timeout_s": timeout, **result}
+
+
 ACTIONS = {
     "ngrok_status": action_ngrok_status,
     "ngrok_start": action_ngrok_start,
@@ -527,8 +671,12 @@ ACTIONS = {
     "wg_down": action_wg_down,
     "ble_scan": action_ble_scan,
     "sbx_sandbox": action_sbx_sandbox,
+    "shell_run": action_shell_run,
 }
 
+# Sola lettura = osserva e basta. `shell_run` NON e' qui: esegue comandi con i
+# permessi dell'agent, quindi appartiene al gruppo che cambia la macchina (in
+# dashboard e' il gruppo che chiede conferma).
 READ_ONLY_ACTIONS = {"ngrok_status", "tailscale_status", "wg_status", "ble_scan"}
 
 

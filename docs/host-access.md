@@ -10,7 +10,8 @@ the dangerous one — so it deserves a plan instead of a flag.
 | piece | where | what it does |
 | --- | --- | --- |
 | **host agent** | `hostctl/agent.py` | HTTP server on the host (`HOSTCTL_PORT`, default 8765). `GET /status`, `POST /action` |
-| **actions** | same file, `ACTIONS` | `ngrok_*`, `tailscale_up/down/status`, `wg_up/down/status`, `ble_scan`, `sbx_sandbox` |
+| **actions** | same file, `ACTIONS` | `ngrok_*`, `tailscale_up/down/status`, `wg_up/down/status`, `ble_scan`, `sbx_sandbox`, `shell_run` |
+| **shell_run** | `hostctl/agent.py` + `control-plane/main.py` | one-shot commands as argv, never a shell string: executable allowlist, `cwd` allowlist, output and time caps. The CP publishes the tool only when it is enabled *and* the host agent is configured |
 | **read-only split** | `READ_ONLY_ACTIONS` | tells apart what only observes from what changes the machine |
 | **sandbox** | `sbx_sandbox` + `shared/code_sandbox.py` | workspaces: `create`, `run`, `diff`, `read`, `write`, `replace`, `list` |
 | **CP side** | `control-plane/main.py` | `GET /network/status`, `POST /network/action`: the agent never talks to the model directly |
@@ -58,11 +59,37 @@ python hostctl/agent.py                    # leave it running on the host
 python scripts/hs.py host                  # must answer, not 503
 ```
 
-**Stage 1 — `shell_run` (one-shot, argv-only).** The honest middle step: a new
-action that takes `{argv, cwd, timeout}`, refuses shell metacharacters, resolves
-`cwd` against an allowlist of directories, caps output and timeout, and logs every
-call. It gives an external runtime real commands (`git`, `npm`, `python`, your own
-scripts) without giving it a shell.
+**Stage 1 — `shell_run` (one-shot, argv-only) — IMPLEMENTED (2026-09-20).**
+The honest middle step, now in the code: `hostctl/agent.py` exposes the action
+`shell_run` (`{argv, cwd, timeout}`), the control-plane publishes the tool
+`shell_run` only when it is both wanted and possible, and every call is logged by
+the CP (`Shell run: <cmd>`). An external runtime gets real commands (`git`,
+`npm`, `python`, your own scripts) without getting a shell.
+
+| knobs (in the host agent's `.env`) | default | what it does |
+| --- | --- | --- |
+| `SHELL_RUN_ENABLED` | `false` | the action refuses until you turn it on; while off, the tool is not even in the catalogue (chat, MCP, `/tools/execute`) |
+| `SHELL_ALLOWED_EXECUTABLES` | `python`, `python3`, `node`, `npm`, `npx`, `pytest`, `git` | matched on the **name** (basename, lowercase, Windows suffix stripped) |
+| `SHELL_ALLOWED_DIRS` | the repository root | `cwd` is resolved and must stay inside one of these |
+| `SHELL_MAX_TIMEOUT` | `60` | ceiling; the caller can ask for less, never more |
+| `SHELL_MAX_OUTPUT_BYTES` | `65536` | per stream, with an explicit `truncated` flag |
+
+What it refuses, and why those refusals are honest: an `argv` that is a string
+(or empty, or absurdly long), arguments that *are* shell operators (`;`, `&&`,
+`>`, `$(`, …) because that means the caller expects a shell, control characters,
+an executable outside the allowlist, a `cwd` outside the allowed directories.
+The boundary, though, is **not** this pattern list: it is `shell=False` plus the
+allowlist. Two limits worth stating: the allowlist is **name-based**, so it
+trusts `PATH` (the same trust the sandbox already places in it), and there is
+**still no policy for destructive commands** — `git push`, `npm publish` and
+`rm -rf` are all "just argv" at this stage. That is Stage 2's job, and the
+`--confirm` idea below is where it starts.
+
+Two more deliberate choices: the child gets a scrubbed environment
+(`GIT_TERMINAL_PROMPT=0`, `PAGER=cat`, UTF-8) and `stdin` closed, so a command
+that waits for input fails fast instead of hanging until the timeout; and the
+audit log carries the argv and the exit code but **not** the output, which can be
+large and can contain project data (the log DB is not the place for it).
 
 **Stage 2 — sessions (the "total access" part).** A `shell_session` action
 (`open`, `input`, `read`, `close`) backed by a PTY, one session per id, idle

@@ -2148,6 +2148,9 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         "code_sandbox":    _tool_code_sandbox,
         "persona_get":     _tool_persona_get,
         "persona_note":    _tool_persona_note,
+        # Definita piu' sotto, accanto alle route di rete: la policy di shell_run
+        # vive nell'host-agent, qui c'e' il percorso con token e audit.
+        "shell_run":       _tool_shell_run,
     }
     handler = handlers.get(tool_name)
     if handler:
@@ -4334,6 +4337,77 @@ def _network_admin_error():
         return jsonify({"ok": False, "configured": True,
                         "error": "token amministrativo di rete mancante o non valido"}), 401
     return None
+
+
+# ── shell_run: le mani dell'agente (Stage 1 di docs/host-access.md) ─────────
+# Un comando reale (git, npm, python, i propri script) senza una shell: la
+# policy vive nell'host-agent (argv, allowlist per nome, cwd, cap di output e
+# tempo), qui c'e' il percorso governato — token, log di audit, e un tool che
+# compare nel catalogo (tool loop chat, MCP, /tools/execute) SOLO se l'operatore
+# lo accende E un host-agent e' configurato. Un tool presente e non funzionante
+# e' peggio di un tool assente: per questo si auto-abilita, come i connettori.
+SHELL_RUN_ENABLED = os.getenv("SHELL_RUN_ENABLED", "false").strip().lower() == "true"
+
+SHELL_RUN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "shell_run",
+        "description": ("Esegue un comando sull'host come argv (nessuna shell): eseguibili e "
+                        "directory sono in allowlist, output e tempo limitati dal server. "
+                        "Per il codice non fidato usa code_sandbox: qui non c'e' una microVM."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "argv": {"type": "array", "items": {"type": "string"},
+                         "description": "Comando e argomenti, es. [\"git\", \"status\", \"--short\"]"},
+                "cwd": {"type": "string", "description": "Directory di lavoro (dentro quelle ammesse)"},
+                "timeout": {"type": "integer", "description": "Secondi (il server applica il suo tetto)"},
+            },
+            "required": ["argv"],
+        },
+    },
+}
+
+
+def shell_run_available() -> bool:
+    """Il tool esiste solo se e' voluto E possibile (fail-closed)."""
+    return bool(SHELL_RUN_ENABLED and _hostctl_configured())
+
+
+def _shell_run_label(payload: dict) -> str:
+    argv = payload.get("argv")
+    if isinstance(argv, list) and argv:
+        return str(argv[0])[:80]
+    return "(argv non valido)"
+
+
+def _tool_shell_run(args: dict) -> str:
+    """Percorso governato verso l'host-agent: la policy sta in hostctl/agent.py."""
+    if not SHELL_RUN_ENABLED:
+        return "Shell error: shell_run disabilitato (SHELL_RUN_ENABLED=false)."
+    if not _hostctl_configured():
+        return "Shell error: host-agent non configurato (HOSTCTL_TOKEN assente o troppo corto)."
+    payload = {"action": "shell_run"}
+    for key in ("argv", "cwd", "timeout"):
+        if key in args:
+            payload[key] = args[key]
+    try:
+        r = requests.post(f"{HOSTCTL_URL}/action", headers=_hostctl_headers(), json=payload, timeout=90)
+        result = r.json() if r.content else {"ok": False, "error": "risposta vuota dall'host-agent"}
+    except requests.RequestException as error:
+        return f"Shell error: host-agent non raggiungibile: {error}"
+    # Audit: nel log va l'esito e l'argv, non l'output (che puo' essere grande e
+    # contenere dati del progetto).
+    audit = {key: value for key, value in result.items() if key not in ("stdout", "stderr", "output")}
+    push_log('system', f"Shell run: {_shell_run_label(payload)}",
+             json.dumps(audit, default=str)[:2000],
+             status='success' if result.get('ok') else 'warn')
+    return json.dumps(result, ensure_ascii=False)
+
+
+if shell_run_available():
+    _NATIVE_TOOLS.append(SHELL_RUN_TOOL)
+    _sync_connector_tools()
 
 
 @app.route('/network/status')
