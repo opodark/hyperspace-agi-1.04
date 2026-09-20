@@ -126,8 +126,8 @@ POST /register
 
 | Runtime                    | Status     | Use Case                     |
 |---------------------------|------------|------------------------------|
-| Transformers.js           | Recommended| Embeddings + small models    |
-| WebLLM / WebGPU           | Future     | On-device LLMs (when stable) |
+| Transformers.js           | Opt-in     | Embeddings + small models (WebGPU) |
+| WebLLM / WebGPU           | Opt-in     | On-device LLMs, chat locale (pannello separato) |
 | Native browser APIs       | Basic      | Translation via Web API      |
 | WASM modules              | Supported  | Custom lightweight models    |
 
@@ -196,8 +196,17 @@ end-to-end sull'app vera sta in `scripts/verify_web_node_e2e.py`.
 - Test: 24 check JS (`npm test`, senza browser) + 33 Python nella suite
   principale + `scripts/verify_web_node_e2e.py` sull'app vera
 - Non implementato: WebSocket (il long-poll e' la scelta deliberata, l'estensione
-  non puo' sostenere una connessione persistente), pubblicazione sullo store,
-  e embeddings reali senza portare un runtime di modelli nel browser
+  non puo' sostenere una connessione persistente), pubblicazione sullo store
+- Modelli locali (WebGPU, opt-in): `src/webgpu.js` rileva davvero l'adattatore e
+  offre due runtime — Transformers.js per `embed_texts`/`translate`/`summarize`
+  (backend `device: "webgpu"`) e WebLLM per una chat locale in un pannello
+  separato. I pesi si scaricano da Hugging Face (gli embeddings su click, gli
+  altri al primo uso); le capability si dichiarano solo a runtime caricato.
+  `moderate` resta euristico di proposito: un classificatore fragile e' peggio di
+  un'euristica dichiarata
+
+Vedi `docs/webgpu-runtime.md` per i dettagli dei due runtime, i modelli di
+default e i limiti noti.
 
 This component is intentionally kept small and optional. It is an **addition** to the mesh, not a core dependency.
 
@@ -205,10 +214,20 @@ This component is intentionally kept small and optional. It is an **addition** t
 
 Il modo previsto per usare questa pagina, e l'unico che funziona senza
 compromessi, e' servirla **da una macchina della mesh** e aprirla con Tailscale
-connesso sul dispositivo.
+connesso sul dispositivo. Due modi per servirla:
+
+**1. In Docker (consigliato: parte con tutto lo stack).** Il servizio
+`hyperspace-web-node` in `docker-compose.windows.yml` serve la pagina via nginx:
 
 ```bash
-cd web-node && npm run serve      # http.server su 0.0.0.0:8790
+docker compose up -d hyperspace-web-node
+```
+
+**2. A mano (piu' rapido in sviluppo).** Serve la cartella con Node, senza
+immagini da ricostruire:
+
+```bash
+cd web-node && npm run serve      # server statico su 0.0.0.0:8790 (node serve.mjs)
 tailscale ip -4                   # l'indirizzo su cui raggiungerla
 ```
 

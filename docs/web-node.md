@@ -102,3 +102,10 @@ node tests/dashboard.test.cjs
 .venv/bin/python -m unittest discover -s tests
 .venv/bin/python scripts/verify_web_node_e2e.py   # sull'app vera, richiede flask+cryptography
 ```
+
+Local models (WebGPU, opt-in): `web-node/src/webgpu.js` detects the real adapter
+and offers two runtimes — Transformers.js for embeddings/translation/
+summarization (`device: "webgpu"`) and WebLLM for a separate on-device chat panel.
+Weights download from Hugging Face on demand (embeddings eagerly on click); the
+node declares `embed_texts`/`translate` only once the runtime is actually loaded.
+`moderate` stays heuristic on purpose.

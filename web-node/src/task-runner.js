@@ -77,9 +77,15 @@ function splitSentences(text) {
   return text.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
 }
 
-function runSummarize(task) {
+async function runSummarize(task, { runtime } = {}) {
   const { text, max_sentences: maxSentences } = task.payload;
   if (typeof text !== "string") throw new ProtocolError("summarize: payload.text mancante");
+  // Un runtime di modelli (es. Transformers.js) trasforma il riassunto da
+  // estrattivo ad astrattivo. Senza, resta l'estrattivo qui sotto.
+  if (runtime && typeof runtime.summarize === "function") {
+    const summary = await runtime.summarize(text, { max_sentences: maxSentences });
+    return { summary, engine: runtime.kind || "host-runtime" };
+  }
   const limit = Math.max(1, Math.min(10, Number(maxSentences) || 3));
   const sentences = splitSentences(text);
   if (sentences.length <= limit) return { summary: text.trim(), sentences_used: sentences.length };
@@ -150,7 +156,7 @@ async function runTranslate(task, { runtime }) {
   const { text, target, source } = task.payload;
   if (typeof text !== "string") throw new ProtocolError("translate: payload.text mancante");
   if (runtime && typeof runtime.translate === "function") {
-    return { text: await runtime.translate(text, { target, source }), engine: "host-runtime" };
+    return { text: await runtime.translate(text, { target, source }), engine: runtime.kind || "host-runtime" };
   }
   if (typeof globalThis.Translator !== "undefined") {
     const translator = await globalThis.Translator.create({ sourceLanguage: source, targetLanguage: target });
@@ -166,7 +172,7 @@ async function runEmbedTexts(task, { runtime }) {
   if (!runtime || typeof runtime.embed !== "function") {
     throw new TaskUnsupported("embed_texts: nessun runtime di embeddings iniettato");
   }
-  return { vectors: await runtime.embed(texts), engine: "host-runtime" };
+  return { vectors: await runtime.embed(texts), engine: runtime.kind || "host-runtime" };
 }
 
 const HANDLERS = {

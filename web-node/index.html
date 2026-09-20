@@ -121,12 +121,48 @@
       control-plane in <code>http://</code> (mixed content). Serve un CP raggiungibile
       in HTTPS, oppure aprire questa pagina in HTTP.</p>
   </section>
+
+  <section>
+    <h2>6. Modelli locali (WebGPU)</h2>
+    <p>Opzionale e separato dal nodo: puoi caricare un runtime di modelli che gira
+      <em>dentro questo browser</em> (pesi scaricati da Hugging Face, inferenza su
+      WebGPU). Quando e' caricato, il nodo puo' dichiarare anche
+      <code>embed_texts</code> e <code>translate</code>, e il riassunto diventa
+      astrattivo invece di estrattivo.</p>
+    <div class="row">
+      <button id="loadLocalModels">Carica modelli locali (Transformers.js)</button>
+      <span class="warn" id="webgpuStatus">rilevo WebGPU...</span>
+    </div>
+    <p class="warn" id="localModelsNote"></p>
+  </section>
+
+  <section>
+    <h2>7. Chat locale (WebLLM)</h2>
+    <p>Un LLM che gira interamente nel browser via WebGPU, indipendente dalla mesh:
+      qui non passano ne' il control-plane ne' il nodo. I pesi sono in GB anche
+      quantizzati: caricalo solo se serve.</p>
+    <div class="row">
+      <label for="llmModel" style="margin:0">Modello</label>
+      <select id="llmModel"></select>
+      <button id="loadLlm">Carica LLM</button>
+      <span class="warn" id="llmStatus"></span>
+    </div>
+    <div class="chat" id="llmChat"></div>
+    <label for="llmPrompt">Messaggio</label>
+    <textarea id="llmPrompt" rows="2" placeholder="Scrivi, poi Genera"></textarea>
+    <div class="row">
+      <button class="primary" id="llmSend" disabled>Genera</button>
+      <button id="llmClear">Pulisci</button>
+    </div>
+  </section>
 </main>
 
 <script type="module">
   import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
   import { ChatClient, ChatError } from "./src/chat.js";
   import { buildCatalog } from "./src/models.js";
+  import { createTransformersRuntime, createWebLlmChat, loadTransformers, loadWebLlm,
+           requestWebGpuAdapter } from "./src/webgpu.js";
 
   const $ = (id) => document.getElementById(id);
   const log = (message) => {
@@ -254,16 +290,139 @@
     }
   });
 
-  const capabilities = detectCapabilities(globalThis);
-  $("caps").replaceChildren(...capabilities.map((c) => {
-    const li = document.createElement("li");
-    li.textContent = c;
-    return li;
-  }));
-  const canDoModels = capabilities.includes("embed_texts") || capabilities.includes("translate");
-  $("capsNote").textContent = canDoModels ? ""
-    : "Embeddings e traduzione non compaiono perche' questo browser non offre un runtime"
-      + " adatto: il nodo non dichiara capability che non sa servire.";
+  // Il runtime di modelli (Transformers.js) e' caricato su richiesta dal pannello
+  // "Modelli locali": finche' non c'e', embed_texts e translate non si dichiarano.
+  let modelRuntime = null;
+  const renderCaps = () => {
+    const capabilities = detectCapabilities(globalThis, { runtime: modelRuntime });
+    $("caps").replaceChildren(...capabilities.map((c) => {
+      const li = document.createElement("li");
+      li.textContent = c;
+      return li;
+    }));
+    const canDoModels = capabilities.includes("embed_texts") || capabilities.includes("translate");
+    $("capsNote").textContent = canDoModels ? ""
+      : "Embeddings e traduzione non compaiono perche' questo browser non offre un runtime"
+        + " adatto: il nodo non dichiara capability che non sa servire.";
+  };
+  renderCaps();
+
+  // ── modelli locali (WebGPU): Transformers.js + WebLLM ─────────────────────
+  // Entrambi opt-in e indipendenti dalla mesh. Il runtime Transformers.js, quando
+  // caricato, viene iniettato nel WebNode: le capability si aggiornano al riavvio
+  // del nodo. WebLLM e' una chat locale che non tocca il control-plane.
+  const LLM_MODELS = [
+    "Llama-3.2-1B-Instruct-q4f32_1-MLC",
+    "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+    "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+    "SmolLM2-1.7B-Instruct-q4f16_1-MLC",
+  ];
+
+  requestWebGpuAdapter(globalThis).then((adapter) => {
+    $("webgpuStatus").textContent = adapter
+      ? `WebGPU disponibile: ${adapter.description || adapter.vendor || "adattatore"}${adapter.isFallbackAdapter ? " (software)" : ""}`
+      : "WebGPU non disponibile in questo browser";
+  });
+
+  $("loadLocalModels").addEventListener("click", async () => {
+    $("loadLocalModels").disabled = true;
+    $("localModelsNote").textContent = "scarico il modulo Transformers.js...";
+    try {
+      const transformers = await loadTransformers();
+      modelRuntime = createTransformersRuntime({
+        transformers,
+        onStatus: ({ phase, task, model }) => {
+          $("localModelsNote").textContent = phase === "loading"
+            ? `scarico ${task} (${model})...`
+            : `${task} pronto (${model}).`;
+        },
+      });
+      // Pre-carica l'embeddings (la capability principale): il primo task embed
+      // non deve scontare anche il download dei pesi.
+      $("localModelsNote").textContent = "precarico il modello di embeddings (la prima volta richiede qualche minuto)...";
+      await modelRuntime.embed(["warmup"]);
+      $("localModelsNote").textContent = "runtime pronto: embeddings disponibili. Riavvia il nodo per dichiarare le nuove capability.";
+    } catch (error) {
+      $("localModelsNote").textContent = `caricamento fallito: ${error.message}`;
+    } finally {
+      $("loadLocalModels").disabled = false;
+      renderCaps();
+    }
+  });
+
+  $("llmModel").replaceChildren(...LLM_MODELS.map((m) => option(m, m)));
+  let llmChat = null;
+  let llmHistory = [];
+
+  const llmBubble = (role, text) => {
+    const div = document.createElement("div");
+    div.className = `msg ${role}`;
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = role === "user" ? "tu" : "locale";
+    const body = document.createElement("span");
+    body.textContent = text;
+    div.append(who, body);
+    $("llmChat").append(div);
+    $("llmChat").scrollTop = $("llmChat").scrollHeight;
+    return body;
+  };
+
+  $("loadLlm").addEventListener("click", async () => {
+    $("loadLlm").disabled = true;
+    $("llmStatus").textContent = "scarico il modulo WebLLM...";
+    try {
+      const webllm = await loadWebLlm();
+      llmChat = createWebLlmChat({
+        webllm,
+        model: $("llmModel").value,
+        onStatus: ({ phase, progress }) => {
+          if (phase === "loading") $("llmStatus").textContent = "scarico il modello...";
+          else if (phase === "progress") $("llmStatus").textContent = `scarico... ${Math.round((Number(progress) || 0) * 100)}%`;
+          else if (phase === "ready") $("llmStatus").textContent = "modello pronto";
+        },
+      });
+      $("llmSend").disabled = false;
+      $("llmStatus").textContent = "motore pronto: scegli il modello e carica quando vuoi";
+    } catch (error) {
+      $("llmStatus").textContent = `errore: ${error.message}`;
+    } finally {
+      $("loadLlm").disabled = false;
+    }
+  });
+
+  $("llmSend").addEventListener("click", async () => {
+    const text = $("llmPrompt").value.trim();
+    if (!text || !llmChat) return;
+    $("llmPrompt").value = "";
+    llmBubble("user", text);
+    llmHistory.push({ role: "user", content: text });
+    const target = llmBubble("assistant", "");
+    $("llmSend").disabled = true;
+    $("llmStatus").textContent = "genero...";
+    try {
+      const reply = await llmChat.generate(llmHistory, {
+        onDelta: (_piece, whole) => {
+          target.textContent = whole;
+          $("llmChat").scrollTop = $("llmChat").scrollHeight;
+        },
+      });
+      target.textContent = reply || target.textContent;
+      llmHistory.push({ role: "assistant", content: reply });
+      $("llmStatus").textContent = "fatto";
+    } catch (error) {
+      target.textContent = `errore: ${error.message}`;
+      $("llmStatus").textContent = "errore";
+    } finally {
+      $("llmSend").disabled = false;
+    }
+  });
+
+  $("llmClear").addEventListener("click", () => {
+    llmHistory = [];
+    $("llmChat").replaceChildren();
+    $("llmStatus").textContent = "";
+  });
 
   const nodeId = localStorage.getItem("hyperspace.webNodeId") || newNodeId();
   localStorage.setItem("hyperspace.webNodeId", nodeId);
@@ -303,6 +462,7 @@
         nodeId,
         label: $("label").value.trim(),
         consent: $("consent").checked,
+        runtime: modelRuntime,
         onState: render,
       });
       await node.start();

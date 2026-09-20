@@ -17,9 +17,13 @@ export const ALWAYS_AVAILABLE = ["moderate", "summarize", "validate_json"];
 export function detectCapabilities(env = globalThis, opts = {}) {
   const found = new Set(ALWAYS_AVAILABLE);
 
-  // Translation API nativa del browser (Chrome/Edge). Non e' garantita su
-  // tutti i motori, quindi non la diamo per scontata.
+  // Traduzione: o l'API nativa del browser (Chrome/Edge), o un runtime di
+  // modelli iniettato (es. Transformers.js). Senza nessuno dei due non la
+  // dichiariamo: non e' garantita su tutti i motori.
   if (env && (typeof env.Translator !== "undefined" || typeof env.translation !== "undefined")) {
+    found.add("translate");
+  }
+  if (opts.runtime && typeof opts.runtime.translate === "function") {
     found.add("translate");
   }
 
