@@ -758,25 +758,54 @@ def _write_cache(engine: str, payload: dict):
 NODE_METRICS_SCHEMA_VERSION = 3
 
 
-async def collect_metrics(engine: str = "ollama") -> dict:
+def vram_source(declared_gb, detected_gb) -> str:
+    """Da dove viene il tetto di VRAM: dichiarato, rilevato, o niente.
+
+    Serve a chi legge il dato: un tetto DICHIARATO e uno RILEVATO non meritano la
+    stessa fiducia, e `0` non e' un tetto — e' l'assenza di un tetto, che e' il
+    motivo per cui `shared/model_fit.py` si rifiuta di decidere.
+    """
+    if float(declared_gb or 0) > 0:
+        return "env"
+    return "nvidia-smi" if float(detected_gb or 0) > 0 else "none"
+
+
+def metrics_payload(profile: dict, data: dict, hardware: dict | None = None) -> dict:
+    """Il payload normalizzato, senza node_id/load (li aggiunge la route).
+
+    Estratto da `collect_metrics` per essere provabile senza rete: qui non si
+    contatta nessun backend, si assembla soltanto.
+    """
+    return {
+        "schema_version":     NODE_METRICS_SCHEMA_VERSION,
+        "backend_type":       profile["backend_type"],
+        "capability_profile": profile,
+        "server":             (data or {}).get("server", {}),
+        "runtime":            (data or {}).get("runtime", {}),
+        # Il TETTO della macchina (dichiarato o rilevato) con la sua provenienza:
+        # senza, chi legge non puo' dire se un modello ci sta (shared/model_fit.py)
+        # e finisce per scegliere pesi che poi vanno in split su CPU.
+        "hardware":           dict(hardware or {}),
+        "sampled_at":         _iso_now(),
+    }
+
+
+async def collect_metrics(engine: str = "ollama", hardware: dict | None = None) -> dict:
     """Payload normalizzato per il control-plane (senza node_id/load, aggiunti
     dalla route in node/main.py). Cache TTL breve per non picchiare il backend
     a ogni poll del CP."""
     cached = _read_cache(engine)
     if cached is not None:
+        # L'hardware e' statico per il processo, ma non appartiene al motore:
+        # si rinfresca anche sul payload in cache, cosi' non resta un blocco
+        # vuoto scritto da una chiamata che non lo passava.
+        cached["hardware"] = dict(hardware or cached.get("hardware") or {})
         return cached
     profile = capability_profile(engine)
     try:
         data = await get_provider(engine).collect()
     except Exception:
         data = {"server": {}, "runtime": {}}
-    payload = {
-        "schema_version":     NODE_METRICS_SCHEMA_VERSION,
-        "backend_type":       profile["backend_type"],
-        "capability_profile": profile,
-        "server":             data.get("server", {}),
-        "runtime":            data.get("runtime", {}),
-        "sampled_at":         _iso_now(),
-    }
+    payload = metrics_payload(profile, data, hardware)
     _write_cache(engine, payload)
     return payload

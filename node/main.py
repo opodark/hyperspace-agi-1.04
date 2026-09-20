@@ -48,7 +48,7 @@ from shared.identity import (
 from shared.network_security import token_authorized
 from shared.model_fit import assess as assess_model_fit, describe as describe_model_fit
 from shared.node_compat import PROTOCOL_VERSION
-from backend_metrics import collect_metrics, capability_profile
+from backend_metrics import collect_metrics, capability_profile, vram_source
 from qos_monitor import QoSMonitor
 from dreaming import DreamJournal
 from shared import ollama_native
@@ -285,6 +285,20 @@ def calculate_tier(vram_gb: float, uptime_s: float, reputation: float = 0.5) -> 
 _vram_env      = float(os.getenv("VRAM_GB", "0.0"))
 _vram_detected = detect_vram_gb()
 VRAM_GB        = _vram_env if _vram_env > 0.0 else _vram_detected
+
+# Il tetto della macchina, nella forma in cui il control-plane puo' leggerlo e
+# giudicarlo: valore, provenienza (dichiarato o rilevato: non meritano la stessa
+# fiducia) e tier. Prima questo dato restava chiuso nel processo del nodo, e chi
+# leggeva i /metrics non poteva dire se un modello ci stesse — vedi l'ipotesi
+# sbagliata "il modello e' lento" in shared/model_fit.py.
+HARDWARE = {
+    "vram_gb":     VRAM_GB,
+    "vram_source": vram_source(_vram_env, _vram_detected),
+    # Stesso calcolo di NODE_PROFILE["tier"] piu' sotto: qui serve prima, perche'
+    # i /metrics lo pubblicano.
+    "tier":        calculate_tier(VRAM_GB, 0),
+    "tier_forced": bool(_FORCED_TIER),
+}
 
 # backend_type (inference_server/model_manager) — unica fonte di verità per
 # limiter (adaptive vs sequenziale) e scoring del CP. Derivato dal motore.
@@ -800,7 +814,7 @@ async def node_metrics():
     Il nodo è un semplice exporter: espone capability statiche + stato
     runtime osservato dal motore (per modello e aggregato) + stato di
     concorrenza QoS (schema v3: conteggi, non unità di carico)."""
-    payload = dict(await collect_metrics(INFERENCE_BACKEND))
+    payload = dict(await collect_metrics(INFERENCE_BACKEND, hardware=HARDWARE))
     # dict(...) sopra: collect_metrics restituisce l'oggetto CACHATO condiviso
     # (TTL); senza la copia, mutare qui payload["load"] corromperebbe la cache
     # e i successivi poll restituirebbero lo stesso oggetto già alterato.
@@ -1070,7 +1084,7 @@ async def qos_loop():
     task (acquire() in _AdaptiveLoadLimiter)."""
     while True:
         try:
-            data = await collect_metrics(INFERENCE_BACKEND)
+            data = await collect_metrics(INFERENCE_BACKEND, hardware=HARDWARE)
             _qos_monitor.update(
                 data.get("server", {}),
                 data.get("runtime", {}),
