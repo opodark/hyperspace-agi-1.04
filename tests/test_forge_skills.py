@@ -16,6 +16,23 @@ from flask import Flask, jsonify, request
 from shared.forge_skills import ECC_BUNDLE_DIR, attach_skills, load_ecc_bundle, source_hash
 
 
+def _symlink_creation_available() -> bool:
+    """Windows richiede privilegi (o Developer Mode) per creare un symlink.
+
+    Senza, il caso 'symlink' del test non e' verificabile: meglio saltarlo
+    dichiarandolo che fingere che sia passato.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            (Path(tmp) / "link").symlink_to(Path(tmp) / "target")
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
+SYMLINKS_AVAILABLE = _symlink_creation_available()
+
+
 class BundleTests(unittest.TestCase):
     def test_pinned_bundle_has_license_and_two_verified_sources(self):
         items = load_ecc_bundle(ECC_BUNDLE_DIR)
@@ -33,6 +50,8 @@ class BundleTests(unittest.TestCase):
                 if change == "tamper":
                     target.write_text("changed")
                 elif change == "symlink":
+                    if not SYMLINKS_AVAILABLE:
+                        self.skipTest("questo filesystem/utente non puo' creare symlink")
                     target.unlink()
                     target.symlink_to(ECC_BUNDLE_DIR / "skills/security-review/SKILL.md")
                 else:
@@ -100,7 +119,9 @@ class ForgeRoutesTests(unittest.TestCase):
         names = {"_forge_path", "_forge_write", "_forge_authorized", "_forge_validate",
                  "_forge_read_skill", "forge_import_ecc", "forge_update", "forge_status",
                  "v1_chat_completions"}
-        nodes = [node for node in ast.parse(source.read_text()).body
+        # encoding esplicito: il file ha caratteri non-ASCII (i banner di sezione)
+        # e su Windows la codifica di default del sistema non e' UTF-8.
+        nodes = [node for node in ast.parse(source.read_text(encoding="utf-8")).body
                  if isinstance(node, ast.FunctionDef) and node.name in names]
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), self.ns)
         self.client = app.test_client()

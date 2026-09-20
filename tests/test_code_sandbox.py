@@ -2,6 +2,7 @@
 import importlib.util
 import ast
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -18,6 +19,13 @@ ROOT = Path(__file__).parents[1]
 SPEC = importlib.util.spec_from_file_location("sandbox_runner", ROOT / "sandbox" / "runner.py")
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+
+# Il runner esegue i comandi con un gruppo di processi nuovo e `select()` sulle
+# pipe: semantica POSIX. In produzione gira nel container Linux (vedi
+# docs/code-sandbox.md), quindi i test che eseguono davvero qualcosa non hanno
+# senso sul nodo Windows e vanno saltati dichiarandolo — non fatti passare.
+POSIX_ONLY = unittest.skipUnless(
+    os.name != "nt", "il runner esegue comandi solo nel container Linux (POSIX)")
 
 
 class RunnerTests(unittest.TestCase):
@@ -52,6 +60,7 @@ class RunnerTests(unittest.TestCase):
         (repo / "app.py").write_text("changed", encoding="utf-8")
         self.assertEqual((self.seed / "app.py").read_text(encoding="utf-8"), "print('old')\n")
 
+    @POSIX_ONLY
     def test_read_only_image_seed_produces_writable_disposable_workspace(self):
         import stat
         (self.seed / "app.py").chmod(0o444)
@@ -89,6 +98,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("-print('old')", diff["diff"])
         self.assertIn("+print('new')", diff["diff"])
 
+    @POSIX_ONLY
     def test_generated_patch_applies_to_a_clean_workspace(self):
         proposal_id = self.create()
         runner._replace({
@@ -122,6 +132,7 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner._run({"workspace_id": workspace_id, "argv": ["sh", "-c", "echo unsafe"]})
 
+    @POSIX_ONLY
     def test_allowed_command_runs_without_shell(self):
         workspace_id = self.create()
         # Il runner ammette sia `python` sia `python3` (vedi ALLOWED_EXECUTABLES):
@@ -185,6 +196,7 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertFalse(result["completed"])
 
+    @POSIX_ONLY
     @unittest.skipUnless(runner.importlib.util.find_spec("pytest"), "pytest not installed")
     def test_pytest_pass_fail_and_no_tests(self):
         for source, passed, code in (("def test_ok(): assert 1 == 1\n", True, 0),
@@ -195,6 +207,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(result["passed"], passed, result)
             self.assertEqual(result["exit_code"], code, result)
 
+    @POSIX_ONLY
     def test_profile_timeout_and_output_limit(self):
         result = self.check("profile", "sum(range(100))\n")
         self.assertTrue(result["passed"], result)
@@ -214,6 +227,7 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner._check({"workspace_id": workspace_id, "tool_id": "profile", "path": path})
 
+    @POSIX_ONLY
     def test_unittest_discovery_requires_tests(self):
         workspace_id = self.create()
         result = runner._check({"workspace_id": workspace_id, "tool_id": "unittest"})
@@ -224,6 +238,7 @@ class RunnerTests(unittest.TestCase):
         result = runner._check({"workspace_id": workspace_id, "tool_id": "unittest"})
         self.assertTrue(result["passed"], result)
 
+    @POSIX_ONLY
     @unittest.skipUnless(runner.importlib.util.find_spec("bandit"), "Bandit not installed")
     def test_bandit_rejects_nested_symlink_escape(self):
         workspace_id = self.create()
@@ -232,6 +247,7 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner._check({"workspace_id": workspace_id, "tool_id": "bandit"})
 
+    @POSIX_ONLY
     def test_run_preserves_stderr_for_existing_callers(self):
         workspace_id = self.create()
         python_exe = "python" if shutil.which("python") else "python3"
@@ -244,7 +260,7 @@ class RunnerTests(unittest.TestCase):
 
 class ControlPlanePresetTests(unittest.TestCase):
     def test_handler_forwards_preset_parameters(self):
-        tree = ast.parse((ROOT / "control-plane/main.py").read_text())
+        tree = ast.parse((ROOT / "control-plane/main.py").read_text(encoding="utf-8"))
         function = next(node for node in tree.body
                         if isinstance(node, ast.FunctionDef) and node.name == "_tool_code_sandbox")
         backend = FakeBackend("docker", True)
