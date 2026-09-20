@@ -51,6 +51,7 @@ from shared.node_compat import PROTOCOL_VERSION
 from backend_metrics import collect_metrics, capability_profile
 from qos_monitor import QoSMonitor
 from dreaming import DreamJournal
+from shared import ollama_native
 
 app = FastAPI()
 
@@ -982,6 +983,38 @@ async def v1_chat_completions_proxy(request: Request):
     if not await _try_acquire_slot(model):
         return _busy_response()
     try:
+        # `think=false` esplicito: il percorso OpenAI-compatibile lo IGNORA, il
+        # modello continua a ragionare e il budget si esaurisce — è l'origine dei
+        # timeout in chat dal vivo. Si passa dal nativo, che lo rispetta, e si
+        # ritraduce la risposta in forma OpenAI per il chiamante.
+        # Si chiama comunque ollama-proxy (/api/chat), non Ollama diretto: la
+        # strumentazione (log sul CP, memoria condivisa, peer) resta identica.
+        # Solo non-stream: tradurre un flusso SSE nativo è un lavoro a sé e qui
+        # non serve (il tool loop del CP e il bot di canale chiamano non-stream).
+        if ollama_native.needs_native_path(payload):
+            async with httpx.AsyncClient(timeout=NODE_INFERENCE_TIMEOUT_S) as client:
+                nativo_resp = await client.post(
+                    f"{OLLAMA_PROXY_URL}/api/chat",
+                    json=ollama_native.to_native_chat(payload),
+                    headers={"Content-Type": "application/json"},
+                )
+            corpo = None
+            if nativo_resp.status_code == 200:
+                try:
+                    corpo = nativo_resp.json()
+                except Exception:
+                    corpo = None
+            if isinstance(corpo, dict):
+                return Response(
+                    content=json.dumps(ollama_native.to_openai_chat(corpo, model)),
+                    media_type="application/json",
+                )
+            # Nativo non utilizzabile (proxy vecchio, 400, risposta illeggibile):
+            # si ricade sul compatibile. Meglio una risposta con reasoning in più
+            # che un errore al client, e il perché finisce nel log.
+            print(f"[NODE] percorso nativo non disponibile (HTTP "
+                  f"{nativo_resp.status_code}): ricado sul compatibile (model={model})")
+
         async with httpx.AsyncClient(timeout=NODE_INFERENCE_TIMEOUT_S) as client:
             r = await client.post(
                 f"{OLLAMA_PROXY_URL}/v1/chat/completions",
