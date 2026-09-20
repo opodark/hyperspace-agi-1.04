@@ -12,6 +12,7 @@ the dangerous one — so it deserves a plan instead of a flag.
 | **host agent** | `hostctl/agent.py` | HTTP server on the host (`HOSTCTL_PORT`, default 8765). `GET /status`, `POST /action` |
 | **actions** | same file, `ACTIONS` | `ngrok_*`, `tailscale_up/down/status`, `wg_up/down/status`, `ble_scan`, `sbx_sandbox`, `shell_run` |
 | **shell_run** | `hostctl/agent.py` + `control-plane/main.py` | one-shot commands as argv, never a shell string: executable allowlist, `cwd` allowlist, output and time caps. The CP publishes the tool only when it is enabled *and* the host agent is configured |
+| **command policy** | `shared/shell_policy.py` | names what a command is (`read`, `write`, `destructive`) and what that implies: destructive commands need `confirm: true`, `SHELL_BLOCK_RISK` can refuse them outright. Pure policy, no dependencies, shared by agent and CP |
 | **read-only split** | `READ_ONLY_ACTIONS` | tells apart what only observes from what changes the machine |
 | **sandbox** | `sbx_sandbox` + `shared/code_sandbox.py` | workspaces: `create`, `run`, `diff`, `read`, `write`, `replace`, `list` |
 | **CP side** | `control-plane/main.py` | `GET /network/status`, `POST /network/action`: the agent never talks to the model directly |
@@ -91,13 +92,30 @@ that waits for input fails fast instead of hanging until the timeout; and the
 audit log carries the argv and the exit code but **not** the output, which can be
 large and can contain project data (the log DB is not the place for it).
 
-**Stage 2 — sessions (the "total access" part).** A `shell_session` action
-(`open`, `input`, `read`, `close`) backed by a PTY, one session per id, idle
-auto-close, output ring buffer with explicit truncation, and the CP holding the
-per-session audit. This is what an OpenClaw-like runtime actually needs — and the
-first place where a confirmation step matters: destructive commands should be able
-to require `--confirm`, not because a prompt is a security boundary, but because
-it turns an accident into a decision.
+**Stage 2a — the confirmation step — IMPLEMENTED (2026-09-20).**
+`shared/shell_policy.py` classifies a command (`read`, `write`, `destructive`)
+with **named rules**, and the host agent applies the verdict where the process is
+born: `git push` / `rm -r` / `npm publish` / `docker system prune` /
+`systemctl restart` / `chmod -R` and friends are refused unless the caller passes
+`confirm: true`. Two knobs, each failing closed in its own direction:
+
+| knob | default | what it does |
+| --- | --- | --- |
+| `SHELL_CONFIRM_RISK` | `destructive` | the level from which a command asks. `write` also asks for plain writes (`npm install`), `none` never asks |
+| `SHELL_BLOCK_RISK` | `none` | the level refused **even with** `confirm: true` — for an unattended runtime that must not be able to destroy anything |
+
+`GET /network/status` carries the policy (`confirm_at`, `block_at`, the rule
+names, the allowed executables and directories), so "why is it asking me?" has an
+answer in the panel and not only in the logs. And the honest part: a confirmation
+is a **decision, not a boundary** — a destructive command no rule matches still
+goes through. The allowlist stays the real wall; this layer exists so that an
+accident becomes a decision.
+
+**Stage 2b — sessions (the "total access" part) — still to do.** A `shell_session`
+action (`open`, `input`, `read`, `close`) backed by a PTY, one session per id,
+idle auto-close, output ring buffer with explicit truncation, and the CP holding
+the per-session audit. This is what an OpenClaw-like runtime actually needs when
+a single `cd`-then-run is not enough.
 
 **Stage 3 — the adapter.** The `ROADMAP` already frames the shape: each runtime
 implements a *light HyperSpace adapter*. Concretely: the runtime speaks its own

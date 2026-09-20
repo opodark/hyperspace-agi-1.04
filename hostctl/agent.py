@@ -69,6 +69,15 @@ except ImportError:
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# La policy dei comandi vive in shared/shell_policy.py: e' stdlib pura, quindi
+# importarla non rompe la regola "questo file resta senza dipendenze", e tenerla
+# in un posto solo evita che agent e control-plane classifichino lo stesso
+# comando in due modi diversi.
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+from shared.shell_policy import BLOCK_VAR as SHELL_BLOCK_VAR  # noqa: E402
+from shared.shell_policy import CONFIRM_VAR as SHELL_CONFIRM_VAR  # noqa: E402
+from shared.shell_policy import ShellPolicy  # noqa: E402
 ENV_PATH = Path(os.getenv("HOSTCTL_ENV_PATH", BASE_DIR / ".env"))
 STATE_PATH = Path(os.getenv("HOSTCTL_STATE_PATH", Path.home() / ".hyperspace" / "hostctl_state.json"))
 
@@ -583,14 +592,28 @@ def _shell_argv(params: dict) -> list[str]:
     return values
 
 
-def _shell_cwd(params: dict) -> Path:
-    """cwd dentro una delle directory ammesse (default: la radice del repo)."""
+def _shell_roots() -> list[Path]:
+    """Le directory ammesse per il cwd. Vuoto = la radice del repository."""
     roots = []
     for item in config_value("SHELL_ALLOWED_DIRS", "").split(","):
         if item.strip():
             roots.append(Path(item.strip()).expanduser().resolve())
-    if not roots:
-        roots = [BASE_DIR]
+    return roots or [BASE_DIR]
+
+
+def _shell_policy() -> ShellPolicy:
+    """La policy legge la stessa configurazione dell'agent ( `.env`, con
+    os.environ che vince) passando da config_value: un accessor solo, nessuna
+    seconda verita' su come si legge l'ambiente."""
+    return ShellPolicy.from_env({
+        SHELL_CONFIRM_VAR: config_value(SHELL_CONFIRM_VAR, "destructive"),
+        SHELL_BLOCK_VAR: config_value(SHELL_BLOCK_VAR, "none"),
+    })
+
+
+def _shell_cwd(params: dict) -> Path:
+    """cwd dentro una delle directory ammesse (default: la radice del repo)."""
+    roots = _shell_roots()
     raw = str(params.get("cwd", "") or "").strip()
     if not raw:
         return roots[0]
@@ -647,6 +670,14 @@ def action_shell_run(params: dict) -> dict:
     resolved = shutil.which(argv[0])
     if not resolved:
         return {"ok": False, "error": f"comando non trovato: {argv[0]}"}
+    # Cosa sto per eseguire? La policy non indovina dal nome del programma: legge
+    # il COMANDO, e se qualcosa va deciso lo dice con un nome di regola.
+    policy = _shell_policy()
+    verdict = policy.check([name, *argv[1:]], confirm=bool(params.get("confirm")))
+    if not verdict.allowed:
+        return {"ok": False, "risk": verdict.risk, "rules": verdict.rules,
+                "requires_confirmation": verdict.requires_confirmation,
+                "blocked": verdict.blocked, "error": verdict.error}
     cwd = _shell_cwd(params)
     timeout = _shell_int("SHELL_MAX_TIMEOUT", 60, 1, 600)
     if params.get("timeout") is not None:
@@ -656,7 +687,8 @@ def action_shell_run(params: dict) -> dict:
             raise ValueError("timeout deve essere un intero (secondi)")
     max_bytes = _shell_int("SHELL_MAX_OUTPUT_BYTES", 65536, 1024, 1048576)
     result = _shell_run_exec([resolved, *argv[1:]], cwd, timeout, max_bytes)
-    return {"enabled": True, "argv0": name, "cwd": str(cwd), "timeout_s": timeout, **result}
+    return {"enabled": True, "argv0": name, "cwd": str(cwd), "timeout_s": timeout,
+            "risk": verdict.risk, "rules": verdict.rules, **result}
 
 
 ACTIONS = {
@@ -708,6 +740,15 @@ class Handler(BaseHTTPRequestHandler):
                 "ngrok": action_ngrok_status({}),
                 "tailscale": action_tailscale_status({}),
                 "wireguard": action_wg_status({}),
+                # La policy dei comandi, visibile: "perche' mi chiedi di
+                # confermare?" deve avere una risposta nel pannello, non solo
+                # nei log.
+                "shell": {
+                    "enabled": config_value("SHELL_RUN_ENABLED", "false").strip().lower() == "true",
+                    "allowed_executables": sorted(_shell_allowed_executables()),
+                    "allowed_dirs": [str(root) for root in _shell_roots()],
+                    **_shell_policy().describe(),
+                },
             })
             return
         self._json({"error": "not found"}, 404)

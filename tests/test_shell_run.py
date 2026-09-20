@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from shared.shell_policy import ShellPolicy
+
 ROOT = Path(__file__).parents[1]
 SPEC = importlib.util.spec_from_file_location("hostctl_agent", ROOT / "hostctl" / "agent.py")
 agent = importlib.util.module_from_spec(SPEC)
@@ -168,6 +170,16 @@ class HttpSurfaceTests(unittest.TestCase):
         self.assertTrue(callable(agent.Handler.do_POST))
 
 
+class _FixedPolicy(ShellPolicy):
+    """La policy coi default: il test del CP non deve dipendere dall'ambiente di
+    chi lo lancia (che `from_env` lo legga davvero lo verifica
+    tests/test_shell_policy.py)."""
+
+    @classmethod
+    def from_env(cls, environ=None):
+        return cls()
+
+
 class _FakeResponse:
     content = b"json"
 
@@ -186,6 +198,67 @@ class _FakeRequests:
     def post(self, url, **kwargs):
         self.calls.append({"url": url, **kwargs})
         return _FakeResponse(self.payload)
+
+
+class PolicyEnforcementTests(unittest.TestCase):
+    """La policy e' applicata dove nasce il processo: nell'agent."""
+
+    def test_a_destructive_command_is_refused_without_confirmation(self):
+        with _enabled():
+            result = agent.action_shell_run({"argv": ["git", "push", "origin", "main"]})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["risk"], "destructive")
+        self.assertEqual(result["rules"], ["git_push"])
+        self.assertTrue(result["requires_confirmation"])
+        self.assertFalse(result["blocked"])
+        self.assertIn("conferma", result["error"])
+
+    def test_with_confirmation_it_runs(self):
+        seen = []
+        with _enabled(), patch.object(
+                agent, "_shell_run_exec",
+                lambda argv, cwd, timeout, max_bytes: seen.append(argv) or {"ok": True}):
+            result = agent.action_shell_run({"argv": ["git", "push"], "confirm": True})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["risk"], "destructive")
+        self.assertEqual(len(seen), 1)
+
+    def test_a_read_command_needs_no_confirmation_and_says_its_risk(self):
+        with _enabled(), patch.object(
+                agent, "_shell_run_exec",
+                lambda argv, cwd, timeout, max_bytes: {"ok": True}):
+            result = agent.action_shell_run({"argv": ["git", "status"]})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["risk"], "read")
+
+    def test_blocking_a_level_wins_over_the_confirmation_flag(self):
+        with _enabled(**{agent.SHELL_BLOCK_VAR: "destructive"}):
+            result = agent.action_shell_run({"argv": ["git", "push"], "confirm": True})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertIn("bloccato", result["error"])
+
+    def test_the_allowlist_answers_first_for_a_program_that_is_not_allowed(self):
+        """`rm` non e' nemmeno in allowlist: la policy non viene interpellata e
+        il rifiuto e' quello dell'allowlist. Due pareti, non una — e l'ordine e'
+        voluto: prima cosa si puo' eseguire, poi cosa si sta eseguendo."""
+        with _enabled(), self.assertRaises(ValueError) as ctx:
+            agent.action_shell_run({"argv": ["rm", "-rf", "."], "confirm": True})
+        self.assertIn("non ammesso", str(ctx.exception))
+
+    def test_while_it_is_disabled_nothing_is_classified_or_run(self):
+        with patch.object(agent, "config_value", lambda key, default="": default):
+            result = agent.action_shell_run({"argv": ["git", "push"], "confirm": True})
+        self.assertFalse(result["enabled"])
+        self.assertNotIn("risk", result)
+
+
+class StatusSurfaceTests(unittest.TestCase):
+    def test_the_status_exposes_the_policy_so_the_panel_can_explain_itself(self):
+        source = Path(agent.__file__).read_text(encoding="utf-8")
+        self.assertIn('"shell": {', source)
+        self.assertIn("allowed_executables", source)
+        self.assertIn("describe()", source)
 
 
 class ControlPlaneToolTests(unittest.TestCase):
@@ -210,6 +283,7 @@ class ControlPlaneToolTests(unittest.TestCase):
                                       payload or {"ok": True, "exit_code": 0,
                                                   "output": "SECRET-OUTPUT"}),
             "json": json,
+            "ShellPolicy": _FixedPolicy,
             "push_log": lambda *a, **kwargs: (logs if logs is not None else []).append(
                 {"args": a, **kwargs}),
         }
@@ -265,10 +339,27 @@ class ControlPlaneToolTests(unittest.TestCase):
         json.loads(handler({"argv": ["pytest", "-q"]}))
         self.assertEqual(logs[-1]["status"], "warn")
 
+    def test_a_destructive_command_comes_back_as_a_question_not_as_an_execution(self):
+        calls, logs = [], []
+        handler = self._handler(calls=calls, logs=logs)
+        answer = json.loads(handler({"argv": ["git", "push", "origin", "main"]}))
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["requires_confirmation"])
+        self.assertEqual(answer["rules"], ["git_push"])
+        self.assertFalse(calls)                       # nessun giro di rete
+        self.assertEqual(logs[-1]["status"], "warn")
+
+    def test_with_confirmation_the_command_is_forwarded(self):
+        calls = []
+        handler = self._handler(calls=calls)
+        json.loads(handler({"argv": ["git", "push"], "confirm": True}))
+        self.assertEqual(calls[-1]["json"]["confirm"], True)
+        self.assertEqual(calls[-1]["json"]["argv"], ["git", "push"])
+
     def test_unreachable_host_is_an_answer_not_an_exception(self):
         namespace = {"SHELL_RUN_ENABLED": True, "_hostctl_configured": lambda: True,
                      "HOSTCTL_URL": "http://host:8765", "_hostctl_headers": dict, "json": json,
-                     "push_log": lambda *a, **k: None}
+                     "ShellPolicy": _FixedPolicy, "push_log": lambda *a, **k: None}
         body = [self._label_node] + [n for n in self.functions if n.name == "_tool_shell_run"]
         exec(compile(ast.Module(body=body, type_ignores=[]), "handler", "exec"), namespace)
 

@@ -84,6 +84,7 @@ from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, ChannelGuard, ChannelPolicy, ChannelRuntime,
                             ReplyPacing)
 from shared import ollama_native
+from shared.shell_policy import ShellPolicy
 import routing as _routing
 from connectors.manager import ConnectorManager
 
@@ -4354,6 +4355,8 @@ SHELL_RUN_TOOL = {
         "name": "shell_run",
         "description": ("Esegue un comando sull'host come argv (nessuna shell): eseguibili e "
                         "directory sono in allowlist, output e tempo limitati dal server. "
+                        "I comandi distruttivi (git push, rm -r, npm publish, ...) richiedono "
+                        "confirm=true: CHIEDI PRIMA alla persona, e non impostarlo da solo. "
                         "Per il codice non fidato usa code_sandbox: qui non c'e' una microVM."),
         "parameters": {
             "type": "object",
@@ -4362,6 +4365,8 @@ SHELL_RUN_TOOL = {
                          "description": "Comando e argomenti, es. [\"git\", \"status\", \"--short\"]"},
                 "cwd": {"type": "string", "description": "Directory di lavoro (dentro quelle ammesse)"},
                 "timeout": {"type": "integer", "description": "Secondi (il server applica il suo tetto)"},
+                "confirm": {"type": "boolean",
+                            "description": "true solo dopo che una persona ha accettato il comando"},
             },
             "required": ["argv"],
         },
@@ -4388,9 +4393,22 @@ def _tool_shell_run(args: dict) -> str:
     if not _hostctl_configured():
         return "Shell error: host-agent non configurato (HOSTCTL_TOKEN assente o troppo corto)."
     payload = {"action": "shell_run"}
-    for key in ("argv", "cwd", "timeout"):
+    for key in ("argv", "cwd", "timeout", "confirm"):
         if key in args:
             payload[key] = args[key]
+    # Verdetto in anticipo: se il comando chiede una decisione, il chiamante
+    # riceve la domanda invece di aspettare un giro di rete. L'enforcement vero
+    # resta nell'host-agent: qui si evita solo di eseguire per poi farsi dire di no.
+    argv = payload.get("argv")
+    if isinstance(argv, list) and argv:
+        verdict = ShellPolicy.from_env().check([str(item) for item in argv],
+                                               confirm=bool(payload.get("confirm")))
+        if not verdict.allowed:
+            push_log('system', f"Shell run richiede decisione: {_shell_run_label(payload)}",
+                     json.dumps(verdict.to_dict(), ensure_ascii=False),
+                     status='warn')
+            return json.dumps({"ok": False, **verdict.to_dict(),
+                               "error": verdict.error}, ensure_ascii=False)
     try:
         r = requests.post(f"{HOSTCTL_URL}/action", headers=_hostctl_headers(), json=payload, timeout=90)
         result = r.json() if r.content else {"ok": False, "error": "risposta vuota dall'host-agent"}
