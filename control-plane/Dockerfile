@@ -12,6 +12,7 @@ COPY control-plane/desktop.html .
 COPY control-plane/connectors ./connectors
 
 COPY shared ./shared
+COPY vendor/ecc ./vendor/ecc
 
 ENV PYTHONPATH=/app:/app/shared
 

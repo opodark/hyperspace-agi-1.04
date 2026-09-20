@@ -19,6 +19,7 @@ Architecture and deployment notes for HyperSpace-AGI. Mission, lexicon and phase
 - [connectors.md](connectors.md) — enterprise connector fabric (GitHub, Microsoft 365, Google Workspace): contract, configuration, diagnostics and open limits.
 - [persona.md](persona.md) — declared identity of the agent: identity document, live self-model, the verifiable disclosure policy ("I am an AI"), and the human-gated identity dream that proposes self-observations at night.
 - [channel.md](channel.md) — external conversation surfaces (a room's chat and private messages): channel tokens, spam classification, moderation escalation and reply pacing decided by the control plane.
+- [development-security-tools.md](development-security-tools.md) — proposed development, debugging and security tools for local models, with selective ECC integration.
 - [architecture.md](architecture.md) — core layers (authority, control plane, node/worker, registry, memory graph, infra UI).
 - [network-profiles.md](network-profiles.md) — Enterprise Local vs Public Hub deployment profiles.
 - [web-node.md](web-node.md) — browser-first worker path design intent (see also [web-node/README.md](../web-node/README.md) for the fuller technical spec and current implementation status).

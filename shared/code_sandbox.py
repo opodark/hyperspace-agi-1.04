@@ -149,14 +149,28 @@ class HybridCodeSandboxClient:
         arguments = dict(arguments or {})
         if action == "status":
             return self.status()
+        if action == "catalog":
+            backend, _ = self._split_workspace(arguments.get("workspace_id"))
+            if backend == "sbx":
+                return {"ok": False, "backend": "sbx", "tools": [],
+                        "error": "development presets require a docker workspace"}
+            return self._tag(self.fallback.call(action, {}, timeout), "docker")
         if action == "create":
-            if self.primary.status().get("available"):
+            backend = arguments.pop("backend", "auto")
+            if backend not in {"auto", "docker", "sbx"}:
+                raise ValueError("invalid sandbox backend")
+            if backend == "sbx":
+                return self._tag(self.primary.call(action, arguments, timeout), "sbx")
+            if backend == "auto" and self.primary.status().get("available"):
                 try:
                     return self._tag(self.primary.call(action, arguments, timeout), "sbx")
                 except SandboxUnavailable:
                     pass
             return self._tag(self.fallback.call(action, arguments, timeout), "docker")
         backend, raw_id = self._split_workspace(arguments.get("workspace_id"))
+        if action == "check" and backend == "sbx":
+            return {"ok": False, "completed": False, "passed": False, "backend": "sbx",
+                    "error": "development presets require a docker workspace"}
         arguments["workspace_id"] = raw_id
         client = self.primary if backend == "sbx" else self.fallback
         return self._tag(client.call(action, arguments, timeout), backend)

@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/affaan-m/ECC",
+  "commit": "9ac593b55cba44c8b20152a5c7f28d300a67ec7e",
+  "files": {
+    "LICENSE": "326146379f01bb137c0a5d3c54770c1aa31076705c8b88a7f6b26a460f6221b2",
+    "skills/security-review/SKILL.md": "b9eb6416eebc8dda046674f0a2dbb3be88aff526d182b60a0f55998d3d6d0d8d",
+    "skills/verification-loop/SKILL.md": "f0d56107f79e607d4de6c5543b8edfb1b58ab9ae4019b39831689cd91116543e"
+  }
+}

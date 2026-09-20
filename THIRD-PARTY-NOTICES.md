@@ -47,6 +47,11 @@ Apache-2.0, quindi non impongono nulla sulle scelte di licenza del progetto.
 cryptography, fastapi, flask, flask-cors, httpx, requests, uvicorn (le stesse
 licenze qui sopra); `pytest` (MIT) e' presente solo per i test del runner.
 
+Il preset di analisi Python include `bandit==1.8.6` (Apache-2.0), con
+`stevedore` (Apache-2.0), `PyYAML` (MIT), `rich` (MIT) e `pygments`
+(BSD-2-Clause): licenze verificate nel metadata locale il 20/09/2026.
+`markdown-it-py` e `mdurl` sono MIT, verificati nei file LICENSE installati.
+
 ## web-node
 
 Nessuna dipendenza: solo codice del progetto (`package.json` non ha
@@ -58,6 +63,16 @@ Open WebUI, SearXNG, Obsidian (KasmVNC), Caddy, Ollama e OmniRoute sono
 **scaricate** dalle rispettive registry a runtime e **non ridistribuite** da
 questo repository: ciascuna immagine porta con se' la propria licenza, e la
 responsabilita' di rispettarla e' di chi la esegue.
+
+## ECC — skill testuali selezionate
+
+`vendor/ecc` contiene `security-review` e `verification-loop` dal repository
+ufficiale [affaan-m/ECC](https://github.com/affaan-m/ECC), commit
+`9ac593b55cba44c8b20152a5c7f28d300a67ec7e`, sotto licenza MIT.
+Copyright (c) 2026 Affaan Mustafa. La licenza integrale è conservata in
+`vendor/ecc/LICENSE`; provenienza e SHA-256 sono in `vendor/ecc/manifest.json`.
+Le skill sono distribuite senza modifiche; l'adattamento a Hyperspace è aggiunto
+dal loader come contesto separato. Nessun hook o runtime ECC è incluso.
 
 ## Non coperto da questo file
 

@@ -66,6 +66,7 @@ from shared.bottle import (
 )
 from shared.network_security import normalize_http_base, token_authorized, verify_client_ip
 from shared.code_sandbox import HybridCodeSandboxClient, SandboxUnavailable
+from shared.forge_skills import ECC_BUNDLE_DIR, load_ecc_bundle, attach_skills, source_hash
 from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryClient, HermesMemoryError
 from shared.web_node import (
@@ -1737,7 +1738,14 @@ def _sse_headers():
 # sbagliato e non e' piu' filtrabile da /logs?type=. tests/test_log_types.py
 # estrae i tipi usati dalle route e verifica che siano tutti elencati.
 LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
-             "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel"}
+             "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel",
+             # Conversazione fra agenti che scrivono codice (docs/code-conversation.md).
+             # Il filo e' il trace_id CONDIVISO fra i messaggi: `push_log` ne genera
+             # uno nuovo solo quando non gliene passi uno, quindi basta passarlo.
+             # Il codice NON sta qui: sta come artefatto inerte nel Forge, e il log
+             # porta il riferimento. Motivo: la vista federata manda `summary`
+             # (troncato) e mai `detail` — cosi' il codice non esce verso il peer.
+             "code_proposal", "code_review", "code_verdict"}
 
 def push_log(type_, summary, detail="", source="control-plane", target="", status="info", trace_id=""):
     entry = {
@@ -1952,7 +1960,7 @@ def _tool_get_mesh_status(args: dict) -> str:
 def _tool_code_sandbox(args: dict) -> str:
     """Operate only on an offline disposable workspace, never on the live repo."""
     action = str(args.get("action", "status")).strip().lower()
-    allowed = {"status", "create", "list", "read", "write", "replace", "run", "diff", "discard"}
+    allowed = {"status", "catalog", "check", "create", "list", "read", "write", "replace", "run", "diff", "discard"}
     if action not in allowed:
         return f"Sandbox error: unsupported action '{action}'."
     if action == "status" and not code_sandbox.enabled:
@@ -1960,6 +1968,7 @@ def _tool_code_sandbox(args: dict) -> str:
     payload_keys = {
         "workspace_id", "label", "path", "content", "old", "new",
         "expected_occurrences", "argv", "cwd", "timeout", "pattern", "limit",
+        "backend", "tool_id",
     }
     payload = {key: value for key, value in args.items() if key in payload_keys}
     try:
@@ -2040,11 +2049,13 @@ _NATIVE_TOOLS = [
         "type": "function",
         "function": {
             "name": "code_sandbox",
-            "description": "Sviluppa e testa codice in un workspace offline e usa-e-getta. Non modifica mai il repository operativo, non ha rete, Docker socket, push o deploy. Prima usa create, poi read/list/write/replace/run/diff; restituisci sempre il diff per revisione umana.",
+            "description": "Sviluppa e testa codice in un workspace offline e usa-e-getta. Non modifica il repository operativo. Usa catalog per i preset disponibili, create con backend docker, poi check con tool_id pytest/unittest/profile/bandit e path. passed indica l'esito del controllo, completed se è terminato. Sono disponibili anche read/list/write/replace/run/diff. Restituisci il diff per revisione.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["status", "create", "list", "read", "write", "replace", "run", "diff", "discard"]},
+                    "action": {"type": "string", "enum": ["status", "catalog", "check", "create", "list", "read", "write", "replace", "run", "diff", "discard"]},
+                    "backend": {"type": "string", "enum": ["auto", "docker", "sbx"], "description": "Backend per create; i preset check richiedono docker."},
+                    "tool_id": {"type": "string", "enum": ["pytest", "unittest", "profile", "bandit"]},
                     "workspace_id": {"type": "string"},
                     "label": {"type": "string"},
                     "path": {"type": "string"},
@@ -2884,6 +2895,10 @@ def v1_chat_completions():
         return '', 204
 
     data      = request.get_json(force=True, silent=True) or {}
+    try:
+        data = attach_skills(data, _forge_read_skill)
+    except (ValueError, OSError, TypeError) as error:
+        return jsonify({"error": {"message": str(error), "type": "invalid_request_error"}}), 400
     messages  = data.get("messages", [])
     raw_model = data.get("model", advanced_config["ollama"]["defaultModel"])
 
@@ -5336,7 +5351,7 @@ def _forge_validate(kind, source):
         except SyntaxError as error:
             issues.append(f"python syntax error at line {error.lineno}: {error.msg}")
     if kind == "skill" and source.strip():
-        if not source.lstrip().startswith("#"):
+        if not source.lstrip().startswith(("#", "---\n", "---\r\n")):
             warnings.append("skill should start with a Markdown heading")
         if len(source.split()) < 20:
             warnings.append("skill instructions are unusually short")
@@ -5377,6 +5392,34 @@ def _forge_authorized():
         return False
     supplied = request.headers.get("X-Hyperspace-Forge-Token", "")
     return hashlib.sha256(supplied.encode()).digest() == hashlib.sha256(FORGE_ADMIN_TOKEN.encode()).digest()
+
+
+def _forge_read_skill(artifact_id):
+    with _forge_lock:
+        with open(_forge_path(artifact_id), encoding="utf-8") as stream:
+            return json.load(stream)
+
+
+@app.route('/forge/import/ecc', methods=['POST'])
+def forge_import_ecc():
+    if not _forge_authorized():
+        return jsonify({"error": "ECC import requires FORGE_ADMIN_TOKEN"}), 403
+    try:
+        artifacts = load_ecc_bundle(ECC_BUNDLE_DIR)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        results = []
+        with _forge_lock:
+            for item in artifacts:
+                if os.path.exists(_forge_path(item["id"])):
+                    results.append({"id": item["id"], "created": False})
+                    continue
+                item.update(status="draft", version=1, created_at=now, updated_at=now,
+                            validation=_forge_validate("skill", item["source"]))
+                _forge_write(item)
+                results.append({"id": item["id"], "created": True})
+        return jsonify({"artifacts": results})
+    except (OSError, ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
 
 
 @app.route('/forge/artifacts')
@@ -5441,6 +5484,7 @@ def forge_update(artifact_id):
                 "validation": _forge_validate(kind, source),
                 "generator": data.get("generator") or item.get("generator") or "human",
             })
+            item.pop("approved_source_sha256", None)
             _forge_write(item)
     except (OSError, ValueError, TypeError):
         return jsonify({"error": "artifact not found"}), 404
@@ -5466,6 +5510,9 @@ def forge_status(artifact_id):
                 return jsonify({"error": "artifact is not valid", "validation": validation}), 409
             item.update({"status": state, "validation": validation,
                          "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+            item.pop("approved_source_sha256", None)
+            if state == "approved":
+                item["approved_source_sha256"] = source_hash(item.get("source", ""))
             _forge_write(item)
     except (OSError, ValueError):
         return jsonify({"error": "artifact not found"}), 404

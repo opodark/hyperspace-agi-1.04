@@ -10,10 +10,16 @@ from __future__ import annotations
 import difflib
 import fnmatch
 import json
+import importlib.metadata
+import importlib.util
 import os
 import re
+import selectors
+import signal
+import stat
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -98,6 +104,18 @@ def _create(job: dict) -> dict:
     repo = root / "repo"
     shutil.copytree(SEED, base, ignore=_ignore, symlinks=True)
     shutil.copytree(base, repo, symlinks=True)
+    # copytree preserves the image seed's read-only modes. The runner owns the
+    # copies: restore directory writes for cleanup and repo file writes for tools.
+    # Never chmod symlinks, whose targets may be outside this workspace.
+    for tree in (base, repo):
+        for path in [tree, *tree.rglob("*")]:
+            if path.is_symlink():
+                continue
+            if path.is_dir() or tree == repo:
+                mode = stat.S_IMODE(path.stat().st_mode) | stat.S_IRUSR | stat.S_IWUSR
+                if path.is_dir():
+                    mode |= stat.S_IXUSR
+                path.chmod(mode)
     metadata = {
         "workspace_id": workspace_id,
         "label": str(job.get("label", ""))[:120],
@@ -168,6 +186,53 @@ def _replace(job: dict) -> dict:
     return {**_write(job), "replacements": expected}
 
 
+def _capture(argv, cwd, env, timeout):
+    """Bound output while reading and terminate the whole job on timeout/overflow."""
+    started = time.monotonic()
+    buffers = {"output": bytearray(), "stderr": bytearray()}
+    error = None
+    with subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          start_new_session=True) as process:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "output")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            try:
+                while selector.get_map() or process.poll() is None:
+                    remaining = timeout - (time.monotonic() - started)
+                    if remaining <= 0:
+                        error = "command timed out"
+                        break
+                    for key, _ in selector.select(min(remaining, 0.1)):
+                        chunk = os.read(key.fileobj.fileno(), 8192)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        room = MAX_OUTPUT_BYTES - sum(map(len, buffers.values()))
+                        buffers[key.data].extend(chunk[:room])
+                        if len(chunk) > room:
+                            error = "output limit exceeded"
+                            break
+                    if error:
+                        break
+            finally:
+                # Also clean up background descendants after a successful parent exit.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+    result = {name: value.decode("utf-8", errors="replace")
+              for name, value in buffers.items()}
+    result.update(ok=not error and process.returncode == 0,
+                  completed=not bool(error), exit_code=process.returncode,
+                  truncated=error == "output limit exceeded",
+                  duration_ms=round((time.monotonic() - started) * 1000))
+    if error:
+        result["error"] = error
+    return result
+
+
 def _run(job: dict) -> dict:
     root = _workspace(job.get("workspace_id"))
     repo = root / "repo"
@@ -191,25 +256,106 @@ def _run(job: dict) -> dict:
         "npm_config_cache": "/tmp/npm-cache",
         "NO_COLOR": "1",
     }
-    started = time.monotonic()
+    result = _capture(argv, cwd, env, timeout)
+    # Preserve the legacy run contract (diagnostics in output).
+    result["output"] += result.pop("stderr")
+    return result
+
+
+TOOL_MODULES = {"pytest": "pytest", "unittest": "unittest",
+                "profile": "cProfile", "bandit": "bandit"}
+
+
+def _catalog(_job: dict) -> dict:
+    items = []
+    for tool, module in TOOL_MODULES.items():
+        available = (Path(sys.executable).name in ALLOWED_EXECUTABLES
+                     and importlib.util.find_spec(module) is not None)
+        try:
+            version = importlib.metadata.version(module) if tool in {"pytest", "bandit"} else sys.version.split()[0]
+        except importlib.metadata.PackageNotFoundError:
+            version = None
+        items.append({"tool_id": tool, "available": available, "version": version})
+    return {"ok": True, "tools": items, "backend": "docker", "network": "disabled"}
+
+
+def _check(job: dict) -> dict:
+    tool = job.get("tool_id")
+    if tool not in TOOL_MODULES:
+        raise ValueError("unknown tool_id")
+    root = _workspace(job.get("workspace_id"))
+    repo = root / "repo"
+    target = _safe_path(repo, job.get("path", "."), must_exist=True)
+    capability = next(item for item in _catalog({})["tools"] if item["tool_id"] == tool)
+    result = {"tool_id": tool, "version": capability["version"], "findings": [],
+              "passed": False, "completed": False, "ok": False, "exit_code": None,
+              "truncated": False, "duration_ms": 0}
+    if not capability["available"]:
+        return {**result, "error": "tool unavailable; rebuild the sandbox image"}
+    argv = [sys.executable] + (["-I"] if tool == "bandit" else []) + ["-m", TOOL_MODULES[tool]]
+    if tool == "pytest":
+        argv += ["-q", "--", str(target)]
+    elif tool == "unittest":
+        if not target.is_dir():
+            raise ValueError("unittest path must be a discovery directory")
+        argv += ["discover", "-s", str(target)]
+    elif tool == "profile":
+        if not target.is_file() or target.suffix != ".py":
+            raise ValueError("profile path must be a Python file")
+        argv += ["-s", "cumulative", str(target)]
+    else:
+        if target.is_dir():
+            for path in target.rglob("*"):
+                if path.is_symlink():
+                    _safe_path(repo, path.relative_to(repo).as_posix(), must_exist=True)
+        # Ignore repo-controlled suppressions and do not mix diagnostics into JSON.
+        argv += ["-r", "-f", "json", "--ignore-nosec", "--ini", os.devnull, str(target)]
+    env = {"PATH": os.defpath, "HOME": str(root), "TMPDIR": "/tmp",
+           "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+           "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "NO_COLOR": "1"}
+    timeout = max(1, min(int(job.get("timeout", 30)), MAX_TIMEOUT))
+    execution = _capture(argv, repo, env, timeout)
+    result.update(execution)
+    result["passed"] = execution["ok"]
+    if tool == "unittest" and execution["completed"]:
+        summary = re.search(r"^Ran (\d+) tests? in ", execution["stderr"], re.M)
+        if not summary or int(summary.group(1)) == 0:
+            result.update(ok=False, passed=False, error="no verified unittest results")
+    if tool != "bandit" or not execution["completed"]:
+        return result
     try:
-        process = subprocess.run(
-            argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=timeout, check=False,
-        )
-        output = process.stdout[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
-        return {
-            "ok": process.returncode == 0,
-            "exit_code": process.returncode,
-            "output": output,
-            "truncated": len(process.stdout) > MAX_OUTPUT_BYTES,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        }
-    except subprocess.TimeoutExpired as error:
-        output = (error.stdout or b"")[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
-        return {"ok": False, "error": "command timed out", "output": output,
-                "duration_ms": round((time.monotonic() - started) * 1000)}
+        report = json.loads(execution["output"])
+        if not isinstance(report, dict) or not isinstance(report.get("results"), list) or not isinstance(report.get("errors"), list):
+            raise ValueError("invalid report structure")
+        metrics = report.get("metrics", {}).get("_totals", {})
+        if not isinstance(metrics.get("loc"), (int, float)) or metrics["loc"] <= 0:
+            raise ValueError("no Python lines scanned")
+        findings = []
+        for issue in report["results"]:
+            path = Path(issue["filename"])
+            if not path.is_absolute():
+                path = repo / path
+            relative = path.resolve().relative_to(repo.resolve()).as_posix()
+            line = issue["line_number"]
+            if not isinstance(line, int) or line < 1 or not path.is_file():
+                raise ValueError("invalid finding location")
+            findings.append({"path": relative, "line": line, "rule": issue["test_id"],
+                             "severity": issue["issue_severity"],
+                             "confidence": issue["issue_confidence"],
+                             "message": issue["issue_text"]})
+        completed = execution["exit_code"] in {0, 1} and not report["errors"]
+        result.update(findings=findings, completed=completed, ok=completed,
+                      passed=completed and not findings and execution["exit_code"] == 0,
+                      scan_errors=report["errors"])
+        # Do not forward source snippets embedded in Bandit's raw report.
+        result.pop("output", None)
+        if not completed:
+            result["error"] = "incomplete Bandit scan"
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        result.update(ok=False, completed=False, passed=False,
+                      error=f"invalid Bandit report: {error}")
+        result.pop("output", None)
+    return result
 
 
 def _file_map(root: Path) -> dict[str, Path]:
@@ -269,6 +415,8 @@ def _status(_job: dict) -> dict:
 
 
 ACTIONS = {
+    "catalog": _catalog,
+    "check": _check,
     "create": _create,
     "list": _list,
     "read": _read,
