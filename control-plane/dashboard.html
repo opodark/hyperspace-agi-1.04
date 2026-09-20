@@ -313,6 +313,19 @@ main,.panel,.card{min-width:0}
   <div class="sec-title">Mesh Nodes &#8212; Live</div>
   <div class="row"><button class="btn btn-ghost btn-sm" onclick="refreshNodes()">&#8634; Refresh</button><span style="font-size:.75rem;color:var(--text-muted)" id="nodesCount"></span></div>
   <div class="nodes-grid" id="nodesGrid"><div class="nodes-empty">Loading nodes&#8230;</div></div><details class="inactive-nodes" id="inactiveNodes" hidden><summary id="inactiveNodesLabel">Nodi non raggiungibili</summary><div class="nodes-grid" id="inactiveNodesGrid"></div></details>
+  <div class="card" style="margin-top:14px">
+    <div class="card-title">&#129302; Web node (lavoratore nel browser)</div>
+    <div class="env-note">Un tab del browser che si registra nella mesh e riceve solo task
+      web-safe: <em>summarize</em>, <em>validate_json</em>, <em>moderate</em> e, con un runtime
+      locale caricato, <em>translate</em> ed <em>embed_texts</em>. La pagina si apre a parte
+      (porta del servizio web-node): senza un tab aperto e consenziente non c'&#232; nessun nodo,
+      e qui non compare nulla.</div>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <span class="hint" id="webSummary">Caricamento&#8230;</span>
+      <button class="btn btn-ghost btn-sm" onclick="webLoad()">&#8634; Ricarica stato</button>
+    </div>
+    <div id="webList" style="margin-top:8px"></div>
+  </div>
 </div>
 
 <!-- TOPOLOGY -->
@@ -752,6 +765,7 @@ function showPanel(name,btn){
   document.getElementById('panel-'+name).classList.add('active');
   btn.classList.add('active');
   if(name==='nodes'||name==='diag')refreshNodes();
+  if(name==='nodes')webLoad();
   if(name==='topology')loadTopology();
   if(name==='registry')refreshRegistry();
   if(name==='tasks')refreshTaskHistory();
@@ -764,6 +778,73 @@ function showPanel(name,btn){
     document.getElementById('netAdminToken').value=networkToken();
     refreshNetwork();refreshBottles();
   }
+}
+
+// ── WEB NODE (lavoratore nel browser) ──────────────────────────────────────
+// Un tab del browser che si registra nella mesh e riceve SOLO task web-safe. La
+// pagina vive fuori dal control-plane: qui si mostra quello che il CP sa di lui
+// (nodi registrati, coda, ultimi esiti). Questa rotta esisteva gia' ed era
+// documentata "per la dashboard", ma nessuna UI la leggeva: "non vedo i task del
+// web node" era il sintomo di un pannello mai costruito, non di un nodo muto.
+function webEta(epochS){
+  if(epochS==null)return 'mai';
+  var sec=Math.round(Date.now()/1000-Number(epochS));
+  if(!isFinite(sec)||sec<0)return 'adesso';
+  if(sec<60)return sec+'s fa';
+  if(sec<3600)return Math.round(sec/60)+'m fa';
+  return Math.round(sec/3600)+'h fa';
+}
+async function webLoad(){
+  var sum=document.getElementById('webSummary');
+  var el=document.getElementById('webList');
+  if(!sum||!el)return;
+  var d;
+  try{d=await(await fetch('/web/status')).json();}
+  catch(e){sum.textContent='Errore: '+e;el.innerHTML='';return;}
+  if(!d.enabled){
+    sum.textContent='web node disattivati su questo control-plane';
+    el.innerHTML='';
+    return;
+  }
+  sum.textContent=(d.web_nodes||0)+' nodi browser \u00b7 '+(d.queued||0)+' in coda \u00b7 '
+    +(d.inflight||0)+' in volo \u00b7 battito ogni '+(d.heartbeat_interval_s||0)+'s';
+  var html='';
+  var nodi=d.nodes||[];
+  if(!nodi.length){
+    html+='<div class="env-key" style="display:block;white-space:normal;color:var(--text-faint)">'
+      +'Nessun tab registrato: apri la pagina del web node e accetta. Da quel momento il browser '
+      +'compare qui e riceve i task web-safe ('+(d.web_safe_task_types||[]).join(', ')+').</div>';
+  }
+  nodi.forEach(function(n){
+    var nome=String(n.label||n.node_id||'').slice(0,14);
+    html+='<div style="margin-bottom:7px"><b style="color:var(--success)">&#9679; '+escH(nome)+'</b>'
+      +'<span class="env-key" style="display:inline;margin-left:7px">'+(n.tasks_done||0)+' fatti'
+      +(n.tasks_failed?' \u00b7 '+n.tasks_failed+' falliti':'')+'</span>'
+      +'<div class="env-key" style="display:block;white-space:normal;margin-top:2px">capability: '
+      +escH((n.capabilities||[]).join(', ')||'nessuna')+'</div>'
+      +'<div class="env-key" style="display:block;white-space:normal">ultimo battito: '
+      +webEta(n.last_seen)+' \u00b7 '+(n.browser?escH(String(n.browser).slice(0,40)):'browser non dichiarato')
+      +'</div>';
+    if((n.rejected_capabilities||[]).length){
+      html+='<div class="env-key" style="display:block;white-space:normal;color:var(--warning)">'
+        +'dichiarate ma non web-safe: '+escH(n.rejected_capabilities.join(', '))+'</div>';
+    }
+    html+='</div>';
+  });
+  var esiti=d.recent_results||[];
+  if(esiti.length){
+    html+='<div class="env-key" style="display:block;margin-top:8px">ultimi esiti</div>';
+    esiti.slice().reverse().forEach(function(r){
+      html+='<div class="env-key" style="display:block;white-space:normal">'
+        +'<b style="color:'+(r.ok?'var(--success)':'var(--error)')+'">'+(r.ok?'ok':'ko')+'</b> '
+        +escH(String(r.task_id||''))
+        +' <span style="color:var(--text-faint)">'+escH(String(r.node_id||'').slice(0,10))+'</span>'
+        +(r.duration_ms!=null?' \u00b7 '+(r.duration_ms/1000).toFixed(1)+'s':'')
+        +(r.error?' \u00b7 '+escH(String(r.error).slice(0,80)):'')
+        +' <span style="color:var(--text-faint)">'+webEta(r.completed_at)+'</span></div>';
+    });
+  }
+  el.innerHTML=html;
 }
 
 // ── DEV SANDBOX ───────────────────────────────────────────────────────────
