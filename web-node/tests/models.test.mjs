@@ -11,7 +11,7 @@
 //   node web-node/tests/models.test.mjs
 import assert from "node:assert/strict";
 
-import { buildCatalog, nodeLabel, splitModelId } from "../src/models.js";
+import { buildCatalog, nodeLabel, selectableModelOptions, splitModelId } from "../src/models.js";
 
 let passed = 0;
 function check(label, fn) {
@@ -137,6 +137,18 @@ check("input malformato non fa esplodere la pagina", () => {
   const { groups, counts } = buildCatalog([{ id: `${MESH} qwen3:8b`, owned_by: "hyperspace-agi" }, null]);
   assert.equal(counts.entries, 1);
   assert.equal(groups[0].genericId, `${MESH} qwen3:8b`);
+});
+
+check("ogni modello e' una option selezionabile anche nel picker mobile", () => {
+  const catalog = buildCatalog(REAL);
+  const options = selectableModelOptions(catalog);
+  const uncensored = "hf.co/Abiray/Qwen3.5-9B-abliterated-GGUF:Q6_K";
+  const matching = options.filter((entry) => entry.model === uncensored);
+  assert.equal(matching.length, 2); // automatico + pin Windows
+  assert.ok(matching.every((entry) => entry.label.includes(uncensored)));
+  assert.ok(matching.some((entry) => entry.route === "auto"));
+  assert.ok(matching.some((entry) => entry.route === "pinned" && entry.label.includes("fc6c821b")));
+  assert.equal(options.length, 17); // nessuna voce del CP diventa una testata non cliccabile
 });
 
 console.log(`\nPASS modelli: ${passed} check su raggruppamento, etichette e dedupe`);

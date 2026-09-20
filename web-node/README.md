@@ -57,14 +57,15 @@ Verificato anche contro un control-plane vivo: `listModels()` legge le voci del 
 invio **pinnato** su una macchina precisa (`qwen3.5:4b::win11`) e' stato servito
 da quella macchina. Test: `npm test` (26 + 22 + 9 check).
 
-**La tendina e' raggruppata** (`src/models.js`): il CP pubblica lo stesso modello
+**La tendina conserva modello e destinazione in ogni voce** (`src/models.js`): il CP pubblica lo stesso modello
 una volta per OGNI nodo che ce l'ha (`modello::ref`), piu' la voce senza suffisso
 del routing automatico — sulla mesh reale 17 voci per 8 modelli su 2 macchine.
-Appiattite in un `<select>` sembrano doppioni senza significato; raggruppate
-dicono su quale macchina sta ogni modello e permettono di **pinnare** una
-macchina. Il raggruppamento e' una funzione pura con i suoi test
-(`tests/models.test.mjs`, su voci reali di `/v1/models`); il disegno con
-`<optgroup>` resta in `index.html`. Il `ref` e' l'alias del nodo se impostato
+La catalogazione elimina i doppioni e associa ogni id alla macchina. La UI
+genera poi vere `<option>` con etichette `modello · automatico` e
+`modello · pin: macchina`: Chrome Android mostra così il controllo di selezione
+anche sui nomi lunghi, invece di renderli come intestazioni `<optgroup>` senza
+pallino. Catalogo e option sono funzioni pure coperte da test su voci reali di
+`/v1/models`. Il `ref` e' l'alias del nodo se impostato
 (`POST /nodes/<id>/alias`), altrimenti i primi 8 caratteri del `node_id`.
 
 **Il limite da conoscere**: da una pagina in **HTTPS** il browser blocca una
@@ -246,4 +247,3 @@ un giorno servisse davvero un accesso dall'esterno, la strada e' un proxy con
 whitelist di **due rotte** piu' un token per utente che la pagina chiede e
 conserva in `localStorage` — *non* l'esposizione della porta del CP, che
 pubblica anche `/logs` e `/federation/peers` senza autenticazione.
-

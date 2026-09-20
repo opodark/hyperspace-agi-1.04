@@ -31,6 +31,7 @@
   select, textarea { width: 100%; padding: 8px 10px; background: #0b0d12; border: 1px solid #2b3040;
         border-radius: 6px; color: inherit; box-sizing: border-box; font: inherit; }
   select { width: auto; }
+  select.model-select { flex: 1 1 360px; min-width: 0; max-width: 100%; }
   textarea { resize: vertical; margin-top: 4px; }
   .chat { background: #0b0d12; border: 1px solid #232733; border-radius: 8px; padding: 12px;
           min-height: 110px; max-height: 380px; overflow: auto; margin: 12px 0; }
@@ -99,7 +100,7 @@
       separata dal nodo: non passa di qui il lavoro che questo tab riceve.</p>
     <div class="row">
       <label for="model" style="margin:0">Modello</label>
-      <select id="model"></select>
+      <select id="model" class="model-select" aria-label="Modello e destinazione"></select>
       <button id="loadModels">Carica modelli</button>
       <span class="warn" id="chatNote"></span>
     </div>
@@ -111,9 +112,9 @@
       <button id="clearChat">Pulisci</button>
       <span class="warn" id="chatStatus"></span>
     </div>
-    <p>La tendina e' raggruppata per modello, e ogni gruppo dice su quali
-      macchine quel modello esiste: <em>Automatico</em> lascia scegliere al CP
-      fra i nodi che ce l'hanno, <em>pin: macchina</em> forza quella macchina.
+    <p>Ogni riga della tendina contiene il modello e la destinazione:
+      <em>automatico</em> lascia scegliere al CP fra i nodi che ce l'hanno,
+      <em>pin: macchina</em> forza quella macchina.
       Dietro le quinte il suffisso <code>::</code> e' il pin: se la macchina
       pinnata non e' disponibile il CP torna da solo allo scoring automatico,
       invece di far fallire la richiesta.</p>
@@ -126,7 +127,7 @@
 <script type="module">
   import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
   import { ChatClient, ChatError } from "./src/chat.js";
-  import { buildCatalog } from "./src/models.js";
+  import { buildCatalog, selectableModelOptions } from "./src/models.js";
 
   const $ = (id) => document.getElementById(id);
   const log = (message) => {
@@ -160,11 +161,9 @@
     return new ChatClient({ baseUrl, model: $("model").value });
   };
 
-  // La tendina raggruppata per modello. Senza raggruppare, le stesse voci
-  // sembrano doppioni senza senso: il CP pubblica un id per OGNI nodo che ha
-  // quel modello, piu' l'id senza suffisso del routing automatico. Il
-  // raggruppamento e le etichette stanno in src/models.js (testato); qui c'e'
-  // solo il disegno.
+  // Ogni option ripete modello e destinazione. I picker mobili rendono le
+  // intestazioni optgroup senza pallino, facendo sembrare il modello
+  // disabilitato: qui si disegnano soltanto vere option selezionabili.
   const option = (value, text) => {
     const el = document.createElement("option");
     el.value = value;
@@ -172,35 +171,16 @@
     return el;
   };
 
-  const modelOptions = (catalog) => {
-    const out = [];
-    for (const group of catalog.groups) {
-      const optgroup = document.createElement("optgroup");
-      const machines = group.nodes.map((n) => n.label).join(", ");
-      optgroup.label = machines ? `${group.base}  ·  ${machines}` : group.base;
-      if (group.genericId) optgroup.append(option(group.genericId, "Automatico (sceglie il CP)"));
-      for (const machine of group.nodes) {
-        const tier = machine.tier ? ` · ${machine.tier}` : "";
-        optgroup.append(option(machine.id, `pin: ${machine.label}${tier}`));
-      }
-      out.push(optgroup);
-    }
-    if (catalog.external.length) {
-      const optgroup = document.createElement("optgroup");
-      optgroup.label = "🌐 fuori dalla mesh";
-      for (const entry of catalog.external) optgroup.append(option(entry.id, "OmniRoute (provider esterni)"));
-      out.push(optgroup);
-    }
-    return out;
-  };
-
   const loadModels = async () => {
     $("chatNote").textContent = "carico...";
     try {
       const catalog = buildCatalog(await chatClient().listModels());
-      $("model").replaceChildren(...modelOptions(catalog));
+      const entries = selectableModelOptions(catalog);
+      const previous = $("model").value;
+      $("model").replaceChildren(...entries.map((entry) => option(entry.value, entry.label)));
+      if (entries.some((entry) => entry.value === previous)) $("model").value = previous;
       const { models, pinned, machines, external } = catalog.counts;
-      $("send").disabled = !(models || external);
+      $("send").disabled = !entries.length;
       $("chatNote").textContent = `${models} modelli su ${machines} macchine`
         + (pinned ? ` · ${pinned} pin diretti` : "")
         + (external ? ` · ${external} esterno` : "");
@@ -325,4 +305,3 @@
 </script>
 </body>
 </html>
-
