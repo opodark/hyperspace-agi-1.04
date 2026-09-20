@@ -25,10 +25,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Dipendenze
-        # Verificato in locale su venv pulito: con esattamente queste cinque la
-        # suite passa. fastapi/pydantic/uvicorn NON servono ai test — sono nel
-        # codice di produzione, non nella suite.
-        run: pip install flask flask-cors requests cryptography httpx
+        # Include gli eseguibili dei preset: i test devono provarli davvero.
+        run: pip install flask flask-cors requests cryptography httpx pytest bandit==1.8.6
       - name: Suite Python
         run: PYTHONPATH=. python -m unittest discover -s tests -p 'test_*.py'
 

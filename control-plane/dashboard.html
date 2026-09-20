@@ -582,6 +582,7 @@ main,.panel,.card{min-width:0}
     <div class="card">
       <div class="row" style="justify-content:space-between"><div class="card-title">Registry locale</div><button class="btn btn-ghost btn-sm" onclick="forgeLoad()">&#8634; Refresh</button></div>
       <label class="fg">Token approvazione<input id="forgeToken" type="password" class="inp" autocomplete="off" placeholder="FORGE_ADMIN_TOKEN"/></label>
+      <button class="btn btn-ghost btn-sm" onclick="forgeImportEcc()">Importa skill ECC come draft</button>
       <div id="forgeList" class="forge-list"><div class="hint">Caricamento...</div></div>
     </div>
   </div>
@@ -702,14 +703,24 @@ async function forgeLoad(){
       var v=item.validation||{},notes=(v.issues||[]).concat(v.warnings||[]);
       return '<div class="forge-item"><div class="forge-item-head"><b>'+forgeEsc(item.name)+'</b><span class="forge-badge '+forgeEsc(item.status)+'">'+forgeEsc(item.status)+'</span></div>'
         +'<div class="forge-meta">'+forgeEsc(item.type)+' · v'+forgeEsc(item.version)+' · '+forgeEsc(item.generator)+'</div>'
+        +'<div class="forge-meta">ID: '+forgeEsc(item.id)+(item.provenance?' · ECC '+forgeEsc(item.provenance.commit)+' · '+forgeEsc(item.provenance.license):'')+'</div>'
         +'<div class="forge-validation">'+(v.valid?'VALIDO':'NON VALIDO')+(notes.length?'\n'+forgeEsc(notes.join('\n')):'')+'</div>'
-        +'<div class="row" style="margin-top:8px;gap:6px"><button class="btn btn-ghost btn-sm" onclick="forgeEdit('+JSON.stringify(item.id)+')">Apri</button>'
-        +'<button class="btn btn-warn btn-sm" onclick="forgeState('+JSON.stringify(item.id)+',\'review\')">Review</button>'
-        +'<button class="btn btn-success btn-sm" onclick="forgeState('+JSON.stringify(item.id)+',\'approved\')">Approva</button>'
-        +'<button class="btn btn-danger btn-sm" onclick="forgeState('+JSON.stringify(item.id)+',\'disabled\')">Disabilita</button></div></div>';
+        +'<div class="row" style="margin-top:8px;gap:6px"><button class="btn btn-ghost btn-sm" onclick="forgeEdit('+forgeEsc(JSON.stringify(item.id))+')">Apri</button>'
+        +'<button class="btn btn-warn btn-sm" onclick="forgeState('+forgeEsc(JSON.stringify(item.id))+',\'review\')">Review</button>'
+        +'<button class="btn btn-success btn-sm" onclick="forgeState('+forgeEsc(JSON.stringify(item.id))+',\'approved\')">Approva</button>'
+        +'<button class="btn btn-danger btn-sm" onclick="forgeState('+forgeEsc(JSON.stringify(item.id))+',\'disabled\')">Disabilita</button></div></div>';
     }).join('');
     window.forgeArtifacts=items;
   }catch(error){host.innerHTML='<div class="forge-validation">Errore: '+forgeEsc(error.message)+'</div>';}
+}
+async function forgeImportEcc(){
+  var headers={'Content-Type':'application/json'},token=document.getElementById('forgeToken').value;
+  if(token)headers['X-Hyperspace-Forge-Token']=token;
+  try{
+    var result=await forgeRequest('/forge/import/ecc',{method:'POST',headers:headers,body:'{}'});
+    document.getElementById('forgeOutput').textContent='ECC: '+result.artifacts.filter(function(item){return item.created;}).length+' nuovi draft. Apri il sorgente per la revisione.';
+    await forgeLoad();
+  }catch(error){document.getElementById('forgeOutput').textContent='ECC: '+error.message;}
 }
 function forgeEdit(id){
   var item=(window.forgeArtifacts||[]).find(function(x){return x.id===id;});if(!item)return;
