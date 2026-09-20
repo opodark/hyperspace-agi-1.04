@@ -17,6 +17,7 @@ Se node non c'e', il test 1 si salta invece di fallire: la suite Python non deve
 dipendere da node per tutto il resto.
 """
 import ast
+import __future__
 import json
 import re
 import shutil
@@ -141,7 +142,15 @@ class BridgeFieldTests(unittest.TestCase):
                    if isinstance(n, ast.FunctionDef) and n.name == "_log_field"), None)
         self.assertIsNotNone(fn, "_log_field non c'e' piu' in infra-ui/server.py")
         scope: dict = {}
-        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bridge", "exec"), scope)
+        # Il modulo da cui la funzione e' estratta ha `from __future__ import
+        # annotations`: senza lo stesso flag l'annotazione `dict[str, Any]`
+        # verrebbe valutata subito e su 3.11/3.12 (le versioni dei container)
+        # servirebbe importare `Any` nel namespace. Su 3.14 non serve — le
+        # annotazioni sono pigre — ed e' per questo che in locale il test
+        # passava e in CI no. Cosi' si prova la funzione com'e' davvero
+        # compilata in produzione, su qualunque versione.
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bridge", "exec",
+                     flags=__future__.annotations.compiler_flag, dont_inherit=True), scope)
         campo = scope["_log_field"]
 
         riga_db = {"source": "macbook", "trace_id": "abc", "log_id": "f7a4"}
