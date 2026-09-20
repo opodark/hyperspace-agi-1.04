@@ -631,6 +631,16 @@ print(f"[CP] Federation identity: {CP_ID[:20]}... (federation={'ON' if FEDERATIO
 # Ognuno si auto-abilita solo se le sue env var/credenziali sono presenti
 # (BaseConnector.enabled -> is_available()); quelli senza credenziali non
 # finiscono nel tool loop. I loro tool vengono aggiunti a BUILTIN_TOOLS piu' sotto.
+#
+# L'osservabilità si inietta da qui: i connettori restano importabili senza il
+# control-plane e non conoscono push_log, ma un loro errore in esecuzione deve
+# finire nei log (type=system) invece di sparire nel messaggio di ritorno.
+def _connector_event(kind: str, summary: str, detail: str = "") -> None:
+    push_log('system', summary, detail, status='warn' if kind == 'error' else 'info')
+
+
+connector_manager = ConnectorManager(on_event=_connector_event)
+
 # ── IDENTITÀ DICHIARATA DELL'AGENTE (shared/persona.py) ──────────────────────
 # Chi è l'agente, cosa non fa, e quando DEVE dire di essere un'IA. Il documento
 # vive sotto DATA_DIR (volume), quindi l'identità sopravvive ai riavvii; le
@@ -2084,6 +2094,34 @@ BUILTIN_TOOLS = _NATIVE_TOOLS + connector_manager.get_all_tools()
 CODE_SANDBOX_TOOL = next(tool for tool in BUILTIN_TOOLS
                          if tool.get("function", {}).get("name") == "code_sandbox")
 
+
+def _sync_connector_tools() -> None:
+    """Riallinea i tool dei connettori dentro BUILTIN_TOOLS (in place).
+
+    Da chiamare dopo connector_manager.reload(): un connettore appena
+    configurato deve comparire SUBITO nel tool loop chat, nel catalogo MCP e in
+    /tools/execute, e uno spento (CONNECTOR_<NAME>_ENABLED=false) deve sparire
+    dall'esposizione, non solo dall'esecuzione.
+    """
+    BUILTIN_TOOLS[:] = _NATIVE_TOOLS + connector_manager.get_all_tools()
+
+
+def _reload_connectors(changed_keys) -> None:
+    """Ricostruisce i connettori dopo un cambio di credenziali (POST /config/env).
+
+    Fallisce in modo rumoroso ma non fatale: se il reload esplode, il catalogo
+    resta quello di prima e la ragione finisce nel log — meglio di un
+    salvataggio che sembra riuscito senza aver cambiato il catalogo.
+    """
+    try:
+        connector_manager.reload()
+        _sync_connector_tools()
+        push_log('system', 'Connettori ricaricati',
+                 detail="chiavi: " + ", ".join(changed_keys), status='success')
+    except Exception as e:
+        push_log('system', 'Reload connettori fallito', str(e), status='warn')
+
+
 # ── TOOL DISPATCHER ───────────────────────────────────────────────────────────
 def _execute_tool_call(tool_name: str, tool_args) -> str:
     if isinstance(tool_args, str):
@@ -2120,7 +2158,19 @@ def tools_execute():
     chat completion. Riusa _execute_tool_call (stessi handler nativi +
     connector_manager del percorso di tool-calling del modello) cosi'
     un chiamante esterno — es. un Tool custom di Open WebUI — puo' invocare
-    o365_read_emails, web_search, ecc. come singola azione."""
+    o365_read_emails, web_search, ecc. come singola azione.
+
+    AUTENTICAZIONE: qui si esegue TUTTI i tool pubblicati, connettori compresi,
+    e la chiamata non passa dal tool loop interno (che è autenticato come la
+    chat da cui nasce). Senza un gate, chiunque raggiunga la porta del
+    control-plane potrebbe inviare email a nome dell'organizzazione: si riusa
+    lo stesso token delle route amministrative di rete
+    (X-Hyperspace-Network-Token = NETWORK_ADMIN_TOKEN), così c'è una sola
+    credenziale da gestire e una sola soglia (>= 32 caratteri) da rispettare.
+    I tool di scrittura restano comunque subordinati a ConnectorPolicy."""
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
     data      = request.get_json(force=True, silent=True) or {}
     tool_name = data.get("tool_name", "")
     tool_args = data.get("args", {}) or {}
@@ -2128,6 +2178,22 @@ def tools_execute():
         return jsonify({"error": "missing tool_name"}), 400
     result = _execute_tool_call(tool_name, tool_args)
     return jsonify({"result": result})
+
+
+@app.route('/connectors')
+def connectors_status():
+    """Diagnostica dei connettori: chi è attivo, con quali tool, e PERCHÉ gli
+    altri sono spenti.
+
+    Un connettore senza credenziali non compare nel tool loop in silenzio:
+    l'unico indizio era il log di boot. Qui l'operatore (o la tab Setup della
+    dashboard) vede nome, tool pubblicati e motivo dello spegnimento — inclusi
+    i nomi delle env var mancanti. Mai i loro valori: stessa regola di
+    /mcp/status e McpAuthPolicy.describe().
+    """
+    payload = connector_manager.describe()
+    payload["ok"] = True
+    return jsonify(payload)
 
 
 @app.route('/persona')
@@ -4736,6 +4802,69 @@ _ENV_META = [
      "label": "Fallback nativo /api/chat (override)",
      "hint": "Modelli per cui il fallback Ollama-diretto usa il percorso nativo /api/chat invece dell'OpenAI-compatibile. Vuoto = pattern automatici (qwen3). '*' = tutti. Aggiungi qui i distillati reasoning in arrivo (es. qwen3.8-..., deepseek4.1-...), separati da virgole, senza toccare il codice.",
      "default": ""},
+
+    # ── Connettori esterni (GitHub, Microsoft 365, Google Workspace) ─────────
+    # I loro tool compaiono nel catalogo (tool loop chat, MCP, /tools/execute)
+    # SOLO quando le credenziali esistono: senza credenziali il connettore è
+    # spento e invisibile, non un errore. Stato e motivo dello spegnimento:
+    # GET /connectors o il pannello "Connettori" della tab Setup.
+    # I segreti sono type=password: in lettura restano mascherati e non vengono
+    # riscritti se il campo è lasciato a '***'. Guida: docs/connectors.md.
+    {"section": "Connettori", "key": "GITHUB_TOKEN", "type": "password",
+     "label": "GitHub token",
+     "hint": "Personal Access Token (o token di GitHub App) con scope 'repo' per issues e PR in lettura/scrittura (github.com/settings/tokens). Senza token il connettore github resta spento e i suoi 5 tool non vengono pubblicati.",
+     "default": ""},
+    {"section": "Connettori", "key": "CONNECTOR_GITHUB_ENABLED", "type": "bool",
+     "label": "GitHub abilitato",
+     "hint": "false spegne il connettore anche se il token è presente: i suoi tool spariscono dall'esposizione (tool loop, MCP) e da /tools/execute. Lo spegnimento è esplicito e leggibile in /connectors, non silenzioso.",
+     "default": "true"},
+    {"section": "Connettori", "key": "MS_CLIENT_ID", "type": "str",
+     "label": "Microsoft 365 client ID",
+     "hint": "Application (client) ID dell'app registrata in Entra ID → App registrations. Deve essere un'app daemon (nessun redirect URI) con permessi APPLICATION di Microsoft Graph: Mail.Read, Mail.Send, Calendars.ReadWrite, Files.ReadWrite.All.",
+     "default": ""},
+    {"section": "Connettori", "key": "MS_CLIENT_SECRET", "type": "password",
+     "label": "Microsoft 365 client secret",
+     "hint": "Secret dell'app (Certificates & secrets → new client secret). Scade: se il connettore smette di funzionare da un giorno all'altro, il primo sospetto è un secret scaduto.",
+     "default": ""},
+    {"section": "Connettori", "key": "MS_TENANT_ID", "type": "str",
+     "label": "Microsoft 365 tenant ID",
+     "hint": "Tenant ID (Directory ID) dell'organizzazione. 'common' va bene solo per un'app multi-tenant; con un tenant singolo meglio l'ID esplicito.",
+     "default": "common"},
+    {"section": "Connettori", "key": "CONNECTOR_OFFICE365_ENABLED", "type": "bool",
+     "label": "Microsoft 365 abilitato",
+     "hint": "false spegne il connettore office365 anche con le credenziali presenti.",
+     "default": "true"},
+    {"section": "Connettori", "key": "GOOGLE_CREDENTIALS_JSON", "type": "password",
+     "label": "Google service account JSON",
+     "hint": "Contenuto del JSON del service account su UNA riga (GCP → IAM & Admin → Service Accounts → Keys → Add key → JSON), con Gmail, Calendar e Drive API abilitate. In lettura è mascherato: per modificarlo va incollato tutto il JSON.",
+     "default": ""},
+    {"section": "Connettori", "key": "GOOGLE_DELEGATE_EMAIL", "type": "str",
+     "label": "Google utente impersonato",
+     "hint": "Email dell'utente da impersonare (domain-wide delegation). Serve se il service account non ha accesso diretto a Gmail/Calendar/Drive: senza, il connettore parla a nome del service account, che di norma non ha una mailbox.",
+     "default": ""},
+    {"section": "Connettori", "key": "CONNECTOR_GOOGLE_ENABLED", "type": "bool",
+     "label": "Google Workspace abilitato",
+     "hint": "false spegne il connettore google anche con le credenziali presenti.",
+     "default": "true"},
+    # ── Policy read/write (shared/connector_policy.py) ───────────────────────
+    {"section": "Connettori", "key": "CONNECTOR_READ_ONLY", "type": "bool",
+     "label": "Connettori in sola lettura",
+     "hint": "true (default): i tool di SCRITTURA (inviare email, creare issue ed eventi) non vengono nemmeno esposti al modello, a MCP o a /tools/execute. Per abilitarli servono ANCHE le voci in 'Tool di scrittura abilitati': il default resta fail-closed.",
+     "default": "true"},
+    {"section": "Connettori", "key": "CONNECTOR_WRITE_TOOLS", "type": "str",
+     "label": "Tool di scrittura abilitati",
+     "hint": "Allowlist opt-in per connettore, es. \"github=github_create_issue;o365=*\" (stessa sintassi di MCP_CLIENT_TOOLS; '*' = tutti i tool di scrittura di quel connettore). Vuoto = nessuna scrittura. Ha effetto solo con 'Connettori in sola lettura' = false.",
+     "default": ""},
+    # ── Circuit breaker (ConnectorManager) ───────────────────────────────────
+    {"section": "Connettori", "key": "CONNECTOR_FAILURE_THRESHOLD", "type": "int",
+     "label": "Errori consecutivi prima della pausa",
+     "hint": "Dopo questo numero di errori consecutivi il connettore va in pausa: le chiamate successive rispondono subito invece di pagare il timeout a ogni richiesta del modello. Un solo successo azzera il contatore.",
+     "default": "3"},
+    {"section": "Connettori", "key": "CONNECTOR_COOLDOWN_S", "type": "int",
+     "label": "Durata della pausa (s)",
+     "hint": "Secondi di pausa oltre la soglia; scaduti, il connettore viene ritentato. Salvare questa sezione ricostruisce i connettori e azzera anche lo stato del breaker (è il modo per togliere subito una pausa).",
+     "default": "60"},
+
     # ── Persona: identità dichiarata dell'agente (shared/persona.py) ─────────
     # Chi è l'agente, cosa non fa, e quando DEVE dire di essere un'IA. Il blocco
     # viene iniettato nel system prompt delle richieste di chat; stato completo e
@@ -4825,6 +4954,13 @@ _ENV_META = [
      "hint": "Strike a cui il control-plane chiede al driver di espellere l'autore. Gli strike decadono da soli dopo 30 minuti senza nuove violazioni.",
      "default": "3"},
 ]
+
+# Chiavi della sezione "Connettori": cambiarle cambia il CATALOGO dei tool, non
+# solo un parametro. Dopo averle salvate il ConnectorManager va ricostruito (i
+# connettori leggono l'env nel proprio __init__) e BUILTIN_TOOLS riallineato,
+# altrimenti la modifica vale solo al prossimo riavvio del container.
+_CONNECTOR_ENV_SECTION = "Connettori"
+_CONNECTOR_ENV_KEYS = {m["key"] for m in _ENV_META if m["section"] == _CONNECTOR_ENV_SECTION}
 
 # Chiavi della sezione "Persona": cambiarle non tocca i connettori, ma richiede
 # di rileggere il documento di identità (nome, file, annotazioni) e di rivedere
@@ -5108,6 +5244,11 @@ def set_config_env():
                 continue
             _apply_env_runtime(meta, cv)
             applied[key] = _env_str(meta, cv)
+    # Un cambio di credenziali cambia il CATALOGO dei tool (non solo un
+    # parametro): connettori ricostruiti subito, così la tab Setup e il modello
+    # vedono i nuovi tool senza riavviare il container.
+    if _CONNECTOR_ENV_KEYS & set(applied):
+        _reload_connectors(sorted(_CONNECTOR_ENV_KEYS & set(applied)))
     # Stessa logica per l'identità: nome o file cambiati = documento da rileggere.
     if _PERSONA_ENV_KEYS & set(applied):
         _reload_persona()

@@ -17,18 +17,38 @@ API abilitate nel progetto GCP:
 from __future__ import annotations
 import os
 import json
+import threading
 from .base import BaseConnector
+
+# Cache dei servizi per (api, versione, utente impersonato, credenziali).
+# Costruire il servizio significa risolvere il discovery document e negoziare le
+# credenziali: farlo a ogni chiamata era il costo dominante di una singola
+# lettura email. La fingerprint del JSON è nella chiave perché se il service
+# account cambia (tab Setup) va costruito un client NUOVO, non riusato.
+_SERVICE_CACHE: dict = {}
+_SERVICE_LOCK = threading.Lock()
+
+
+def _service_cache_key(api: str, version: str) -> tuple:
+    """Chiave di cache: cambia se cambiano credenziali o utente impersonato."""
+    return (api, version,
+            os.getenv("GOOGLE_DELEGATE_EMAIL", "").strip(),
+            hash(os.getenv("GOOGLE_CREDENTIALS_JSON", "")))
 
 
 def _build_service(api: str, version: str):
-    """Crea un servizio Google API autenticato via service account."""
-    import google.auth
+    """Crea (o riusa) un servizio Google API autenticato via service account."""
+    key = _service_cache_key(api, version)
+    with _SERVICE_LOCK:
+        cached = _SERVICE_CACHE.get(key)
+        if cached is not None:
+            return cached
+
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
-    creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
-    info       = json.loads(creds_json)
-    delegate   = os.getenv("GOOGLE_DELEGATE_EMAIL", "")
+    info     = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+    delegate = os.getenv("GOOGLE_DELEGATE_EMAIL", "").strip()
 
     scopes = {
         "gmail":    ["https://www.googleapis.com/auth/gmail.readonly",
@@ -44,14 +64,39 @@ def _build_service(api: str, version: str):
     if delegate:
         credentials = credentials.with_subject(delegate)
 
-    return build(api, version, credentials=credentials, cache_discovery=False)
+    # Senza un timeout esplicito una singola chiamata può restare appesa finché
+    # non scade il socket: la richiesta HTTP del tool loop non ha un limite suo.
+    http = None
+    try:
+        import httplib2
+        from google_auth_httplib2 import AuthorizedHttp
+        http = AuthorizedHttp(credentials,
+                              http=httplib2.Http(timeout=float(os.getenv("GOOGLE_TIMEOUT_S", "20"))))
+    except ImportError:
+        # Librerie per l'HTTP con timeout assenti: meglio un connettore senza
+        # timeout che un connettore che non esiste.
+        http = None
+
+    service = (build(api, version, http=http, cache_discovery=False)
+               if http is not None else
+               build(api, version, credentials=credentials, cache_discovery=False))
+    with _SERVICE_LOCK:
+        _SERVICE_CACHE[key] = service
+    return service
 
 
 class GoogleWorkspaceConnector(BaseConnector):
     name = "google"
 
-    def is_available(self) -> bool:
-        return bool(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+    # Senza il JSON del service account non c'è nulla da autenticare: il
+    # connettore resta spento e i suoi tool non vengono pubblicati.
+    REQUIRED_ENV = ("GOOGLE_CREDENTIALS_JSON",)
+
+    # I tool di scrittura non sono esposti di default (fail-closed): vedi
+    # CONNECTOR_WRITE_TOOLS in shared/connector_policy.py.
+    READ_TOOLS = ("google_read_emails", "google_list_events",
+                  "google_list_drive_files", "google_search_drive")
+    WRITE_TOOLS = ("google_send_email", "google_create_event")
 
     def get_tools(self) -> list[dict]:
         return [

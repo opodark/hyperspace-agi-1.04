@@ -16,6 +16,16 @@ version: 0.1.0
 # quando e' il modello a decidere di chiamare questi tool durante una chat.
 # Richiede MS_CLIENT_ID/MS_CLIENT_SECRET impostati nel .env del control-plane,
 # altrimenti il connettore risponde "non disponibile" (vedi is_available()).
+#
+# DUE cose da configurare in questo tool (Valves):
+#   1. network_token = NETWORK_ADMIN_TOKEN del control-plane. /tools/execute
+#      esegue qualunque tool pubblicato, quindi sta dietro lo stesso gate delle
+#      azioni di rete (header X-Hyperspace-Network-Token). Senza: 503 se il
+#      control-plane non ha il token, 401 se non combacia.
+#   2. I tool di SCRITTURA (invia_email, crea_evento) sono bloccati di default
+#      dalla policy read-only del control-plane: per usarli servono
+#      CONNECTOR_READ_ONLY=false e CONNECTOR_WRITE_TOOLS="office365=*" (o i soli
+#      nomi dei tool). Vedi docs/connectors.md.
 
 import requests
 from pydantic import BaseModel, Field
@@ -31,17 +41,31 @@ class Tools:
             default=30,
             description="Timeout in secondi per le chiamate al control-plane.",
         )
+        network_token: str = Field(
+            default="",
+            description="NETWORK_ADMIN_TOKEN del control-plane (header X-Hyperspace-Network-Token). Obbligatorio: /tools/execute e' protetto dallo stesso gate delle azioni di rete.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
+
+    def _headers(self) -> dict:
+        token = (self.valves.network_token or "").strip()
+        return {"X-Hyperspace-Network-Token": token} if token else {}
 
     def _call(self, tool_name: str, **args) -> str:
         try:
             r = requests.post(
                 f"{self.valves.control_plane_url.rstrip('/')}/tools/execute",
                 json={"tool_name": tool_name, "args": args},
+                headers=self._headers(),
                 timeout=self.valves.timeout_s,
             )
+            if r.status_code in (401, 503):
+                return ("Control-plane: /tools/execute non autorizzato "
+                        f"(HTTP {r.status_code}). Compila il campo 'network_token' di questo "
+                        "tool con lo stesso NETWORK_ADMIN_TOKEN del .env del control-plane "
+                        "(almeno 32 caratteri).")
             r.raise_for_status()
             return r.json().get("result", "") or "(nessun risultato)"
         except Exception as e:

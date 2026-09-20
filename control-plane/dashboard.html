@@ -594,6 +594,14 @@ main{padding:18px 20px;display:grid}
       <button class="btn btn-primary" onclick="saveEnv()">&#128190; Applica e salva .env</button>
     </div>
   </div>
+  <div class="card"><div class="card-title">&#128268; Connettori</div>
+    <div class="env-note">Tool enterprise (GitHub, Microsoft 365, Google Workspace) pubblicati verso il modello, MCP e /tools/execute. Un connettore senza credenziali resta <b>spento</b>: i suoi tool non vengono nemmeno elencati, e qui sotto se ne legge il motivo. I tool di <b>scrittura</b> (inviare email, creare issue ed eventi) sono bloccati di default: restano fuori dal catalogo finché non si abilitano in "Control-Plane Env" &rarr; sezione "Connettori".</div>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <span class="hint" id="connSummary">Caricamento&hellip;</span>
+      <button class="btn btn-ghost btn-sm" onclick="loadConnectors()">&#8634; Ricarica stato</button>
+    </div>
+    <div id="connList" style="margin-top:8px"></div>
+  </div>
   <div class="card">
     <div class="legacy-toggle" onclick="toggleLegacy()">
       <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,1 9,5 2,9"/></svg>
@@ -651,7 +659,7 @@ function showPanel(name,btn){
   if(name==='logs')refreshLogs();
   if(name==='metrics')refreshMetrics();
   if(name==='forge')forgeLoad();
-  if(name==='setup'){loadCfg();loadEnv();}
+  if(name==='setup'){loadCfg();loadEnv();loadConnectors();}
   if(name==='network'){
     document.getElementById('netAdminToken').value=networkToken();
     refreshNetwork();refreshBottles();
@@ -1805,6 +1813,45 @@ async function loadEnv(){
   });
   el.innerHTML=html;
 }
+// Connettori: chi e' attivo, con quali tool, e PERCHE' gli altri sono spenti.
+// Un connettore senza credenziali tace per scelta: senza questo pannello
+// l'unico indizio era il log di boot (e il fatto che i tool non comparissero).
+async function loadConnectors(){
+  var sum=document.getElementById('connSummary');
+  var el=document.getElementById('connList');
+  if(!sum||!el)return;
+  var d;
+  try{d=await(await fetch('/connectors')).json();}
+  catch(e){sum.textContent='Errore: '+e;el.innerHTML='';return;}
+  var act=d.connectors||[],dis=d.disabled||[],pol=d.policy||{};
+  sum.textContent=act.length+' attivi, '+dis.length+' spenti — '+(d.tool_count||0)+' tool esposti — '
+    +(pol.read_only?'sola lettura':'scrittura secondo allowlist');
+  var html='';
+  act.forEach(function(c){
+    html+='<div style="margin-bottom:7px"><b style="color:var(--success)">&#9679; '+escH(c.name)+'</b>'
+        +'<span class="env-key" style="display:inline;margin-left:7px">'+c.tools.length+' tool</span>'
+        +'<div class="env-key" style="display:block;white-space:normal;margin-top:2px">lettura: '+c.read_tools.map(escH).join(', ')+'</div>';
+    if(c.cooldown_remaining_s>0){
+      html+='<div class="env-key" style="display:block;white-space:normal;color:var(--error)">in pausa (circuit breaker): '+escH(c.failures)+' errori consecutivi, riprova fra '+Math.ceil(c.cooldown_remaining_s)+'s</div>';
+    }
+    if((c.write_tools_exposed||[]).length){
+      html+='<div class="env-key" style="display:block;white-space:normal;color:var(--warning)">scrittura ATTIVA: '+c.write_tools_exposed.map(escH).join(', ')+'</div>';
+    }
+    if((c.write_tools_blocked||[]).length){
+      html+='<div class="env-key" style="display:block;white-space:normal">scrittura bloccata: '+c.write_tools_blocked.map(escH).join(', ')+'</div>';
+    }
+    html+='</div>';
+  });
+  dis.forEach(function(c){
+    html+='<div style="margin-bottom:7px"><b style="color:var(--text-faint)">&#9675; '+escH(c.name)+'</b>'
+        +'<span class="env-key" style="display:inline;margin-left:7px">spento</span>'
+        +'<div class="env-key" style="display:block;white-space:normal;margin-top:2px">'+escH(c.reason||'')+'</div></div>';
+  });
+  if((d.problems||[]).length){
+    html+='<div class="env-banner err" style="margin:8px 0 0">Problemi: '+d.problems.map(escH).join('; ')+'</div>';
+  }
+  el.innerHTML=html||'<span class="hint">Nessun connettore rilevato.</span>';
+}
 async function saveEnv(){
   if(!CP_ENV){loadEnv();return;}
   var updates={};
@@ -1818,6 +1865,7 @@ async function saveEnv(){
   if(d.ok){
     showMsg('Env aggiornato ('+d.applied.length+' variabili)'+(d.persisted===false?' — .env NON scritto, valido solo fino a riavvio':''));
     loadEnv();
+    loadConnectors();
   }else{
     showMsg('Errore: '+(d.error||'unknown'));
   }

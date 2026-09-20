@@ -7,6 +7,8 @@ Env vars (.env):
   MS_CLIENT_ID       App registration client_id
   MS_CLIENT_SECRET   App registration client_secret
   MS_TENANT_ID       Tenant ID (default: "common")
+  O365_TOKEN_DIR     Dove l'SDK mette in cache il token
+                     (default: $DATA_DIR/o365, es. /app/data/o365 nel container)
 
 Auth: OAuth2 client credentials (server-to-server / daemon app).
 Permissions: Mail.Read Mail.Send Calendars.ReadWrite Files.ReadWrite.All
@@ -21,12 +23,28 @@ from __future__ import annotations
 import os
 from .base import BaseConnector
 
+# Cache del token O365. Il path era hardcoded a /tmp: su Windows (dove gira
+# questa installazione) /tmp non esiste, e in un container ricreato il token
+# sparirebbe comunque, forzando un'autenticazione nuova a ogni riavvio. Il
+# default segue la convenzione di shared/identity.py: DATA_DIR (nel container
+# è il volume /app/data), sovrascrivibile con O365_TOKEN_DIR.
+DEFAULT_TOKEN_SUBDIR = "o365"
+
+
+def _token_dir() -> str:
+    """Directory della cache del token, creata se non esiste."""
+    path = (os.getenv("O365_TOKEN_DIR", "") or "").strip()
+    if not path:
+        path = os.path.join(os.getenv("DATA_DIR", "./data"), DEFAULT_TOKEN_SUBDIR)
+    os.makedirs(path, exist_ok=True)
+    return path
+
 
 def _get_account():
     from O365 import Account, FileSystemTokenBackend
     credentials = (os.environ["MS_CLIENT_ID"], os.environ["MS_CLIENT_SECRET"])
     tenant_id   = os.getenv("MS_TENANT_ID", "common")
-    backend     = FileSystemTokenBackend(token_path="/tmp", token_filename="o365_token.json")
+    backend     = FileSystemTokenBackend(token_path=_token_dir(), token_filename="o365_token.json")
     account = Account(
         credentials,
         auth_flow_type="credentials",
@@ -41,8 +59,16 @@ def _get_account():
 class Office365Connector(BaseConnector):
     name = "office365"
 
-    def is_available(self) -> bool:
-        return bool(os.getenv("MS_CLIENT_ID") and os.getenv("MS_CLIENT_SECRET"))
+    # Entrambe obbligatorie: senza coppia client_id/client_secret l'app daemon
+    # non può autenticarsi. MS_TENANT_ID ha un default ("common") e quindi non
+    # è un requisito.
+    REQUIRED_ENV = ("MS_CLIENT_ID", "MS_CLIENT_SECRET")
+
+    # Invio email e creazione eventi sono SCRITTURE: restano fuori dal catalogo
+    # finché non vengono abilitate esplicitamente (CONNECTOR_WRITE_TOOLS).
+    READ_TOOLS = ("o365_read_emails", "o365_list_events",
+                  "o365_list_files", "o365_search_files")
+    WRITE_TOOLS = ("o365_send_email", "o365_create_event")
 
     def get_tools(self) -> list[dict]:
         return [

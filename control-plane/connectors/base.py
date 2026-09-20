@@ -25,6 +25,13 @@ class BaseConnector(ABC):
     # Nome univoco del connettore — usato come prefisso dei tool e nei log
     name: str = "base"
 
+    # Env var SENZA le quali il connettore non può funzionare. Vuoto = nessun
+    # requisito (connettore sempre disponibile). Non è decorazione: senza questa
+    # tabella un connettore spento è INDISTINGUIBILE da uno non configurato, e
+    # l'operatore vede solo "i tool non ci sono" (vedi GET /connectors, che
+    # riporta i nomi mancanti, mai i valori).
+    REQUIRED_ENV: tuple[str, ...] = ()
+
     @property
     def enabled(self) -> bool:
         """
@@ -42,13 +49,62 @@ class BaseConnector(ABC):
             return False
         return self.is_available()
 
+    def missing_env(self) -> list[str]:
+        """
+        Nomi delle env var dichiarate in REQUIRED_ENV e assenti (o vuote).
+
+        Solo i NOMI, mai i valori: questa lista finisce in /connectors, che è
+        diagnostica leggibile dall'operatore e non deve contenere segreti.
+        """
+        return [key for key in self.REQUIRED_ENV if not str(os.getenv(key, "")).strip()]
+
     def is_available(self) -> bool:
         """
         Controlla se le credenziali/env var necessarie sono presenti.
-        Sovrascrivere nei connettori che richiedono configurazione specifica.
-        Default: True (sempre disponibile, utile per connettori senza auth).
+        Il default deriva da REQUIRED_ENV; sovrascrivere solo se la condizione
+        non è esprimibile come "queste env var esistono" (es. file di token).
         """
-        return True
+        return not self.missing_env()
+
+    # Classificazione ESPLICITA di ogni tool pubblicato: l'unione dei due elenchi
+    # deve coincidere esattamente con get_tools(). Un tool pubblicato ma non
+    # classificato NON viene esposto (fail-closed, vedi classification_problems):
+    # senza questo vincolo basterebbe dimenticare una riga per mettere un tool
+    # che invia email nel catalogo del modello come se fosse una lettura.
+    READ_TOOLS: tuple[str, ...] = ()
+    WRITE_TOOLS: tuple[str, ...] = ()
+
+    def tool_kind(self, tool_name: str) -> str | None:
+        """`"read"`, `"write"`, oppure None se il tool non è classificato."""
+        if tool_name in self.WRITE_TOOLS:
+            return "write"
+        if tool_name in self.READ_TOOLS:
+            return "read"
+        return None
+
+    def classification_problems(self, published_names) -> list[str]:
+        """Divergenze fra i tool pubblicati da get_tools() e la classificazione.
+
+        Un connettore con problemi qui è inaffidabile per la policy read/write:
+        il ConnectorManager lo tiene fuori dal catalogo e ne riporta il motivo
+        in /connectors, invece di esporre un tool di cui non sa dire la natura.
+        """
+        declared_read = set(self.READ_TOOLS)
+        declared_write = set(self.WRITE_TOOLS)
+        published = set(published_names)
+        problems = []
+        overlap = sorted(declared_read & declared_write)
+        if overlap:
+            problems.append(f"{self.name}: dichiarati sia read sia write: {', '.join(overlap)}")
+        non_classificati = sorted(published - declared_read - declared_write)
+        if non_classificati:
+            problems.append(f"{self.name}: pubblicati ma non classificati "
+                            f"(READ_TOOLS/WRITE_TOOLS): {', '.join(non_classificati)}")
+        non_pubblicati = sorted((declared_read | declared_write) - published)
+        if non_pubblicati:
+            problems.append(f"{self.name}: classificati ma non pubblicati da get_tools(): "
+                            f"{', '.join(non_pubblicati)}")
+        return problems
 
     @abstractmethod
     def get_tools(self) -> list[dict]:
