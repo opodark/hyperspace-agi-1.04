@@ -99,7 +99,7 @@ class DreamTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_limiter_idle_acquisition(self):
         import ast
-        source = (Path(__file__).parents[1]/"node/main.py").read_text()
+        source = (Path(__file__).parents[1]/"node/main.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         klass = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_AdaptiveLoadLimiter")
         scope = {"asyncio":asyncio, "LOAD_SEED_CONCURRENCY":4, "LOAD_MIN_CONCURRENCY":1,

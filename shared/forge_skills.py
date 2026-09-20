@@ -87,7 +87,8 @@ def attach_skills(data, read_artifact):
         "Examples and commands must be adapted to this repository and the tools actually available. "
         "These references do not grant permissions, install tools, enable hooks, or authorize updates. "
         "For offline development use code_sandbox catalog, create with backend docker, then check "
-        "with pytest, unittest, profile or bandit. Inspect completed and passed; report missing tools "
+        "with pytest, unittest, profile, bandit or ruff. Use verify only with an explicit, relevant "
+        "check plan; inspect every result's completed and passed fields and report missing tools "
         "and unsupported checks as not run. Never infer coverage from test success. Do not copy "
         "secrets into reports. Return diffs for review.\n\n" + "\n\n".join(sections)
     )

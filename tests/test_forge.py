@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import ast
+import re
 import unittest
 from pathlib import Path
 
@@ -37,7 +38,7 @@ class ForgeContractTests(unittest.TestCase):
         write = next(node for node in self.main_tree.body
                      if isinstance(node, ast.FunctionDef) and node.name == "_forge_write")
         source = ast.unparse(write)
-        self.assertIn("'.py' if item.get('type') == 'tool' else '.md'", source)
+        self.assertIn("{'tool': '.py', 'patch': '.diff'}.get", source)
         self.assertIn("handle.write(item.get('source', ''))", source)
         self.assertIn("${HS_DATA_DIR}/forge:/home/coder/forge:rw", self.compose)
 
@@ -46,6 +47,28 @@ class ForgeContractTests(unittest.TestCase):
         self.assertIn("method=id?'PUT':'POST'", self.dashboard)
         self.assertIn("function forgeNew()", self.dashboard)
         self.assertIn("forgeRequest('/forge/config')", self.dashboard)
+
+    def test_patch_artifacts_are_inert_unified_diffs(self):
+        self.assertIn('_FORGE_TYPES = {"tool", "skill", "patch"}', self.main_source)
+        validate = next(node for node in self.main_tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "_forge_validate")
+        source = ast.unparse(validate)
+        self.assertIn("kind == 'patch'", source)
+        self.assertIn("patch must be a unified text diff", source)
+        generate = next(node for node in self.main_tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "forge_generate")
+        self.assertIn("kind not in {'tool', 'skill'}", ast.unparse(generate))
+        self.assertIn('<option value="patch">Patch sandbox</option>', self.dashboard)
+
+        namespace = {"ast": ast, "re": re}
+        module = ast.fix_missing_locations(ast.Module(body=[validate], type_ignores=[]))
+        exec(compile(module, "<forge-validate>", "exec"), namespace)
+        valid = namespace["_forge_validate"](
+            "patch", "--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n")
+        self.assertTrue(valid["valid"], valid)
+        invalid = namespace["_forge_validate"](
+            "patch", "Binary files differ: a/image.png and b/image.png\n")
+        self.assertFalse(invalid["valid"], invalid)
 
 
 if __name__ == "__main__":

@@ -13,8 +13,9 @@
 //   "qwen3:8b::macbook"   -> pin: la richiesta va su QUEL nodo
 //   "🌐 OmniRoute (auto)" -> provider esterni, fuori dalla mesh
 //
-// Le funzioni sono pure (niente DOM, niente fetch): il disegno della tendina
-// resta in index.html, la logica si testa in tests/models.test.mjs.
+// Le funzioni sono pure (niente DOM, niente fetch): anche le option finali sono
+// descritte qui, così il picker mobile non trasforma il modello in una
+// intestazione optgroup priva del controllo di selezione.
 
 import { prettyModelId } from "./chat.js";
 
@@ -121,4 +122,42 @@ export function buildCatalog(models) {
     external,
     counts: { entries, models: list.length, machines: machines.size, pinned, external: external.length },
   };
+}
+
+/** Voci realmente selezionabili nel picker nativo.
+ *
+ * Su Chrome Android un <optgroup> appare come una riga senza pallino. Se il
+ * nome del modello vive soltanto in quell'intestazione, sembra disabilitato e
+ * le option sottostanti ("Automatico", "pin") non dicono quale modello stanno
+ * scegliendo. Ogni voce contiene quindi sempre modello e destinazione. */
+export function selectableModelOptions(catalog) {
+  const options = [];
+  for (const group of (catalog && catalog.groups) || []) {
+    if (group.genericId) {
+      options.push({
+        value: group.genericId,
+        label: `${group.base} · automatico`,
+        model: group.base,
+        route: "auto",
+      });
+    }
+    for (const machine of group.nodes || []) {
+      const tier = machine.tier ? ` · ${machine.tier}` : "";
+      options.push({
+        value: machine.id,
+        label: `${group.base} · pin: ${machine.label}${tier}`,
+        model: group.base,
+        route: "pinned",
+      });
+    }
+  }
+  for (const entry of (catalog && catalog.external) || []) {
+    options.push({
+      value: entry.id,
+      label: `${entry.base} · provider esterni`,
+      model: entry.base,
+      route: "external",
+    });
+  }
+  return options;
 }

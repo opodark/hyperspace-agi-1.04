@@ -259,7 +259,7 @@ def test_config():
     # controlla che i valori attesi ci siano ancora.
     attesi = {"VRAM_GB": "8", "NODE_TIER": "hub", "HS_MODEL_GENERAL": "qwen3.5:4b",
               "TITLER_ENABLED": "false", "MESH_BIND_IP": "100.64.31.18"}
-    testo = (ROOT / ".env.windows").read_text()
+    testo = (ROOT / ".env.windows").read_text(encoding="utf-8")
     righe, mancanti = [], []
     for chiave, valore in attesi.items():
         m = re.search(rf"(?m)^{chiave}=(.+)$", testo)

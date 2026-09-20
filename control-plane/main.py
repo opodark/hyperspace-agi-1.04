@@ -1961,7 +1961,7 @@ def _tool_get_mesh_status(args: dict) -> str:
 def _tool_code_sandbox(args: dict) -> str:
     """Operate only on an offline disposable workspace, never on the live repo."""
     action = str(args.get("action", "status")).strip().lower()
-    allowed = {"status", "catalog", "check", "create", "list", "read", "write", "replace", "run", "diff", "discard"}
+    allowed = {"status", "catalog", "check", "verify", "create", "list", "read", "write", "replace", "run", "diff", "discard"}
     if action not in allowed:
         return f"Sandbox error: unsupported action '{action}'."
     if action == "status" and not code_sandbox.enabled:
@@ -1969,7 +1969,7 @@ def _tool_code_sandbox(args: dict) -> str:
     payload_keys = {
         "workspace_id", "label", "path", "content", "old", "new",
         "expected_occurrences", "argv", "cwd", "timeout", "pattern", "limit",
-        "backend", "tool_id",
+        "backend", "tool_id", "checks",
     }
     payload = {key: value for key, value in args.items() if key in payload_keys}
     try:
@@ -2050,13 +2050,14 @@ _NATIVE_TOOLS = [
         "type": "function",
         "function": {
             "name": "code_sandbox",
-            "description": "Sviluppa e testa codice in un workspace offline e usa-e-getta. Non modifica il repository operativo. Usa catalog per i preset disponibili, create con backend docker, poi check con tool_id pytest/unittest/profile/bandit e path. passed indica l'esito del controllo, completed se è terminato. Sono disponibili anche read/list/write/replace/run/diff. Restituisci il diff per revisione.",
+            "description": "Sviluppa e testa codice in un workspace offline e usa-e-getta. Non modifica il repository operativo. Usa catalog per i preset disponibili, create con backend docker, poi check con tool_id pytest/unittest/profile/bandit/ruff e path. verify esegue da una a sei check espliciti e passa solo se tutte completano e passano. Sono disponibili anche read/list/write/replace/run/diff. Restituisci il diff per revisione.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["status", "catalog", "check", "create", "list", "read", "write", "replace", "run", "diff", "discard"]},
+                    "action": {"type": "string", "enum": ["status", "catalog", "check", "verify", "create", "list", "read", "write", "replace", "run", "diff", "discard"]},
                     "backend": {"type": "string", "enum": ["auto", "docker", "sbx"], "description": "Backend per create; i preset check richiedono docker."},
-                    "tool_id": {"type": "string", "enum": ["pytest", "unittest", "profile", "bandit"]},
+                    "tool_id": {"type": "string", "enum": ["pytest", "unittest", "profile", "bandit", "ruff"]},
+                    "checks": {"type": "array", "description": "Per verify: 1-6 oggetti {tool_id, path, timeout?}. Il risultato passa soltanto se ogni check passa."},
                     "workspace_id": {"type": "string"},
                     "label": {"type": "string"},
                     "path": {"type": "string"},
@@ -5464,7 +5465,7 @@ def set_config_env():
 # ── TOOL & SKILL FORGE ───────────────────────────────────────────────────────
 # Generated artifacts are inert drafts. Nothing here imports or executes tool
 # code: publication remains a separate, explicitly authorized operation.
-_FORGE_TYPES = {"tool", "skill"}
+_FORGE_TYPES = {"tool", "skill", "patch"}
 _FORGE_STATES = {"draft", "review", "approved", "disabled"}
 _forge_lock = threading.Lock()
 
@@ -5511,6 +5512,13 @@ def _forge_validate(kind, source):
             warnings.append("skill should start with a Markdown heading")
         if len(source.split()) < 20:
             warnings.append("skill instructions are unusually short")
+    if kind == "patch" and source.strip():
+        has_headers = "--- a/" in source and "+++ b/" in source
+        has_hunk = re.search(r"^@@ .* @@", source, re.MULTILINE) is not None
+        if not has_headers or not has_hunk:
+            issues.append("patch must be a unified text diff with file headers and a hunk")
+        if "Binary files differ:" in source:
+            issues.append("binary changes cannot be represented by this Forge patch")
     return {"valid": not issues, "issues": issues, "warnings": warnings}
 
 
@@ -5534,7 +5542,7 @@ def _forge_write(item):
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(item, handle, ensure_ascii=False, indent=2)
-    extension = ".py" if item.get("type") == "tool" else ".md"
+    extension = {"tool": ".py", "patch": ".diff"}.get(item.get("type"), ".md")
     source_path = os.path.join(FORGE_DIR, item["id"] + extension)
     source_temporary = source_path + ".tmp"
     with open(source_temporary, "w", encoding="utf-8") as handle:
@@ -5594,7 +5602,7 @@ def forge_create():
     data = request.get_json(force=True, silent=True) or {}
     kind = str(data.get("type", "skill")).lower()
     if kind not in _FORGE_TYPES:
-        return jsonify({"error": "type must be tool or skill"}), 400
+        return jsonify({"error": "type must be tool, skill, or patch"}), 400
     name = str(data.get("name", "")).strip()
     if not name:
         return jsonify({"error": "name is required"}), 400
@@ -5623,7 +5631,7 @@ def forge_update(artifact_id):
                 item = json.load(handle)
             kind = str(data.get("type", item.get("type", "skill"))).lower()
             if kind not in _FORGE_TYPES:
-                return jsonify({"error": "type must be tool or skill"}), 400
+                return jsonify({"error": "type must be tool, skill, or patch"}), 400
             name = str(data.get("name", item.get("name", ""))).strip()
             if not name:
                 return jsonify({"error": "name is required"}), 400
@@ -5681,8 +5689,8 @@ def forge_generate():
     data = request.get_json(force=True, silent=True) or {}
     kind = str(data.get("type", "skill")).lower()
     description = str(data.get("description", "")).strip()
-    if kind not in _FORGE_TYPES or not description:
-        return jsonify({"error": "type and description are required"}), 400
+    if kind not in {"tool", "skill"} or not description:
+        return jsonify({"error": "generation supports tool or skill and requires a description"}), 400
     if kind == "tool":
         instruction = ("Return only Python source for an Open WebUI Workspace Tool. "
                        "Expose a top-level class Tools with typed public methods and docstrings. "

@@ -55,7 +55,7 @@ class BundleTests(unittest.TestCase):
                     target.unlink()
                     target.symlink_to(ECC_BUNDLE_DIR / "skills/security-review/SKILL.md")
                 else:
-                    manifest = json.loads((root / "manifest.json").read_text())
+                    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
                     manifest["files"]["../../outside"] = "0" * 64
                     (root / "manifest.json").write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
