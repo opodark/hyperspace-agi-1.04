@@ -237,6 +237,32 @@ async def _poll_tasks(client: httpx.AsyncClient) -> None:
         pass
 
 
+def _log_field(log: dict[str, Any], *names: str) -> str:
+    """Un campo di un log, qualunque sia la forma delle chiavi.
+
+    Le due forme esistono DAVVERO, non sono un dettaglio da biblioteca:
+    `POST /logs/add` restituisce quello che `push_log` ha costruito (camelCase:
+    `sourceNode`, `targetNode`, `traceId`, `id` uuid), mentre `GET /logs` legge le
+    righe del DB (snake_case: `source`, `target`, `trace_id`, `id` intero).
+    Questo bridge legge da `/logs`, quindi la forma e' la SECONDA: leggere
+    `sourceNode` da quelle righe non da' un errore, da' `None` — ed e' il motivo
+    per cui i link chat/task mostravano "cp" al posto del nodo. Si accettano
+    entrambe, cosi' un chiamante puo' passare l'una o l'altra senza sparire.
+    """
+    for name in names:
+        value = log.get(name)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+# Conversazione fra agenti che scrivono codice (docs/code-conversation.md): i tre
+# tipi condividono lo stesso payload, quindi si mappano in UN solo evento SSE
+# (`code_message`) con `kind` = il tipo di log. La dashboard raggruppa per `trace`,
+# che e' il trace_id condiviso: e' il filo della conversazione, non serve altro.
+_CODE_LOG_TYPES = ("code_proposal", "code_review", "code_verdict")
+
+
 async def _poll_log_type(client: httpx.AsyncClient, log_type: str, per_page: int = 20) -> None:
     try:
         r = await client.get(
@@ -259,8 +285,8 @@ async def _poll_log_type(client: httpx.AsyncClient, log_type: str, per_page: int
         if new_entries:
             _last_log_ids[log_type] = str(new_entries[0].get("id", _last_log_ids.get(log_type, "")))
         for log in reversed(new_entries):
-            src = str(log.get("sourceNode") or "cp")
-            tgt = str(log.get("targetNode") or "")
+            src = _log_field(log, "sourceNode", "source") or "cp"
+            tgt = _log_field(log, "targetNode", "target")
             detail = _log_detail_text(log)
             payload = {
                 "id": log.get("id"),
@@ -310,6 +336,22 @@ async def _poll_log_type(client: httpx.AsyncClient, log_type: str, per_page: int
                         "label": log.get("summary") or "chat",
                         "detail": detail,
                     })
+            elif log_type in _CODE_LOG_TYPES:
+                # Non richiede src E tgt (a differenza di task/chat): un messaggio
+                # di conversazione e' valido anche senza destinatario, perche' nel
+                # filo la sequenza e' data da `trace`, non dalla coppia from->to.
+                _broadcast("code_message", {
+                    "id":      _log_field(log, "log_id", "id"),
+                    "kind":    log_type,
+                    "trace":   _log_field(log, "traceId", "trace_id"),
+                    "from":    src,
+                    "to":      tgt,
+                    "label":   log.get("summary") or "",
+                    "status":  log.get("status") or "info",
+                    "detail":  detail,
+                    "ts":      log.get("ts") or log.get("timestamp"),
+                    "raw":     log,
+                })
     except Exception:
         pass
 
@@ -347,6 +389,11 @@ async def _poller() -> None:
             await _poll_log_type(client, "memory_sync", per_page=10)
             await _poll_log_type(client, "dream", per_page=10)
             await _poll_log_type(client, "node_chat", per_page=20)
+            # Conversazione fra agenti che scrivono codice: 50 per tipo perche' un
+            # filo utile nasce da piu' messaggi ravvicinati, e il cursore
+            # _last_log_ids evita comunque di rimandarli due volte.
+            for _tipo in _CODE_LOG_TYPES:
+                await _poll_log_type(client, _tipo, per_page=50)
 
 
 # Poll dedicato, più veloce del giro principale: i tick di generazione in

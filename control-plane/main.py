@@ -1251,7 +1251,14 @@ def _sse_headers():
 # sbagliato e non e' piu' filtrabile da /logs?type=. tests/test_log_types.py
 # estrae i tipi usati dalle route e verifica che siano tutti elencati.
 LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
-             "webui_interaction", "dream", "node_chat", "web_task", "mcp"}
+             "webui_interaction", "dream", "node_chat", "web_task", "mcp",
+             # Conversazione fra agenti che scrivono codice (docs/code-conversation.md).
+             # Il filo e' il trace_id CONDIVISO fra i messaggi: `push_log` ne genera
+             # uno nuovo solo quando non gliene passi uno, quindi basta passarlo.
+             # Il codice NON sta qui: sta come artefatto inerte nel Forge, e il log
+             # porta il riferimento. Motivo: la vista federata manda `summary`
+             # (troncato) e mai `detail` — cosi' il codice non esce verso il peer.
+             "code_proposal", "code_review", "code_verdict"}
 
 def push_log(type_, summary, detail="", source="control-plane", target="", status="info", trace_id=""):
     entry = {

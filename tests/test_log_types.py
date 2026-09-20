@@ -55,6 +55,11 @@ class LogTypeTests(unittest.TestCase):
     def test_types_introduced_by_recent_features_are_declared(self):
         self.assertIn("web_task", self.declared)
         self.assertIn("mcp", self.declared)
+        # Canale di collaborazione fra agenti: sono vocabolario visibile (dashboard,
+        # filtri /logs?type=), quindi devono stare nell'insieme per nome.
+        for tipo in ("code_proposal", "code_review", "code_verdict"):
+            with self.subTest(tipo=tipo):
+                self.assertIn(tipo, self.declared)
 
     def test_system_fallback_is_still_declared(self):
         self.assertIn("system", self.declared)

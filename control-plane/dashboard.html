@@ -156,6 +156,12 @@ main{padding:18px 20px;display:grid}
 .tb-mesh_event{background:var(--warning-bg);color:var(--warning)}
 .tb-system{background:var(--surface3);color:var(--text-muted)}
 .tb-memory_sync{background:var(--memsync-bg);color:var(--memsync)}
+/* Conversazione fra agenti che scrivono codice (docs/code-conversation.md):
+   proposta -> revisione -> verdetto. Sono tre tipi perche' il verdetto porta
+   l'esito del gate, e il colore lo dice a colpo d'occhio. */
+.tb-code_proposal{background:var(--info-bg);color:var(--info)}
+.tb-code_review{background:var(--warning-bg);color:var(--warning)}
+.tb-code_verdict{background:var(--success-bg);color:var(--success)}
 .sbadge{display:inline-flex;padding:2px 7px;border-radius:99px;font-size:.59rem;font-weight:700;text-transform:uppercase;white-space:nowrap}
 .st-success{background:var(--success-bg);color:var(--success)}
 .st-failed{background:var(--error-bg);color:var(--error)}
@@ -374,6 +380,7 @@ main{padding:18px 20px;display:grid}
     <button class="lt" onclick="setTab('node_chat',this)">&#128172; Chat</button>
     <button class="lt" onclick="setTab('mesh_event',this)">&#127760; Mesh</button>
     <button class="lt" onclick="setTab('memory_sync',this)" style="color:var(--memsync)">&#129504; Memory Sync</button>
+    <button class="lt" onclick="setTab('code',this)">&#128187; Code</button>
     <button class="lt" onclick="setTab('system',this)">&#9881;&#65039; System</button>
   </div>
   <div class="filter-row">
@@ -1557,10 +1564,27 @@ async function refreshLogs(){
   var status=document.getElementById('fStatus').value;
   var q=document.getElementById('fQ').value.trim();
   var url='/logs?per_page=200&';
-  if(curType)url+='type='+curType+'&';
+  if(curType&&curType!=='code')url+='type='+curType+'&';
   if(node)url+='node='+encodeURIComponent(node)+'&';
   if(status)url+='status='+status+'&';
   if(q)url+='q='+encodeURIComponent(q)+'&';
+  // La conversazione "Code" e' TRE tipi (proposta/revisione/verdetto) e il CP
+  // filtra un tipo solo per volta: qui si chiedono tutti e tre e si uniscono.
+  // /logs li restituisce dal piu' recente, quindi si riordina per non cambiare
+  // l'ordine che il rendering si aspetta.
+  if(curType==='code'){
+    try{
+      var tipi=['code_proposal','code_review','code_verdict'];
+      var parti=await Promise.all(tipi.map(function(t){
+        return fetch(url+'type='+t).then(function(r){return r.json()}).catch(function(){return {logs:[]}});
+      }));
+      var uniti=[];
+      parti.forEach(function(p){uniti=uniti.concat(p.logs||[])});
+      uniti.sort(function(a,b){return String(b.ts||'').localeCompare(String(a.ts||''))});
+      renderLogs(uniti,uniti.length);
+    }catch(e){}
+    return;
+  }
   try{
     var res=await(await fetch(url)).json();
     var logs=res.logs||res;
