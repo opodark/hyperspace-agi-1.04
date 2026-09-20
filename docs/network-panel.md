@@ -167,6 +167,7 @@ standard sotto `C:\Program Files`. Installazioni non standard possono usare
 | `wg_up` / `wg_down` | Unix: `sudo -n wg-quick`; Windows: `wireguard.exe /installtunnelservice` o `/uninstalltunnelservice` | Richiede sudoers su Unix o privilegi servizio su Windows |
 | `ble_scan` | `BleakScanner.discover()` | Sola lettura, richiede `pip install bleak` (unica azione con una dipendenza esterna — vedi sotto). Non inclusa nel poll automatico di `/network/status`: dura diversi secondi, va lanciata a mano |
 | `shell_run` | comando reale come argv (`git`, `npm`, `python`, i propri script) | **Non è sola lettura**: esegue con i permessi di chi avvia l'agent. Spento di default (`SHELL_RUN_ENABLED=false`), allowlist di eseguibili *per nome*, `cwd` dentro `SHELL_ALLOWED_DIRS`, output e tempo limitati dal server. I comandi distruttivi (`git push`, `rm -r`, …) richiedono `confirm=true` (`SHELL_CONFIRM_RISK`, o bloccati del tutto con `SHELL_BLOCK_RISK`). Il tool compare nel catalogo della chat, di MCP e di `/tools/execute` solo quando è acceso *e* l'host-agent è configurato — vedi [host-access.md](host-access.md) |
+| `shell_session` | `open`, `run`, `read`, `close`, `list` | Stato e audit senza terminale: `cwd` che resta, output accumulato in un ring buffer con `dropped` esplicito, storico limitato, riepilogo alla chiusura. Ogni `run` passa dalle **stesse** pareti di `shell_run`. Tetto alle sessioni (`SHELL_MAX_SESSIONS`) e scadenza per inattività (`SHELL_SESSION_IDLE_S`). Nessun PTY: non serve per `top` o un REPL |
 
 ## Bottiglie: discovery firmato + proof-of-work
 

@@ -111,11 +111,28 @@ is a **decision, not a boundary** — a destructive command no rule matches stil
 goes through. The allowlist stays the real wall; this layer exists so that an
 accident becomes a decision.
 
-**Stage 2b — sessions (the "total access" part) — still to do.** A `shell_session`
-action (`open`, `input`, `read`, `close`) backed by a PTY, one session per id,
-idle auto-close, output ring buffer with explicit truncation, and the CP holding
-the per-session audit. This is what an OpenClaw-like runtime actually needs when
-a single `cd`-then-run is not enough.
+**Stage 2b — sessions — IMPLEMENTED (2026-09-20), without a terminal.**
+`shell_session` (`open`, `run`, `read`, `close`, `list`) keeps the state an
+external runtime actually asks for: a `cwd` that stays, a buffer where the output
+accumulates, a bounded history of what ran, and a summary on `close` that is the
+session's audit record — "what did that runtime do in that session?" has an
+answer. Every `run` goes through the **same** walls as `shell_run` (executable
+allowlist, policy, output and time caps) because the two share one implementation
+(`_shell_prepare`): two code paths would mean two policies, sooner or later.
+
+| knob | default | what it does |
+| --- | --- | --- |
+| `SHELL_MAX_SESSIONS` | `2` | a cap, not a hope: the third `open` is refused |
+| `SHELL_SESSION_IDLE_S` | `900` | an idle session expires, and `get`/`list` reap it — silences nothing |
+| `SHELL_SESSION_HISTORY` | `50` | bounded command history, with `history_dropped` saying how many fell out |
+
+Two limits, stated here rather than discovered later: the accumulated output is a
+ring buffer with an explicit `dropped` counter (what was discarded is visible, it
+does not look like it never existed), and there is **no PTY** — no interactive
+input, no `top`, no password prompt, no REPL. That is a deliberate stopping point,
+not an oversight: a PTY is where a "shell" actually begins (`pywinpty`/ConPTY on
+Windows, stdlib `pty` on POSIX), and it is the next step. What a runtime gets
+today is state and audit, not a terminal.
 
 **Stage 3 — the adapter.** The `ROADMAP` already frames the shape: each runtime
 implements a *light HyperSpace adapter*. Concretely: the runtime speaks its own

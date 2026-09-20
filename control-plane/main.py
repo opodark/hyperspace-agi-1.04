@@ -2152,6 +2152,7 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         # Definita piu' sotto, accanto alle route di rete: la policy di shell_run
         # vive nell'host-agent, qui c'e' il percorso con token e audit.
         "shell_run":       _tool_shell_run,
+        "shell_session":   _tool_shell_session,
     }
     handler = handlers.get(tool_name)
     if handler:
@@ -4374,6 +4375,36 @@ SHELL_RUN_TOOL = {
 }
 
 
+SHELL_SESSION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "shell_session",
+        "description": ("Una sessione di comandi con un cwd che resta: `open`, poi `run` e `read` "
+                        "quante volte serve, poi `close`. Nessuna shell e nessun input "
+                        "interattivo: ogni `run` e' un argv come shell_run, con le stesse "
+                        "allowlist e la stessa policy (i comandi distruttivi richiedono "
+                        "confirm=true, e va chiesto a una persona)."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": ["open", "run", "read", "close", "list"],
+                              "description": "open apre, run esegue, read legge, close chiude"},
+                "session_id": {"type": "string", "description": "richiesto da run, read, close"},
+                "argv": {"type": "array", "items": {"type": "string"},
+                         "description": "solo per run, es. [\"pytest\", \"-q\", \"tests\"]"},
+                "cwd": {"type": "string", "description": "solo per open (dentro le directory ammesse)"},
+                "label": {"type": "string", "description": "solo per open: un'etichetta per l'audit"},
+                "timeout": {"type": "integer", "description": "solo per run: secondi"},
+                "confirm": {"type": "boolean",
+                            "description": "true solo dopo che una persona ha accettato il comando"},
+                "clear": {"type": "boolean", "description": "solo per read: svuota il buffer letto"},
+            },
+            "required": ["operation"],
+        },
+    },
+}
+
+
 def shell_run_available() -> bool:
     """Il tool esiste solo se e' voluto E possibile (fail-closed)."""
     return bool(SHELL_RUN_ENABLED and _hostctl_configured())
@@ -4386,6 +4417,40 @@ def _shell_run_label(payload: dict) -> str:
     return "(argv non valido)"
 
 
+def _shell_gate(payload: dict, label: str) -> dict | None:
+    """Il verdetto della policy sul comando dentro `payload`, o None se passa.
+
+    Il control-plane lo usa per rispondere con la DOMANDA invece di eseguire: la
+    decisione resta dell'host-agent (l'unico che lancia il processo), qui si
+    evita solo un giro di rete andato a vuoto.
+    """
+    argv = payload.get("argv")
+    if not isinstance(argv, list) or not argv:
+        return None
+    verdict = ShellPolicy.from_env().check([str(item) for item in argv],
+                                           confirm=bool(payload.get("confirm")))
+    if verdict.allowed:
+        return None
+    push_log('system', f"{label} richiede decisione: {_shell_run_label(payload)}",
+             json.dumps(verdict.to_dict(), ensure_ascii=False), status='warn')
+    return {"ok": False, **verdict.to_dict(), "error": verdict.error}
+
+
+def _host_action(payload: dict, label: str, *, log_detail: dict | None = None) -> str:
+    """Una chiamata all'host-agent, con esito e audit uniformi."""
+    try:
+        r = requests.post(f"{HOSTCTL_URL}/action", headers=_hostctl_headers(), json=payload, timeout=90)
+        result = r.json() if r.content else {"ok": False, "error": "risposta vuota dall'host-agent"}
+    except requests.RequestException as error:
+        return f"{label} error: host-agent non raggiungibile: {error}"
+    audit = log_detail if log_detail is not None else {
+        key: value for key, value in result.items() if key not in ("stdout", "stderr", "output")}
+    push_log('system', f"{label}: {_shell_run_label(payload)}",
+             json.dumps(audit, default=str)[:2000],
+             status='success' if result.get('ok') else 'warn')
+    return json.dumps(result, ensure_ascii=False)
+
+
 def _tool_shell_run(args: dict) -> str:
     """Percorso governato verso l'host-agent: la policy sta in hostctl/agent.py."""
     if not SHELL_RUN_ENABLED:
@@ -4396,35 +4461,34 @@ def _tool_shell_run(args: dict) -> str:
     for key in ("argv", "cwd", "timeout", "confirm"):
         if key in args:
             payload[key] = args[key]
-    # Verdetto in anticipo: se il comando chiede una decisione, il chiamante
-    # riceve la domanda invece di aspettare un giro di rete. L'enforcement vero
-    # resta nell'host-agent: qui si evita solo di eseguire per poi farsi dire di no.
-    argv = payload.get("argv")
-    if isinstance(argv, list) and argv:
-        verdict = ShellPolicy.from_env().check([str(item) for item in argv],
-                                               confirm=bool(payload.get("confirm")))
-        if not verdict.allowed:
-            push_log('system', f"Shell run richiede decisione: {_shell_run_label(payload)}",
-                     json.dumps(verdict.to_dict(), ensure_ascii=False),
-                     status='warn')
-            return json.dumps({"ok": False, **verdict.to_dict(),
-                               "error": verdict.error}, ensure_ascii=False)
-    try:
-        r = requests.post(f"{HOSTCTL_URL}/action", headers=_hostctl_headers(), json=payload, timeout=90)
-        result = r.json() if r.content else {"ok": False, "error": "risposta vuota dall'host-agent"}
-    except requests.RequestException as error:
-        return f"Shell error: host-agent non raggiungibile: {error}"
-    # Audit: nel log va l'esito e l'argv, non l'output (che puo' essere grande e
-    # contenere dati del progetto).
-    audit = {key: value for key, value in result.items() if key not in ("stdout", "stderr", "output")}
-    push_log('system', f"Shell run: {_shell_run_label(payload)}",
-             json.dumps(audit, default=str)[:2000],
-             status='success' if result.get('ok') else 'warn')
-    return json.dumps(result, ensure_ascii=False)
+    refused = _shell_gate(payload, "Shell run")
+    if refused:
+        return json.dumps(refused, ensure_ascii=False)
+    return _host_action(payload, "Shell run")
+
+
+def _tool_shell_session(args: dict) -> str:
+    """Percorso governato per le sessioni: stessa policy, applicata a ogni run."""
+    if not SHELL_RUN_ENABLED:
+        return "Shell error: shell_session disabilitato (SHELL_RUN_ENABLED=false)."
+    if not _hostctl_configured():
+        return "Shell error: host-agent non configurato (HOSTCTL_TOKEN assente o troppo corto)."
+    payload = {"action": "shell_session"}
+    for key in ("operation", "session_id", "argv", "cwd", "timeout", "confirm", "label", "clear"):
+        if key in args:
+            payload[key] = args[key]
+    refused = _shell_gate(payload, "Shell session")
+    if refused:
+        return json.dumps(refused, ensure_ascii=False)
+    operation = str(payload.get("operation", "")).strip().lower()
+    return _host_action(payload, "Shell session",
+                        log_detail={"operation": operation,
+                                    "session_id": payload.get("session_id", ""),
+                                    "ok": True})
 
 
 if shell_run_available():
-    _NATIVE_TOOLS.append(SHELL_RUN_TOOL)
+    _NATIVE_TOOLS.extend([SHELL_RUN_TOOL, SHELL_SESSION_TOOL])
     _sync_connector_tools()
 
 

@@ -78,6 +78,7 @@ if str(BASE_DIR) not in sys.path:
 from shared.shell_policy import BLOCK_VAR as SHELL_BLOCK_VAR  # noqa: E402
 from shared.shell_policy import CONFIRM_VAR as SHELL_CONFIRM_VAR  # noqa: E402
 from shared.shell_policy import ShellPolicy  # noqa: E402
+from shared.shell_sessions import SessionError, SessionStore as ShellSessionStore  # noqa: E402
 ENV_PATH = Path(os.getenv("HOSTCTL_ENV_PATH", BASE_DIR / ".env"))
 STATE_PATH = Path(os.getenv("HOSTCTL_STATE_PATH", Path.home() / ".hyperspace" / "hostctl_state.json"))
 
@@ -658,37 +659,121 @@ def _shell_run_exec(argv: list, cwd: Path, timeout: int, max_bytes: int) -> dict
             "duration_ms": int((time.monotonic() - started) * 1000)}
 
 
-def action_shell_run(params: dict) -> dict:
-    """Esegue un comando come argv sull'host. Spento finche' non lo si accende."""
-    if config_value("SHELL_RUN_ENABLED", "false").strip().lower() != "true":
-        return {"ok": False, "enabled": False,
-                "error": "shell_run disabilitato: imposta SHELL_RUN_ENABLED=true per accenderlo"}
-    argv = _shell_argv(params)
-    name = _shell_executable_name(argv[0])
-    if name not in _shell_allowed_executables():
-        raise ValueError(f"eseguibile non ammesso: {name!r} (vedi SHELL_ALLOWED_EXECUTABLES)")
-    resolved = shutil.which(argv[0])
-    if not resolved:
-        return {"ok": False, "error": f"comando non trovato: {argv[0]}"}
-    # Cosa sto per eseguire? La policy non indovina dal nome del programma: legge
-    # il COMANDO, e se qualcosa va deciso lo dice con un nome di regola.
-    policy = _shell_policy()
-    verdict = policy.check([name, *argv[1:]], confirm=bool(params.get("confirm")))
-    if not verdict.allowed:
-        return {"ok": False, "risk": verdict.risk, "rules": verdict.rules,
-                "requires_confirmation": verdict.requires_confirmation,
-                "blocked": verdict.blocked, "error": verdict.error}
-    cwd = _shell_cwd(params)
+def _shell_timeout(params: dict) -> int:
     timeout = _shell_int("SHELL_MAX_TIMEOUT", 60, 1, 600)
     if params.get("timeout") is not None:
         try:
             timeout = max(1, min(int(params["timeout"]), timeout))
         except (TypeError, ValueError):
             raise ValueError("timeout deve essere un intero (secondi)")
-    max_bytes = _shell_int("SHELL_MAX_OUTPUT_BYTES", 65536, 1024, 1048576)
-    result = _shell_run_exec([resolved, *argv[1:]], cwd, timeout, max_bytes)
-    return {"enabled": True, "argv0": name, "cwd": str(cwd), "timeout_s": timeout,
-            "risk": verdict.risk, "rules": verdict.rules, **result}
+    return timeout
+
+
+def _shell_prepare(params: dict, *, cwd: Path | None = None):
+    """Le pareti comuni a shell_run e alle sessioni, in un posto solo.
+
+    Restituisce `(preparato, errore)`: se `errore` c'e', e' la risposta da
+    restituire al chiamante; altrimenti `preparato` ha argv risolto, cwd,
+    timeout, cap e verdetto della policy. Duplicare questa sequenza nelle
+    sessioni sarebbe il modo piu' rapido per avere due policy diverse.
+    """
+    argv = _shell_argv(params)
+    name = _shell_executable_name(argv[0])
+    if name not in _shell_allowed_executables():
+        raise ValueError(f"eseguibile non ammesso: {name!r} (vedi SHELL_ALLOWED_EXECUTABLES)")
+    resolved = shutil.which(argv[0])
+    if not resolved:
+        return None, {"ok": False, "error": f"comando non trovato: {argv[0]}"}
+    # Cosa sto per eseguire? La policy non indovina dal nome del programma: legge
+    # il COMANDO, e se qualcosa va deciso lo dice con un nome di regola.
+    verdict = _shell_policy().check([name, *argv[1:]], confirm=bool(params.get("confirm")))
+    if not verdict.allowed:
+        return None, {"ok": False, "risk": verdict.risk, "rules": verdict.rules,
+                      "requires_confirmation": verdict.requires_confirmation,
+                      "blocked": verdict.blocked, "error": verdict.error}
+    prepared = {"argv": argv, "name": name, "resolved": resolved,
+                "cwd": cwd if cwd is not None else _shell_cwd(params),
+                "timeout": _shell_timeout(params),
+                "max_bytes": _shell_int("SHELL_MAX_OUTPUT_BYTES", 65536, 1024, 1048576),
+                "verdict": verdict}
+    return prepared, None
+
+
+def _shell_execute(prepared: dict) -> dict:
+    return _shell_run_exec([prepared["resolved"], *prepared["argv"][1:]],
+                           prepared["cwd"], prepared["timeout"], prepared["max_bytes"])
+
+
+def action_shell_run(params: dict) -> dict:
+    """Esegue un comando come argv sull'host. Spento finche' non lo si accende."""
+    if config_value("SHELL_RUN_ENABLED", "false").strip().lower() != "true":
+        return {"ok": False, "enabled": False,
+                "error": "shell_run disabilitato: imposta SHELL_RUN_ENABLED=true per accenderlo"}
+    prepared, error = _shell_prepare(params)
+    if error:
+        return error
+    result = _shell_execute(prepared)
+    return {"enabled": True, "argv0": prepared["name"], "cwd": str(prepared["cwd"]),
+            "timeout_s": prepared["timeout"], "risk": prepared["verdict"].risk,
+            "rules": prepared["verdict"].rules, **result}
+
+
+# ── shell_session: stato fra un comando e l'altro (Stage 2b) ────────────────
+# Non e' un terminale e non lo finge: nessun PTY, nessuna shell, nessun input
+# interattivo. E' cio' che serve davvero a un runtime esterno — un cwd che
+# resta, un posto dove leggere cosa ha scritto, e un confine di audit ("cosa ha
+# fatto quel runtime in quella sessione?"). Ogni comando passa dalle STESSE
+# pareti di shell_run: stessa allowlist, stessa policy, stesso cap.
+_SESSIONS = ShellSessionStore()
+
+
+def _session_store() -> ShellSessionStore:
+    """Lo stato resta, i limiti si rileggono: cambiare SHELL_MAX_SESSIONS in
+    .env non richiede di riavviare l'agent."""
+    _SESSIONS.max_sessions = _shell_int("SHELL_MAX_SESSIONS", 2, 1, 16)
+    _SESSIONS.idle_s = _shell_int("SHELL_SESSION_IDLE_S", 900, 30, 86400)
+    _SESSIONS.max_output_bytes = _shell_int("SHELL_MAX_OUTPUT_BYTES", 65536, 1024, 1048576)
+    _SESSIONS.history_limit = _shell_int("SHELL_SESSION_HISTORY", 50, 1, 500)
+    return _SESSIONS
+
+
+def action_shell_session(params: dict) -> dict:
+    """Apre, usa e chiude una sessione: stato e audit, mai una shell."""
+    if config_value("SHELL_RUN_ENABLED", "false").strip().lower() != "true":
+        return {"ok": False, "enabled": False,
+                "error": "shell_session disabilitato: imposta SHELL_RUN_ENABLED=true per accenderlo"}
+    operation = str(params.get("operation", "")).strip().lower()
+    sessions = _session_store()
+    if operation == "list":
+        return {"ok": True, "enabled": True, **sessions.describe()}
+    if operation == "open":
+        cwd = _shell_cwd(params)  # stessa allowlist di directory di shell_run
+        session = sessions.open(cwd, str(params.get("label", "")))
+        return {"ok": True, "enabled": True, "session_id": session.id, "cwd": session.cwd,
+                "expires_in_s": sessions.idle_s, "max_sessions": sessions.max_sessions}
+    if operation == "close":
+        summary = sessions.close(params.get("session_id"))
+        return {"ok": True, **summary}
+    if operation in {"run", "read"}:
+        session = sessions.get(params.get("session_id"))
+        if operation == "read":
+            text, dropped = session.output.read(clear=bool(params.get("clear")))
+            return {"ok": True, "session_id": session.id, "cwd": session.cwd,
+                    "output": text, "dropped": dropped, "history": list(session.history),
+                    "history_dropped": session.history_dropped}
+        # `run`: le stesse pareti, dentro il cwd della sessione.
+        prepared, error = _shell_prepare(params, cwd=Path(session.cwd))
+        if error:
+            return {**error, "session_id": session.id}
+        result = _shell_execute(prepared)
+        session.output.write(result.get("output", ""))
+        session.record(prepared["argv"], ok=bool(result.get("ok")),
+                       exit_code=result.get("exit_code"),
+                       duration_ms=result.get("duration_ms"), now=time.time())
+        return {"enabled": True, "session_id": session.id, "argv0": prepared["name"],
+                "cwd": str(prepared["cwd"]), "timeout_s": prepared["timeout"],
+                "risk": prepared["verdict"].risk, "rules": prepared["verdict"].rules, **result}
+    raise ValueError("operazione non supportata: usa open, run, read, close o list")
 
 
 ACTIONS = {
@@ -704,6 +789,7 @@ ACTIONS = {
     "ble_scan": action_ble_scan,
     "sbx_sandbox": action_sbx_sandbox,
     "shell_run": action_shell_run,
+    "shell_session": action_shell_session,
 }
 
 # Sola lettura = osserva e basta. `shell_run` NON e' qui: esegue comandi con i

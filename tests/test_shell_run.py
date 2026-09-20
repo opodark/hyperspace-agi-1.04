@@ -253,6 +253,87 @@ class PolicyEnforcementTests(unittest.TestCase):
         self.assertNotIn("risk", result)
 
 
+class SessionActionTests(unittest.TestCase):
+    """Le sessioni sono stato + audit: le pareti restano quelle di shell_run."""
+
+    def setUp(self):
+        # Una sessione per test: lo store e' di modulo, quindi si azzera.
+        agent._SESSIONS._sessions.clear()
+        self.addCleanup(agent._SESSIONS._sessions.clear)
+
+    def test_registered_and_not_read_only(self):
+        self.assertIn("shell_session", agent.ACTIONS)
+        self.assertNotIn("shell_session", agent.READ_ONLY_ACTIONS)
+
+    def test_disabled_until_the_operator_turns_it_on(self):
+        with patch.object(agent, "config_value", lambda key, default="": default):
+            result = agent.action_shell_session({"operation": "list"})
+        self.assertFalse(result["enabled"])
+        self.assertIn("SHELL_RUN_ENABLED", result["error"])
+
+    def test_open_run_read_close_keeps_the_state(self):
+        seen = []
+        with _enabled(), patch.object(
+                agent, "_shell_run_exec",
+                lambda argv, cwd, timeout, max_bytes: seen.append((argv, cwd)) or {
+                    "ok": True, "exit_code": 0, "output": "fatto\n", "truncated": False,
+                    "duration_ms": 3}):
+            opened = agent.action_shell_session({"operation": "open", "label": "prova"})
+            self.assertTrue(opened["ok"], opened)
+            session_id = opened["session_id"]
+            self.assertTrue(session_id.startswith("sx-"))
+            run = agent.action_shell_session({"operation": "run", "session_id": session_id,
+                                              "argv": ["git", "status"]})
+            self.assertTrue(run["ok"])
+            self.assertEqual(run["session_id"], session_id)
+            self.assertEqual(run["risk"], "read")
+            read = agent.action_shell_session({"operation": "read", "session_id": session_id})
+            self.assertEqual(read["output"], "fatto\n")
+            self.assertEqual([item["argv"] for item in read["history"]], [["git", "status"]])
+            closed = agent.action_shell_session({"operation": "close", "session_id": session_id})
+            self.assertTrue(closed["closed"])
+            self.assertEqual(closed["commands"], 1)
+            self.assertEqual(seen[0][1], ROOT.resolve())     # cwd della sessione
+
+    def test_the_same_policy_applies_inside_a_session(self):
+        with _enabled(), patch.object(agent, "_shell_run_exec", lambda *a: {"ok": True}):
+            session_id = agent.action_shell_session(
+                {"operation": "open"})["session_id"]
+            refused = agent.action_shell_session({"operation": "run", "session_id": session_id,
+                                                  "argv": ["git", "push"]})
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["rules"], ["git_push"])
+        self.assertEqual(refused["session_id"], session_id)   # si sa in che sessione
+        self.assertIn("conferma", refused["error"])
+
+    def test_the_allowlist_applies_too(self):
+        with _enabled(), patch.object(agent, "_shell_run_exec", lambda *a: {"ok": True}):
+            session_id = agent.action_shell_session({"operation": "open"})["session_id"]
+            with self.assertRaises(ValueError) as ctx:
+                agent.action_shell_session({"operation": "run", "session_id": session_id,
+                                            "argv": ["bash", "-c", "echo hi"]})
+        self.assertIn("non ammesso", str(ctx.exception))
+
+    def test_an_unknown_session_is_an_error_not_a_default(self):
+        """Solleva, come ogni altro input non valido di questo file: e' il layer
+        HTTP a trasformare l'eccezione in `{"ok": false}` con il messaggio."""
+        with _enabled(), self.assertRaises(agent.SessionError) as ctx:
+            agent.action_shell_session({"operation": "read", "session_id": "sx-fantasma"})
+        self.assertIn("sconosciuta", str(ctx.exception))
+
+    def test_an_unsupported_operation_is_refused(self):
+        with _enabled(), self.assertRaises(ValueError):
+            agent.action_shell_session({"operation": "sudo"})
+
+    def test_list_reports_what_is_open(self):
+        with _enabled():
+            agent.action_shell_session({"operation": "open", "label": "uno"})
+            listing = agent.action_shell_session({"operation": "list"})
+        self.assertEqual(listing["open"], 1)
+        self.assertEqual(listing["max_sessions"], 2)
+        self.assertEqual(listing["sessions"][0]["label"], "uno")
+
+
 class StatusSurfaceTests(unittest.TestCase):
     def test_the_status_exposes_the_policy_so_the_panel_can_explain_itself(self):
         source = Path(agent.__file__).read_text(encoding="utf-8")
@@ -269,46 +350,52 @@ class ControlPlaneToolTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = MAIN_SOURCE.read_text(encoding="utf-8")
         tree = ast.parse(cls.source)
-        cls.wanted = {"_tool_shell_run", "_shell_run_label"}
+        # I gate e i due handler, nell'ordine in cui stanno nel file: il percorso
+        # governato e' condiviso, quindi si prova quello che c'e' davvero.
+        wanted = {"_shell_run_label", "_shell_gate", "_host_action",
+                  "_tool_shell_run", "_tool_shell_session"}
         cls.functions = [n for n in tree.body
-                         if isinstance(n, ast.FunctionDef) and n.name in cls.wanted]
+                         if isinstance(n, ast.FunctionDef) and n.name in wanted]
 
-    def _handler(self, *, enabled=True, configured=True, calls=None, logs=None, payload=None):
+    def _namespace(self, *, enabled=True, configured=True, calls=None, logs=None,
+                   payload=None, requests_module=None):
         namespace = {
             "SHELL_RUN_ENABLED": enabled,
             "_hostctl_configured": lambda: configured,
             "HOSTCTL_URL": "http://host:8765",
             "_hostctl_headers": lambda: {"Authorization": "Bearer x"},
-            "requests": _FakeRequests(calls if calls is not None else [],
-                                      payload or {"ok": True, "exit_code": 0,
-                                                  "output": "SECRET-OUTPUT"}),
+            "requests": requests_module or _FakeRequests(calls if calls is not None else [],
+                                                        payload or {"ok": True, "exit_code": 0,
+                                                                    "output": "SECRET-OUTPUT"}),
             "json": json,
             "ShellPolicy": _FixedPolicy,
             "push_log": lambda *a, **kwargs: (logs if logs is not None else []).append(
                 {"args": a, **kwargs}),
         }
-        body = [self._label_node] + [n for n in self.functions if n.name == "_tool_shell_run"]
-        exec(compile(ast.Module(body=body, type_ignores=[]), "handler", "exec"), namespace)
-        return namespace["_tool_shell_run"]
+        exec(compile(ast.Module(body=self.functions, type_ignores=[]), "handler", "exec"),
+             namespace)
+        return namespace
 
-    @property
-    def _label_node(self):
-        return next(n for n in self.functions if n.name == "_shell_run_label")
+    def _handler(self, **kwargs):
+        return self._namespace(**kwargs)["_tool_shell_run"]
 
     def test_catalogue_entry_is_conditional_not_static(self):
-        # Fail-closed: fuori dal blocco condizionato il tool non e' nel catalogo.
+        # Fail-closed: fuori dal blocco condizionato i tool non sono nel catalogo.
         self.assertIn("if shell_run_available():", self.source)
-        self.assertIn("_NATIVE_TOOLS.append(SHELL_RUN_TOOL)", self.source)
+        self.assertIn("_NATIVE_TOOLS.extend([SHELL_RUN_TOOL, SHELL_SESSION_TOOL])", self.source)
         tree = ast.parse(self.source)
         native = next(n for n in tree.body if isinstance(n, ast.Assign)
                       and any(getattr(t, "id", "") == "_NATIVE_TOOLS" for t in n.targets))
         self.assertNotIn("shell_run", ast.unparse(native.value))
+        self.assertNotIn("shell_session", ast.unparse(native.value))
 
-    def test_the_dispatcher_calls_it(self):
+    def test_the_dispatcher_calls_both(self):
         tree = ast.parse(self.source)
         dispatcher = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                           and n.name == "_execute_tool_call")
-        self.assertIn("shell_run", ast.unparse(dispatcher))
+        deployed = ast.unparse(dispatcher)
+        self.assertIn("shell_run", deployed)
+        self.assertIn("shell_session", deployed)
 
     def test_disabled_and_unconfigured_are_answered_without_calling_the_host(self):
         for state, expected in (({"enabled": False, "configured": True}, "disabilitato"),
@@ -357,12 +444,6 @@ class ControlPlaneToolTests(unittest.TestCase):
         self.assertEqual(calls[-1]["json"]["argv"], ["git", "push"])
 
     def test_unreachable_host_is_an_answer_not_an_exception(self):
-        namespace = {"SHELL_RUN_ENABLED": True, "_hostctl_configured": lambda: True,
-                     "HOSTCTL_URL": "http://host:8765", "_hostctl_headers": dict, "json": json,
-                     "ShellPolicy": _FixedPolicy, "push_log": lambda *a, **k: None}
-        body = [self._label_node] + [n for n in self.functions if n.name == "_tool_shell_run"]
-        exec(compile(ast.Module(body=body, type_ignores=[]), "handler", "exec"), namespace)
-
         class Boom:
             class RequestException(Exception):
                 pass
@@ -371,9 +452,45 @@ class ControlPlaneToolTests(unittest.TestCase):
             def post(*_args, **_kwargs):
                 raise Boom.RequestException("connection refused")
 
-        namespace["requests"] = Boom
+        namespace = self._namespace(requests_module=Boom)
         answer = namespace["_tool_shell_run"]({"argv": ["git", "status"]})
         self.assertIn("non raggiungibile", answer)
+
+    # ── sessioni ────────────────────────────────────────────────────────────
+    def test_a_session_run_is_gated_like_a_single_command(self):
+        calls, logs = [], []
+        session = self._namespace(calls=calls, logs=logs)["_tool_shell_session"]
+        answer = json.loads(session({"operation": "run", "session_id": "sx-1",
+                                     "argv": ["git", "push"]}))
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["rules"], ["git_push"])
+        self.assertFalse(calls)
+        self.assertIn("Shell session", logs[-1]["args"][1])
+
+    def test_open_takes_no_argv_and_is_forwarded_without_a_gate(self):
+        calls, logs = [], []
+        session = self._namespace(calls=calls, logs=logs)["_tool_shell_session"]
+        session({"operation": "open", "cwd": "/repo", "label": "prova"})
+        forwarded = calls[-1]["json"]
+        self.assertEqual(forwarded, {"action": "shell_session", "operation": "open",
+                                     "cwd": "/repo", "label": "prova"})
+        self.assertEqual(logs[-1]["status"], "success")
+
+    def test_the_audit_of_a_session_carries_the_operation_and_the_id(self):
+        calls, logs = [], []
+        session = self._namespace(calls=calls, logs=logs)["_tool_shell_session"]
+        session({"operation": "read", "session_id": "sx-9", "clear": True})
+        self.assertEqual(logs[-1]["args"][1], "Shell session: (argv non valido)")
+        detail = json.loads(logs[-1]["args"][2])
+        self.assertEqual(detail, {"operation": "read", "session_id": "sx-9", "ok": True})
+
+    def test_while_disabled_both_tools_answer_without_calling_the_host(self):
+        for tool in ("_tool_shell_run", "_tool_shell_session"):
+            calls = []
+            with self.subTest(tool=tool):
+                answer = self._namespace(enabled=False, calls=calls)[tool]({"operation": "list"})
+            self.assertIn("disabilitato", answer)
+            self.assertFalse(calls)
 
 
 if __name__ == "__main__":
