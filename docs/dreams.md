@@ -106,7 +106,7 @@ successiva.
 | D0 — Fondazione sicura | Scheduling idle-only, interruzione, isolamento e diagnostica | Nessuna regressione sul lavoro interattivo; risultati separati dalla memoria | Implementata, da misurare |
 | D1 — Artefatto strutturato | Sostituire il testo libero con categorie e provenienza | Ogni ipotesi cita le memorie sorgenti ed espone tipo, sintesi, confidenza e domande aperte | Implementata |
 | D2 — Revisione | Aggiungere inbox e azioni `promote`, `reject`, `defer` | Ogni cambio di stato è attribuito, datato e reversibile | Implementata, da validare con uso reale |
-| D3 — Valutazione | Costruire un piccolo dataset reale e confrontare prompt/modelli | Metriche disponibili per utilità, novità, correttezza, costo e interruzione | Da fare |
+| D3 — Valutazione | Costruire un piccolo dataset reale e confrontare prompt/modelli | Metriche disponibili per utilità, novità, correttezza, costo e interruzione | Implementata (`shared/dream_evaluation.py`) |
 | D4 — Consolidamento | Permettere ai risultati promossi di produrre note o collegamenti persistenti | Nessuna scrittura autorevole senza promozione; provenienza preservata | Da fare |
 | D5 — Mesh | Condividere tra nodi soltanto artefatti promossi e autorizzati | Policy privacy, deduplicazione globale e revoca testate end-to-end | Futuro |
 
@@ -173,10 +173,18 @@ D4 si sblocca solo dopo una sessione di valutazione su memorie reali e una
 revisione manuale dei falsi positivi. D5 richiede inoltre policy di privacy,
 retention, revoca e autorizzazione tra nodi.
 
+Le metriche sono calcolate da `shared/dream_evaluation.py`: utilità,
+tracciabilità e novità sono misurabili dai record esistenti; correttezza e costo
+richiedono rispettivamente annotazioni `review.quality` e la strumentazione
+`duration_ms` (ora registrata dal worker); l'impatto operativo richiede
+telemetria dedicata all'interruzione del lavoro in primo piano.
+
 ## Decisioni ancora aperte
 
-- Dove conservare l'artefatto strutturato quando il memory schema comune sarà
-  disponibile.
+- ~~Dove conservare l'artefatto strutturato quando il memory schema comune sarà
+  disponibile.~~ Risolto: il contratto `hyperspace.memory.v1` è in
+  `memory/schema/`; le ipotesi restano in `dreams.jsonl` e le note promosse
+  entrano in Hermes come `dream_insight`.
 - Chi può promuovere un'ipotesi: soltanto una persona o anche una policy locale
   validata e configurabile.
 - Durata di conservazione di ipotesi rifiutate e differite.

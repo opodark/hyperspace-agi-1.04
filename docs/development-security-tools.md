@@ -1,8 +1,9 @@
 # Strumenti di sviluppo e security per i modelli Hyperspace
 
-Stato: preset offline e integrazione selettiva ECC implementati, 20 settembre
-2026; worker di rete ancora proposti. Obiettivo iniziale assunto: strumenti disponibili
-ai modelli locali di Hyperspace, riutilizzabili anche nello sviluppo umano.
+Stato: preset offline, Dev Sandbox e integrazione selettiva ECC implementati,
+21 settembre 2026; benchmark sandboxizzato e worker specializzati ancora da
+realizzare. Gli strumenti sono capacità di un unico HyperSpace, riutilizzabili
+da modelli locali, coding agent e sviluppo umano.
 
 Ambiente di sviluppo: MacBook sul ramo `feature/development-security-tools`.
 Il nodo centrale resta su Win11; ricostruzioni e prove di questo ramo vengono
@@ -25,6 +26,25 @@ Il runner consente interpreti generici: la lista di eseguibili non costituisce
 da sola isolamento del codice. L'isolamento dipende anche dal container e dai
 volumi. Il runner aggiornato limita i byte durante la raccolta e termina il gruppo di
 processi al timeout o al superamento del limite.
+
+## Decisione architetturale
+
+Dev Sandbox, Forge, benchmark, debug, test, security review e pentest di
+laboratorio formano un solo ambiente HyperSpace. Non vengono però accumulati in
+un unico container: la sandbox resta offline, Playwright usa un browser worker,
+pip-audit un job con accesso controllato alle advisory e Nmap/ZAP un Security
+Lab con rete e target dichiarati.
+
+La decisione completa, il contratto comune dei job e l'ordine di lavoro sono in
+[Architettura unificata degli strumenti di sviluppo](development-tooling-architecture.md).
+L'obiettivo è consentire a un coding agent un flusso continuo — modifica, lint,
+test, analisi, verifica browser/rete, diff e Forge — lasciando al control-plane
+la scelta del runtime per ogni passaggio.
+
+Il threat model corrente è privato e single-tenant, con due operatori fidati.
+L'hardening completo di tool e chat resta debito tecnico esplicito, ma non
+blocca benchmark e worker usati nel laboratorio privato. Diventa un gate prima
+di esposizione pubblica, multiutente o di maggiore autonomia operativa.
 
 ## Prima dotazione proposta
 
@@ -83,27 +103,29 @@ verifica non aggiunge file tecnici al diff del workspace.
 Output e traceback dei test restano output del codice eseguito: non è ancora
 implementata una redazione generale dei segreti né persistenza dei report.
 
-### Estensioni successive
+### Runtime ed estensioni successive
 
 | Funzione | Strumenti | Integrazione proposta |
 |---|---|---|
-| Ispezione e debug Python | lettura, ricerca, diff, traceback, `pdb`, `cProfile` | workspace offline; debugger interattivo nell'IDE, profili e traceback come artefatti per il modello |
+| Ispezione e debug Python | lettura, ricerca, diff, traceback, `pdb`, `cProfile` | Dev Sandbox offline; debugger interattivo nell'IDE, profili e traceback come artefatti per il modello |
 | Test e regressioni | pytest e unittest già disponibili | preset di esecuzione con report, durata e codice di uscita |
 | Analisi security Python | Bandit | dipendenza fissata nell'immagine e report JSON dal workspace |
-| Vulnerabilità dipendenze | pip-audit | job dedicato con accesso alla fonte advisory; dichiarare data e copertura dei dati |
-| Test browser e debug UI | Playwright e Trace Viewer | runner con browser preinstallati, tracce e screenshot conservati localmente |
-| Inventario di rete | Nmap | worker di rete con target e porte definiti nel job |
-| Verifica web iniziale | ZAP Baseline | worker di rete con report JSON/HTML; spider più analisi passiva |
+| Vulnerabilità dipendenze | pip-audit | dependency-audit worker con accesso controllato alla fonte advisory; dichiarare data e copertura dei dati |
+| Test browser e debug UI | Playwright e Trace Viewer | browser worker con tracce e screenshot conservati localmente |
+| Inventario di rete | Nmap | Security Lab con target e porte definiti nel job |
+| Verifica web iniziale | ZAP Baseline | Security Lab con report JSON/HTML; spider più analisi passiva |
 
 ZAP Baseline genera traffico di crawling, pur senza eseguire una scansione
 attiva di attacco. Un profilo di pentest attivo richiede una fase successiva con
 operazioni e target espliciti, distinta dalla baseline.
 
-La sandbox offline rimane il percorso per modificare e testare codice. Il worker
-di rete deve avere accesso al laboratorio o ai sistemi inclusi nello scope del
-job. Il modello propone il job; il server risolve identità, scope e strumenti
-disponibili prima dell'esecuzione. Redirect e risoluzione DNS devono rispettare
-lo stesso scope, con enforcement anche sulla rete del worker.
+La sandbox offline rimane il percorso per modificare e testare codice. I worker
+specializzati sono moduli dello stesso prodotto e condividono report e
+orchestrazione, ma non i privilegi. Il Security Lab accede soltanto al
+laboratorio o ai sistemi inclusi nello scope del job. Nella fase fidata iniziale
+il modello propone target espliciti e il server applica i limiti del worker;
+prima di ampliare l'esposizione, identità, redirect e risoluzione DNS devono
+essere vincolati end-to-end allo stesso scope.
 
 ## Integrazione ECC: selettiva
 
@@ -170,14 +192,21 @@ una stringa di successo prodotta dal modello non è una prova sufficiente.
    corrette; collegare ogni finding a file e posizione verificabili.
 3. Importazione selettiva ECC nel Forge e caricamento per task. Verificare
    provenienza, limiti dei file e assenza di esecuzione durante l'importazione.
-4. Worker di rete e browser, con Nmap e ZAP nel laboratorio. Prima di esporli,
-   verificare l'autenticazione end-to-end dei percorsi HTTP, chat e MCP e lo scope
-   su ogni percorso di esecuzione. L'handler `/tools/execute` letto non contiene
-   un controllo locale d'identità: occorre verificare anche middleware e ingress.
-5. Benchmark dei modelli con e senza procedure ECC e confronto delle regressioni.
+4. Spostare il verdetto del benchmark nella sandbox, quindi confrontare modelli
+   con e senza procedure ECC su fixture verificabili e condizioni equivalenti.
+5. Persistenza e visualizzazione dei report, con redazione prima che output e
+   traceback vengano consegnati al modello.
+6. Dependency audit con pip-audit e provenienza dei dati advisory.
+7. Browser worker con Playwright, screenshot e Trace Viewer.
+8. Security Lab privato con Nmap e ZAP Baseline, target dichiarati e report
+   normalizzati. Non aggiungere nuovi ingressi pubblici per abilitarlo.
+9. Prima di passare dall'attuale ambiente fidato a uso pubblico, multiutente o
+   autonomo, completare autenticazione e allowlist end-to-end su
+   `/tools/execute`, chat e MCP, più enforcement di target, DNS e redirect.
 
-Prima consegna consigliata: punti 1–2, poi importazione ECC. Questo rende
-misurabile il beneficio delle skill su strumenti realmente disponibili.
+I punti 1–3 e la UI Dev Sandbox costituiscono la prima consegna completata. Il
+prossimo incremento è il punto 4: rende misurabile il beneficio delle skill su
+strumenti realmente disponibili senza introdurre ancora accesso di rete.
 
 ## Fonti consultate
 

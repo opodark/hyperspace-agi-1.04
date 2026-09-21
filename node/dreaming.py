@@ -290,8 +290,10 @@ class DreamWorker:
         try:
             self.state.update(last_attempt=now, error="")
             self.save()
+            started_at = self.clock()
             self.generation = asyncio.create_task(self.generate(text[:10000], self.model))
             reflection = await asyncio.wait_for(self.generation, timeout=60)
+            duration_ms = int((self.clock() - started_at) * 1000)
             if not reflection.strip():
                 raise ValueError("Empty reflection")
             structured = parse_reflection(reflection)
@@ -309,6 +311,7 @@ class DreamWorker:
                 "created_at": _iso_timestamp(now),
                 "timestamp": now,
                 "model": self.model,
+                "duration_ms": duration_ms,
                 "fingerprint": fingerprint,
                 "source_count": len(entries),
                 "source_memory_ids": [ref["id"] for ref in refs],
