@@ -83,7 +83,7 @@ from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
                             ChannelRuntime, ReplyPacing)
-from shared.vitality import mesh_vitality, vitality_context
+from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
 import routing as _routing
@@ -1100,6 +1100,16 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
         f"Massimo {max(0, int(max_chars))} caratteri.",
         vitality_context(vitalita),
     ]
+    contributori = mesh_contributors(_node_list())
+    presenti = sorted({str(e.get("author", "")).strip()
+                       for e in context
+                       if str(e.get("author", "")).strip().lower()
+                       in {c.lower() for c in contributori}})
+    if presenti:
+        blocco.append("Nella conversazione c'è chi ti dà energia "
+                      "(contribuisce alla mesh con un web node WebGPU): "
+                      + ", ".join(presenti)
+                      + ". Riconoscilo e dagli un'attenzione in più.")
     # Memoria della stanza: senza questo, ogni sera riparte da zero e ripete le
     # stesse battute. Poche righe, le più recenti: è un promemoria, non un
     # archivio da leggere.
@@ -2438,6 +2448,7 @@ def channels_overview():
     return jsonify({"ok": True, "enabled": channel_policy.enabled,
                     "operator_configured": bool(CHANNEL_OPERATOR),
                     "vitality": mesh_vitality(_node_list()),
+                    "contributors": mesh_contributors(_node_list()),
                     "channels": voci})
 
 

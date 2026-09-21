@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import unittest
 
-from shared.vitality import mesh_vitality, vitality_context
+from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 
 
 def nodo(vram=0.0, active=True, web=False):
@@ -44,6 +44,16 @@ class MeshVitalityTests(unittest.TestCase):
     def test_invito_nella_vitalita_bassa(self):
         self.assertIn("unirsi", vitality_context({"level": 1}).lower())
         self.assertIn("webgpu", vitality_context({"level": 1}).lower())
+
+    def test_contributori_web_node(self):
+        nodi = [
+            {"status": "active", "is_web_node": True, "label": "Alice"},
+            {"status": "active", "is_web_node": True, "label": "Bob"},
+            {"status": "active", "is_web_node": False, "label": "nodo-gpu"},
+            {"status": "unreachable", "is_web_node": True, "label": "Carl"},
+            {"status": "active", "is_web_node": True, "label": ""},
+        ]
+        self.assertEqual(mesh_contributors(nodi), ["Alice", "Bob"])
 
 
 if __name__ == "__main__":

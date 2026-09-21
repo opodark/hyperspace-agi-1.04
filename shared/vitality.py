@@ -62,3 +62,20 @@ def vitality_context(vitality: dict) -> str:
     """Riga di contesto deterministica per il livello corrente."""
     livello = int((vitality or {}).get("level", 0))
     return LEVEL_CONTEXT.get(livello, LEVEL_CONTEXT[0])
+
+
+def mesh_contributors(nodes) -> list:
+    """Nomi delle persone che alimentano la mesh con un web node (WebGPU).
+
+    Un web node è una scheda del browser che contribuisce inferenza: il `label`
+    è il nome dichiarato da chi l'ha aperta. Qui si estraggono i nomi attivi,
+    ordinati e senza duplicati. Serve al riconoscimento: Aurora sa chi le dà
+    energia e può dargli più attenzione.
+    """
+    nomi = {
+        str(n.get("label", "")).strip()
+        for n in (nodes or [])
+        if n.get("is_web_node") and n.get("status") == "active"
+        and str(n.get("label", "")).strip()
+    }
+    return sorted(nomi)

@@ -2275,7 +2275,8 @@ async function loadSocial(){
   var first=d.channels.filter(function(c){return c.first_class;});
   var later=d.channels.filter(function(c){return !c.first_class;});
   var vit=d.vitality||{};
-  sum.textContent=d.channels.length+' piattaforme — '+(d.enabled?'canali attivi':'canali DISATTIVATI')+(d.operator_configured?' — operatore configurato':' — operatore NON configurato')+' — Aurora: '+escH(vit.label||'?')+' ('+(vit.active_nodes||0)+' nodi, '+(vit.total_vram_gb||0)+' GB)';
+  var contrib=(d.contributors||[]).length?(' — chi ti dà energia: '+d.contributors.map(escH).join(', ')):'';
+  sum.textContent=d.channels.length+' piattaforme — '+(d.enabled?'canali attivi':'canali DISATTIVATI')+(d.operator_configured?' — operatore configurato':' — operatore NON configurato')+' — Aurora: '+escH(vit.label||'?')+' ('+(vit.active_nodes||0)+' nodi, '+(vit.total_vram_gb||0)+' GB)'+contrib;
   function card(c){
     var badge=c.configured
       ?'<span style="color:var(--success)">&#9679; connesso</span>'
