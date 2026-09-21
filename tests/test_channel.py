@@ -212,6 +212,16 @@ class PacingTests(unittest.TestCase):
         self.caso[0] = 0.1
         self.assertEqual(self.pacing.decide(channel="cam4", pending=9)["action"], "reply")
 
+    def test_vitality_riduce_l_intervallo_minimo(self):
+        self.pacing.note_reply("cam4")
+        self.ora[0] += 20  # 20s dall'ultima risposta
+        attesa = self.pacing.decide(channel="cam4", pending=10, oldest_age_s=60,
+                                    vitality={"level": 0})
+        self.assertEqual(attesa["action"], "wait")
+        risposta = self.pacing.decide(channel="cam4", pending=10, oldest_age_s=60,
+                                      vitality={"level": 5})
+        self.assertEqual(risposta["action"], "reply")
+
     def test_eta_dell_ultima_risposta(self):
         self.assertIsNone(self.pacing.last_reply_age_s("cam4"))
         self.pacing.note_reply("cam4")

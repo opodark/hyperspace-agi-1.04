@@ -179,6 +179,7 @@ class Persona:
     boundaries: tuple[str, ...] = ()
     capabilities: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
+    origin: str = ""
     observations: tuple[dict, ...] = ()
     version: int = 1
     created_at: str = ""
@@ -201,7 +202,8 @@ class Persona:
             "name": self.name, "kind": self.kind, "purpose": self.purpose,
             "tone": list(self.tone), "values": list(self.values),
             "boundaries": list(self.boundaries), "capabilities": list(self.capabilities),
-            "limitations": list(self.limitations), "observations": list(self.observations),
+            "limitations": list(self.limitations), "origin": self.origin,
+            "observations": list(self.observations),
             "version": self.version, "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -245,6 +247,7 @@ class Persona:
             boundaries=cls._texts(raw.get("boundaries")),
             capabilities=cls._texts(raw.get("capabilities")),
             limitations=cls._texts(raw.get("limitations")),
+            origin=str(raw.get("origin") or "").strip(),
             observations=observations[-MAX_OBSERVATIONS:],
             version=int(raw.get("version") or 1),
             created_at=str(raw.get("created_at") or _now()),
@@ -295,6 +298,7 @@ def default_persona(name: str | None = None) -> Persona:
             "può sbagliare: le sue risposte vanno verificate prima di agire su sistemi reali",
             "dipende dai modelli e dagli strumenti configurati: se sono spenti, non li ha",
         ),
+        origin="HyperSpace AGI (github.com/opodark/hyperspace-agi)",
         observations=(),
         version=1,
         created_at=ora,
@@ -368,6 +372,8 @@ def build_introduction(persona: Persona) -> str:
     prima.
     """
     righe = [f"Sono {persona.name}, un'IA: non sono una persona e non lo lascio intendere."]
+    if persona.origin:
+        righe.append(f"Derivo da {persona.origin}.")
     if persona.purpose:
         righe.append(persona.purpose)
     if persona.boundaries:
@@ -499,6 +505,7 @@ class PersonaStore:
             "name": p.name, "kind": p.kind, "is_ai": p.is_ai, "purpose": p.purpose,
             "tone": list(p.tone), "values": list(p.values), "boundaries": list(p.boundaries),
             "capabilities": list(p.capabilities), "limitations": list(p.limitations),
+            "origin": p.origin,
             "version": p.version, "created_at": p.created_at, "updated_at": p.updated_at,
             "file": self.path,
             "observations": list(p.observations),

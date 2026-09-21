@@ -2542,7 +2542,8 @@ def channel_reply():
                         "disclosure": {"required": True, "rule": "auto-presentazione"}})
 
     decisione = channel_pacing.decide(channel=canale, pending=pendenti,
-                                      oldest_age_s=eta_piu_vecchio, force=forza)
+                                      oldest_age_s=eta_piu_vecchio, force=forza,
+                                      vitality=mesh_vitality(_node_list()))
     if decisione["action"] != "reply":
         return jsonify({"ok": True, "channel": canale, "action": decisione["action"],
                         "reason": decisione["reason"]})

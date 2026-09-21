@@ -77,6 +77,11 @@ class IntroductionTests(unittest.TestCase):
         self.assertNotIn("sono una persona reale", intro)
         self.assertIn("un'IA", intro)
 
+    def test_intro_riporta_la_provenienza(self):
+        intro = build_introduction(default_persona("Aurora"))
+        self.assertIn("Derivo da", intro)
+        self.assertIn("HyperSpace AGI", intro)
+
 
 class SurfaceWiringTests(unittest.TestCase):
     """Il cablaggio in control-plane/main.py: superficie passata alla persona."""

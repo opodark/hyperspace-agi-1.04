@@ -457,7 +457,8 @@ class ReplyPacing:
             return None
         return max(0.0, (self.clock() if now is None else now) - ultima)
 
-    def decide(self, *, channel, pending, oldest_age_s=0.0, force=False, now=None) -> dict:
+    def decide(self, *, channel, pending, oldest_age_s=0.0, force=False, now=None,
+               vitality=None) -> dict:
         """`{"action": "reply"|"wait"|"skip", "reason": str}`.
 
         `force` è il caso "qualcuno ha chiamato l'agente per nome": allora non
@@ -466,17 +467,24 @@ class ReplyPacing:
         """
         if pending <= 0:
             return {"action": "wait", "reason": "nessun messaggio in attesa"}
+        min_interval = self.min_interval_s
+        probability = self.probability
+        if vitality is not None:
+            level = max(0, min(5, int(vitality.get("level", 0))))
+            min_interval = self.min_interval_s * (1.0 - 0.08 * level)
+            if self.probability < 1.0:
+                probability = min(1.0, self.probability + (1.0 - self.probability) * (level / 5.0))
         eta = self.last_reply_age_s(channel, now)
-        if not force and eta is not None and eta < self.min_interval_s:
+        if not force and eta is not None and eta < min_interval:
             return {"action": "wait",
                     "reason": f"cooldown: ultima risposta {int(eta)}s fa "
-                              f"(minimo {int(self.min_interval_s)}s)"}
+                              f"(minimo {int(min_interval)}s)"}
         if (not force and pending < self.batch_max_messages
                 and oldest_age_s < self.batch_max_age_s):
             return {"action": "wait",
                     "reason": f"batch non maturo: {pending} messaggi, il più vecchio "
                               f"{oldest_age_s:.1f}s"}
-        if not force and self.probability < 1.0 and self.random_source() > self.probability:
+        if not force and probability < 1.0 and self.random_source() > probability:
             return {"action": "skip", "reason": "silenzio volontario (probabilità)"}
         return {"action": "reply", "reason": "batch maturo"}
 

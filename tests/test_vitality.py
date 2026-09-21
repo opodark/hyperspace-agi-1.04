@@ -41,5 +41,10 @@ class MeshVitalityTests(unittest.TestCase):
         self.assertIn("profond", vitality_context({"level": 5}).lower())
 
 
+    def test_invito_nella_vitalita_bassa(self):
+        self.assertIn("unirsi", vitality_context({"level": 1}).lower())
+        self.assertIn("webgpu", vitality_context({"level": 1}).lower())
+
+
 if __name__ == "__main__":
     unittest.main()
