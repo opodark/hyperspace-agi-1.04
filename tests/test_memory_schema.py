@@ -39,6 +39,10 @@ class MemorySchemaNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["priority"], 5)
         self.assertEqual(normalized["status"], "active")
 
+    def test_normalize_preserves_surface(self):
+        normalized = normalize_entry({"content": "x", "surface": "channel:cam4:chat"})
+        self.assertEqual(normalized["surface"], "channel:cam4:chat")
+
     def test_entry_id_is_stable_for_equivalent_entries(self):
         first = entry_id({"content": "stessa cosa"})
         second = entry_id({"content": "stessa cosa"})

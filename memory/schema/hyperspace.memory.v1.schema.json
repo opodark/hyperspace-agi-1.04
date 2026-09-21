@@ -16,6 +16,7 @@
     },
     "content": { "type": "string", "minLength": 1 },
     "source": { "type": "string" },
+    "surface": { "type": ["string", "null"], "description": "mezzo/contesto di provenienza (openwebui, web-node, terminal, channel:cam4, ...)" },
     "node_id": { "type": ["string", "null"] },
     "model": { "type": ["string", "null"] },
     "task_id": { "type": ["string", "null"] },

@@ -78,11 +78,12 @@ from shared.web_node import (
 from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
 from shared.node_compat import ProtocolWatch
 from shared.mcp_auth import McpAuthPolicy
-from shared.persona import PersonaStore, audit_reply, should_disclose
+from shared.persona import PersonaStore, audit_reply, build_introduction, should_disclose
 from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
-from shared.channel import (COMANDI_DRIVER, ChannelGuard, ChannelPolicy, ChannelRuntime,
-                            ReplyPacing)
+from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
+                            ChannelRuntime, ReplyPacing)
+from shared.vitality import mesh_vitality, vitality_context
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
 import routing as _routing
@@ -806,13 +807,13 @@ def _last_user_text(messages) -> str:
     return ""
 
 
-def _with_persona(messages, user_text: str = "") -> list:
-    """Messaggi con il blocco di identità in testa.
+def _with_persona(messages, user_text: str = "", surface: str | None = None) -> list:
+    """Messaggi con il blocco di identità (e il contesto del mezzo) in testa.
 
     Se il client ha già un system message il blocco viene APPESO a quello invece
     di sostituirlo: il prompt dell'utente resta suo, l'identità è un'aggiunta.
     """
-    blocco = persona_store.system_block(user_text)
+    blocco = persona_store.system_block(user_text, surface=surface)
     out = [dict(m) if isinstance(m, dict) else m for m in (messages or [])]
     for index, message in enumerate(out):
         if (isinstance(message, dict) and message.get("role") == "system"
@@ -912,6 +913,20 @@ channel_pacing = ReplyPacing(
 channel_runtime = ChannelRuntime()
 CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
 CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
+# Chi è "io" nel dialogo interno a due voci: nome autore dell'operatore
+# (separato da virgola se più alias). Vuoto = nessuna etichetta speciale.
+CHANNEL_OPERATOR = {n.strip().lower() for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
+# Effetto Tamagotchi: poca mesh → modelli piccoli e risposte essenziali; mesh
+# ricca → (se configurato) il modello grande. Soglia e modello sono configurabili.
+VITALITY_BIG_LEVEL = max(0, int(os.getenv("VITALITY_BIG_LEVEL", "3")))
+VITALITY_BIG_MODEL = os.getenv("VITALITY_BIG_MODEL", "").strip()
+
+
+def _channel_model(vitalita: dict) -> str:
+    """Modello del canale in base alla vitalità della mesh."""
+    if VITALITY_BIG_MODEL and int(vitalita.get("level", 0)) >= VITALITY_BIG_LEVEL:
+        return VITALITY_BIG_MODEL
+    return CHANNEL_MODEL or DEFAULT_MODEL
 
 
 def _channel_context_messages() -> int:
@@ -941,8 +956,10 @@ def _channel_num_ctx() -> int:
 
 def _reload_channel_config() -> None:
     """Rilegge token e soglie dopo un salvataggio in Setup."""
-    global channel_policy, channel_pacing
+    global channel_policy, channel_pacing, CHANNEL_OPERATOR
     channel_policy = ChannelPolicy.from_env()
+    CHANNEL_OPERATOR = {n.strip().lower()
+                        for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
     channel_pacing = ReplyPacing(
         min_interval_s=_channel_float("CHANNEL_MIN_REPLY_INTERVAL_S", 25.0),
         batch_max_age_s=_channel_float("CHANNEL_BATCH_MAX_AGE_S", 6.0),
@@ -977,7 +994,8 @@ def _channel_name() -> str:
             or "")
 
 
-def _channel_remember(channel: str, key: str, kind: str, text: str, **extra) -> bool:
+def _channel_remember(channel: str, key: str, kind: str, text: str, *,
+                      surface: str = "", **extra) -> bool:
     """Scrive UN fatto della stanza nella memoria condivisa, con debounce.
 
     In memoria NON va ogni messaggio: ci vanno le cose che ha senso ricordare
@@ -989,7 +1007,8 @@ def _channel_remember(channel: str, key: str, kind: str, text: str, **extra) -> 
         return False
     entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
              "type": "channel", "channel": channel, "kind": kind,
-             "content": f"[{channel}] {text}", "source": f"channel:{channel}"}
+             "content": f"[{channel}] {text}", "source": f"channel:{channel}",
+             "surface": f"channel:{channel}" + (f":{surface}" if surface else "")}
     entry.update(extra)
     try:
         _memory_append(entry)
@@ -1028,12 +1047,35 @@ def _trascrizione(context) -> str:
     "non ricorda" cosa si è detto due battute fa.
     """
     righe = []
+    nome_bot = (persona_store.persona.name or "").strip().lower()
     for evento in list(context)[-_channel_context_messages():]:
         autore = str(evento.get("author", "")).strip()[:40] or "anonimo"
         testo = " ".join(str(evento.get("text", "")).split())[:_channel_context_chars()]
-        if testo:
-            righe.append(f"{autore}: {testo}")
+        if not testo:
+            continue
+        if CHANNEL_OPERATOR and autore.lower() in CHANNEL_OPERATOR:
+            etichetta = "(io)"
+        elif nome_bot and autore.lower() == nome_bot:
+            etichetta = f"({nome_bot})"
+        else:
+            etichetta = f"({autore})"
+        righe.append(f"{etichetta} {testo}")
     return "\n".join(righe)
+
+
+PRESENTAZIONE_COMMANDS = ("!presentati", "!intro")
+
+
+def _channel_presentazione(context) -> str | None:
+    """Auto-presentazione richiesta con `!presentati`/`!intro` nell'ultimo messaggio.
+
+    Generata dalla persona (non dal modello): sempre fattuale e disclosure-safe.
+    """
+    ultimo = str((context[-1] if context else {}).get("text", "")).strip()
+    testo = " ".join(ultimo.split()).lower()
+    if any(testo == c or testo.startswith(c + " ") for c in PRESENTAZIONE_COMMANDS):
+        return build_introduction(persona_store.persona)
+    return None
 
 
 def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
@@ -1052,13 +1094,11 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
     """
     ultimo = str((context[-1] if context else {}).get("text", ""))
     decisione = should_disclose(ultimo)
-    superficie = ("chat pubblica" if str(surface).lower() == "chat"
-                  else "messaggistica privata")
+    vitalita = mesh_vitality(_node_list())
     blocco = [
-        persona_store.system_block(ultimo),
-        f"Stai scrivendo nella {superficie} di un canale esterno ({channel}).",
-        f"Massimo {max(0, int(max_chars))} caratteri, UNA sola battuta, "
-        "niente elenchi e niente ragionamento ad alta voce.",
+        persona_store.system_block(ultimo, surface=surface, channel=channel),
+        f"Massimo {max(0, int(max_chars))} caratteri.",
+        vitality_context(vitalita),
     ]
     # Memoria della stanza: senza questo, ogni sera riparte da zero e ripete le
     # stesse battute. Poche righe, le più recenti: è un promemoria, non un
@@ -1075,7 +1115,7 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
         {"role": "user", "content": f"Ultimi messaggi:\n{_trascrizione(context)}\n\n"
                                     "Rispondi con una battuta, nel tuo tono."},
     ]
-    payload = {"model": CHANNEL_MODEL or DEFAULT_MODEL, "messages": messaggi,
+    payload = {"model": _channel_model(vitalita), "messages": messaggi,
                "stream": False, "think": False, "max_tokens": CHANNEL_MAX_TOKENS,
                "options": {"num_ctx": _channel_num_ctx()}}
     base = advanced_config["ollama"]["url"].rstrip("/")
@@ -2370,6 +2410,37 @@ def channel_status():
     })
 
 
+@app.route('/channels')
+def channels_overview():
+    """Stato per piattaforma per la scheda Social: catalogo + token + driver.
+
+    Nessun segreto: i token non escono mai. Solo configurato sì/no, superfici
+    supportate e l'ultima fotografia riportata dal driver.
+    """
+    runtime = channel_runtime.describe()
+    configured = set(channel_policy.clients)
+    voci = []
+    for voce in KNOWN_CHANNELS:
+        chiave = voce["key"]
+        stato = runtime.get(chiave, {})
+        voci.append({
+            "key": chiave,
+            "label": voce["label"],
+            "icon": voce["icon"],
+            "auth": voce["auth"],
+            "surfaces": list(voce["surfaces"]),
+            "hint": voce["hint"],
+            "first_class": bool(voce.get("first_class")),
+            "configured": chiave in configured,
+            "driver": stato.get("state") or None,
+            "pending_commands": stato.get("pending_commands", 0),
+        })
+    return jsonify({"ok": True, "enabled": channel_policy.enabled,
+                    "operator_configured": bool(CHANNEL_OPERATOR),
+                    "vitality": mesh_vitality(_node_list()),
+                    "channels": voci})
+
+
 @app.route('/channel/ingest', methods=['POST'])
 def channel_ingest():
     """Eventi dalla superficie di un canale: messaggi, privati, tip, ingressi.
@@ -2402,7 +2473,8 @@ def channel_ingest():
             importo = evento.get("amount")
             channel_guard.registra_tip(channel=canale, author=autore, importo=importo)
             _channel_remember(canale, f"tip:{autore}", "tip",
-                              f"{autore} ha donato {importo if importo else 'un tip'}")
+                              f"{autore} ha donato {importo if importo else 'un tip'}",
+                              surface=superficie)
             risultati.append({"author": autore, "kind": "tip", "verdict": "ok",
                               "reasons": [], "strikes": 0, "action": None,
                               "key": str(evento.get("key", ""))[:64]})
@@ -2423,7 +2495,8 @@ def channel_ingest():
     ondata = channel_guard.spam_wave(canale)
     if ondata and _channel_remember(canale, "spam_wave", "spam_wave",
                                     f"ondata di spam: {ondata['count']} messaggi sospetti "
-                                    f"in {int(ondata['window_s'] / 60)} minuti"):
+                                    f"in {int(ondata['window_s'] / 60)} minuti",
+                                    surface=superficie):
         push_log('channel', f"{canale}: ondata di spam registrata in memoria",
                  detail=f"count={ondata['count']}", source=f"channel:{canale}",
                  status='warn')
@@ -2461,6 +2534,12 @@ def channel_reply():
     eta_piu_vecchio = max(0.0, float(data.get("oldest_age_s") or 0.0))
     forza = bool(data.get("force"))
     max_chars = int(data.get("max_chars") or 0) or 90
+
+    presentazione = _channel_presentazione(contesto)
+    if presentazione is not None:
+        return jsonify({"ok": True, "channel": canale, "action": "reply",
+                        "text": presentazione, "command": True,
+                        "disclosure": {"required": True, "rule": "auto-presentazione"}})
 
     decisione = channel_pacing.decide(channel=canale, pending=pendenti,
                                       oldest_age_s=eta_piu_vecchio, force=forza)
@@ -2926,7 +3005,10 @@ def v1_chat_completions():
     if _persona_enabled():
         user_text = _last_user_text(messages)
         decisione = should_disclose(user_text)
-        messages = _with_persona(messages, user_text)
+        superficie = str(data.get("surface", "") or "").strip() \
+            or request.headers.get("X-Hyperspace-Surface", "").strip() \
+            or "openwebui"
+        messages = _with_persona(messages, user_text, surface=superficie)
         data = {**data, "messages": messages}
         if decisione.required:
             push_log('system', 'Persona: disclosure richiesta',
@@ -5093,6 +5175,10 @@ _ENV_META = [
      "label": "Token dei canali",
      "hint": "Elenco nella forma \"cam4=<token>;cb=<token>\": un token di almeno 32 caratteri per canale. Senza questa voce nessuna route /channel/* risponde (fail-closed), come per MCP. Genera con: python -c \"import secrets; print(secrets.token_hex(32))\".",
      "default": ""},
+    {"section": "Canali esterni", "key": "CHANNEL_OPERATOR", "type": "str",
+     "label": "Operatore (chi è \"io\")",
+     "hint": "Nome autore dell'operatore nel dialogo interno a due voci (più alias separati da virgola). Vuoto = nessuna etichetta speciale.",
+     "default": ""},
     {"section": "Canali esterni", "key": "CHANNEL_ENABLED", "type": "bool",
      "label": "Canali attivi",
      "hint": "false chiude tutte le route /channel/* senza cancellare i token.",
@@ -5200,6 +5286,7 @@ _ENV_RUNTIME_GET = {
     "NODE_ENDPOINTS": lambda: ",".join(NODE_ENDPOINTS),
     "TOOL_CAPABLE_MODELS": lambda: _TOOL_CAPABLE_OVERRIDE,
     "NATIVE_CHAT_FALLBACK_MODELS": lambda: _NATIVE_CHAT_FALLBACK_OVERRIDE,
+    "CHANNEL_OPERATOR": lambda: ",".join(sorted(CHANNEL_OPERATOR)),
 }
 
 def _coerce_env_val(meta: dict, raw):

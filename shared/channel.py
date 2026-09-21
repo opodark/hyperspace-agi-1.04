@@ -111,6 +111,44 @@ def parse_clients(text) -> tuple[dict, list[str]]:
     return canali, problemi
 
 
+# ── Catalogo delle piattaforme social ─────────────────────────────────────────
+# La scheda "Social" del dashboard mostra una card per piattaforma: qui vive il
+# catalogo dichiarativo. Aggiungere un social = aggiungere una voce, senza
+# toccare il resto del canale (token, moderazione e ritmo sono già per-nome).
+KNOWN_CHANNELS: tuple[dict, ...] = (
+    {"key": "telegram", "label": "Telegram", "icon": "✈️",
+     "auth": "bot_token", "surfaces": ("chat", "pm", "thread"),
+     "hint": "Bot token da @BotFather; long-polling getUpdates, nessun intent privilegiato.",
+     "first_class": True},
+    {"key": "discord", "label": "Discord", "icon": "🎮",
+     "auth": "bot_token", "surfaces": ("chat", "pm", "thread"),
+     "hint": "Bot applicazione + intent Message Content; gateway WebSocket.",
+     "first_class": True},
+    {"key": "cam4", "label": "CAM4", "icon": "📹",
+     "auth": "account_browser", "surfaces": ("chat", "pm"),
+     "hint": "Account + driver browser (DOM), come cam4_chatbot.py.",
+     "first_class": True},
+    {"key": "cb", "label": "Chaturbate", "icon": "🎥",
+     "auth": "account_browser", "surfaces": ("chat", "pm"),
+     "hint": "Account + driver browser (DOM).",
+     "first_class": True},
+    {"key": "instagram", "label": "Instagram", "icon": "📸",
+     "auth": "account_browser", "surfaces": ("dm",),
+     "hint": "Placeholder: DM via account/browser.",
+     "first_class": False},
+    {"key": "x", "label": "X (Twitter)", "icon": "🐦",
+     "auth": "api_token", "surfaces": ("dm",),
+     "hint": "Placeholder: API token.",
+     "first_class": False},
+)
+
+
+def known_channel(key: str) -> dict | None:
+    """Voce del catalogo per chiave, o None se sconosciuta."""
+    chiave = str(key or "").strip().lower()
+    return next((v for v in KNOWN_CHANNELS if v["key"] == chiave), None)
+
+
 class ChannelPolicy:
     """Chi può usare le route /channel/*."""
 

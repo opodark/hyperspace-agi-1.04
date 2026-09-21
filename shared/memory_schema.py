@@ -140,7 +140,7 @@ def normalize_entry(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     retention = raw.get("retention")
     if retention in RETENTION_TIERS:
         normalized["retention"] = retention
-    for key in ("plugin", "prompt", "response", "summary", "detail"):
+    for key in ("plugin", "prompt", "response", "summary", "detail", "surface"):
         if raw.get(key) is not None:
             normalized[key] = raw[key]
     return normalized

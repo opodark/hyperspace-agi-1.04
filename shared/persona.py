@@ -302,6 +302,79 @@ def default_persona(name: str | None = None) -> Persona:
     )
 
 
+# ── Contesto della superficie (dove parla, NON chi è) ─────────────────────────
+# L'identità è UNA (il documento qui sopra); il contesto del mezzo è un layer
+# operativo separato che dice all'agente DOVE sta parlando e COME adattarsi:
+# chi legge, lunghezza, formato, cosa non portare da un mezzo all'altro. Non
+# entra nel documento d'identità e non scrive memoria: è solo prompt.
+SURFACE_CONTEXTS = {
+    "openwebui": "Rispondi all'operatore nella console del sistema: risposte complete e "
+                 "tecniche, strumenti ed elenchi quando servono; niente tono da stanza.",
+    "web-node": "Rispondi da un client web leggero: diretto e compatto; il client può non "
+                "mostrare markdown ricco o strumenti.",
+    "terminal": "Rispondi a un comando (hs.py / MCP / tool): testo asciutto, una riga quando "
+                "basta, niente chiacchiere.",
+    "channel-chat": "Una sola battuta, breve e nel tuo tono; niente elenchi, niente "
+                    "ragionamento ad alta voce, niente riferimenti alla console o ad altri mezzi.",
+    "channel-pm": "Un messaggio privato: tono della stanza ma più diretto; sempre una battuta, "
+                  "niente elenchi.",
+    "discord-chat": "Stai scrivendo su Discord (server): markdown essenziale (grassetto/codice), "
+                    "una risposta alla volta, fino a ~2000 caratteri, niente flood.",
+    "discord-pm": "Stai scrivendo in un DM di Discord: più diretto, stessa misura e stesso tono.",
+    "telegram-chat": "Stai scrivendo su Telegram (gruppo): markdown essenziale, una risposta alla volta, fino a ~4096 caratteri, niente flood.",
+    "telegram-pm": "Stai scrivendo in una chat privata di Telegram: più diretto, stessa misura e stesso tono.",
+}
+
+
+def normalize_surface(surface, channel=None) -> str:
+    """Chiave normalizzata della superficie ('' se sconosciuta).
+
+    Con un canale si riduce a ``channel-chat`` o ``channel-pm`` (il nome preciso
+    della piattaforma viene detto nel blocco, non codificato nella chiave).
+    Senza canale restituisce la superficie solo se è fra quelle conosciute.
+    """
+    s = str(surface or "").strip().lower()
+    c = str(channel or "").strip().lower()
+    if c:
+        kind = "chat" if s in ("chat", "pubblica", "public", "") else "pm"
+        specifico = f"{c}-{kind}"
+        return specifico if specifico in SURFACE_CONTEXTS else f"channel-{kind}"
+    return s if s in SURFACE_CONTEXTS else ""
+
+
+def surface_context(surface=None, *, channel=None) -> str:
+    """Blocco deterministico di contesto del mezzo, separato dall'identità."""
+    chiave = normalize_surface(surface, channel)
+    testo = SURFACE_CONTEXTS.get(chiave)
+    if not testo:
+        return ""
+    righe = ["## Contesto del mezzo"]
+    if channel:
+        nome = str(channel).strip().lower()
+        if chiave.endswith("-chat"):
+            righe.append(f"Sei su {nome} (chat).")
+        elif chiave.endswith("-pm"):
+            righe.append(f"Sei su {nome} (privati).")
+    righe.append(testo)
+    return "\n".join(righe)
+
+
+def build_introduction(persona: Persona) -> str:
+    """Auto-presentazione deterministica e fattuale (nessun modello, nessun hype).
+
+    Deriva dal documento d'identità: nome, natura di IA, scopo e confini. Serve
+    al flusso "l'operatore presenta → Aurora si annuncia" ed è sempre
+    disclosure-safe: dichiara di essere un'IA qualunque cosa sia stata scritta
+    prima.
+    """
+    righe = [f"Sono {persona.name}, un'IA: non sono una persona e non lo lascio intendere."]
+    if persona.purpose:
+        righe.append(persona.purpose)
+    if persona.boundaries:
+        righe.append("I miei confini: " + "; ".join(persona.boundaries) + ".")
+    return " ".join(righe)
+
+
 def build_system_block(persona: Persona, decision: DisclosureDecision | None = None,
                        *, observations: int = 5) -> str:
     """Blocco di identità da iniettare nel system prompt.
@@ -409,8 +482,15 @@ class PersonaStore:
                 self.problems.append(f"salvataggio osservazione fallito: {e}")
         return osservazione
 
-    def system_block(self, user_text: str | None = None) -> str:
-        return build_system_block(self.persona, should_disclose(user_text))
+    def system_block(self, user_text: str | None = None, *,
+                     surface: str | None = None, channel: str | None = None) -> str:
+        """Identità + (se noto) contesto del mezzo. L'identità non cambia mai
+        con la superficie: il contesto è un'aggiunta separata, non una modifica."""
+        blocco = build_system_block(self.persona, should_disclose(user_text))
+        contesto = surface_context(surface, channel=channel)
+        if contesto:
+            return blocco + "\n\n" + contesto
+        return blocco
 
     def describe(self) -> dict:
         """Stato per l'operatore (`GET /persona`). Non contiene segreti."""

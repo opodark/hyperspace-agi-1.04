@@ -25,6 +25,7 @@ Un record normalizzato contiene almeno:
 | `type` | string | sì | tipo di record (vedi sotto) |
 | `content` | string | sì | contenuto ricercabile |
 | `source` | string | sì | origine (`obsidian-vault`, `mesh`, `dream`, nodo, plugin…) |
+| `surface` | string | no | mezzo/contesto di provenienza (`openwebui`, `web-node`, `terminal`, `channel:cam4`, …) |
 | `node_id` | string | no | nodo di provenienza |
 | `model` | string | no | modello che ha prodotto il record |
 | `task_id` | string | no | task/sessione di appartenenza |

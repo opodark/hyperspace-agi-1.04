@@ -13,11 +13,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from shared.channel import (ChannelGuard, ChannelPolicy, ReplyPacing, classifica,  # noqa: E402
-                           normalizza, parse_clients)
+from shared.channel import (KNOWN_CHANNELS, ChannelGuard, ChannelPolicy, ReplyPacing,  # noqa: E402
+                           classifica, known_channel, normalizza, parse_clients)
 
 MAIN_SOURCE = ROOT / "control-plane" / "main.py"
 TOKEN = "t" * 40
+
+
+class CatalogTests(unittest.TestCase):
+    def test_telegram_e_discord_first_class(self):
+        self.assertIsNotNone(known_channel("telegram"))
+        self.assertTrue(known_channel("telegram")["first_class"])
+        self.assertIsNotNone(known_channel("discord"))
+        self.assertEqual(known_channel("nonesiste"), None)
+
+    def test_catalogo_copre_le_piattaforme_attese(self):
+        keys = {c["key"] for c in KNOWN_CHANNELS}
+        self.assertTrue({"telegram", "discord", "cam4", "cb"} <= keys)
+
+    def test_la_route_social_espone_il_catalogo(self):
+        tree = ast.parse(MAIN_SOURCE.read_text(encoding="utf-8"))
+        funzioni = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        self.assertIn("channels_overview", funzioni)
+        body = ast.unparse(funzioni["channels_overview"])
+        self.assertIn("KNOWN_CHANNELS", body)
+        self.assertIn("channel_policy", body)
 
 
 class ParseTests(unittest.TestCase):
