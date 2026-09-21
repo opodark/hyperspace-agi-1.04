@@ -78,7 +78,7 @@ def author_of(msg):
 
 def main():
     offset = 0
-    chats = {}  # chat_id -> {"surface": str, "context": deque, "dirty": bool}
+    chats = {}  # chat_id -> {"surface": str, "messages": deque, "batch_start": float}
     mode = "auto"
     last_commands = 0.0
     last_state = 0.0
@@ -100,32 +100,37 @@ def main():
             chat = msg.get("chat") or {}
             chat_id = chat.get("id")
             entry = chats.setdefault(chat_id, {"surface": "chat",
-                                               "context": deque(maxlen=MAX_CONTEXT),
-                                               "dirty": False})
+                                               "messages": deque(maxlen=MAX_CONTEXT),
+                                               "batch_start": time.time()})
             entry["surface"] = surface_of(chat)
             author, text = author_of(msg), msg["text"]
-            entry["context"].append({"author": author, "text": text})
-            entry["dirty"] = True
+            if not entry["messages"]:
+                entry["batch_start"] = time.time()
+            entry["messages"].append({"author": author, "text": text})
             cp_post("/channel/ingest", {"surface": entry["surface"],
                                         "events": [{"author": author, "text": text,
                                                     "key": str(msg.get("message_id"))}]})
 
-        # 2. Risposta per chat con novità
+        # 2. Risposta: si chiede finché il batch non matura (il CP decide il ritmo)
         if mode != "off":
             for chat_id, entry in list(chats.items()):
-                if not entry["dirty"] or not entry["context"]:
+                if not entry["messages"]:
                     continue
-                entry["dirty"] = False
-                res = cp_post("/channel/reply", {"surface": entry["surface"],
-                                                 "context": list(entry["context"]),
-                                                 "pending": len(entry["context"]),
-                                                 "oldest_age_s": 0.0, "force": False,
-                                                 "max_chars": 900})
+                adesso = time.time()
+                res = cp_post("/channel/reply", {
+                    "surface": entry["surface"],
+                    "context": [{"author": m["author"], "text": m["text"]}
+                                for m in entry["messages"]],
+                    "pending": len(entry["messages"]),
+                    "oldest_age_s": max(0.0, adesso - entry["batch_start"]),
+                    "force": False, "max_chars": 900})
                 if res.get("action") == "reply" and res.get("text"):
                     try:
                         tg("sendMessage", chat_id=chat_id, text=res["text"])
                         cp_post("/channel/result", {"kind": "reply", "ok": True,
                                                     "target": str(chat_id)})
+                        entry["messages"].clear()
+                        entry["batch_start"] = adesso
                         print(f"[telegram] inviata risposta a {chat_id}", flush=True)
                     except requests.RequestException as e:
                         cp_post("/channel/result", {"kind": "reply", "ok": False,
