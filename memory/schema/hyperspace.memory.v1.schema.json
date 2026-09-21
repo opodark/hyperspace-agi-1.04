@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hyperspace-agi.local/memory/schema/hyperspace.memory.v1.schema.json",
+  "title": "HyperSpace memory entry (hyperspace.memory.v1)",
+  "type": "object",
+  "required": ["schema", "id", "type", "content", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "type": "string", "const": "hyperspace.memory.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "ts": { "type": ["string", "null"], "description": "ISO-8601 UTC timestamp" },
+    "timestamp": { "type": ["number", "null"], "description": "epoch seconds" },
+    "type": {
+      "type": "string",
+      "enum": ["memory", "note", "decision", "task_state", "artifact", "dream", "dream_insight", "vault_note"]
+    },
+    "content": { "type": "string", "minLength": 1 },
+    "source": { "type": "string" },
+    "node_id": { "type": ["string", "null"] },
+    "model": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "null"] },
+    "status": { "type": "string", "enum": ["active", "quarantined", "revoked"] },
+    "priority": { "type": "integer", "minimum": 1, "maximum": 5 },
+    "access_count": { "type": "integer", "minimum": 0 },
+    "retention": { "type": "string", "enum": ["operative", "project", "persistent"] }
+  }
+}

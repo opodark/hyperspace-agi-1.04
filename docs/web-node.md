@@ -29,6 +29,11 @@ The web node should be a subtree or package that can be reused in multiple forms
 
 The browser node should not assume Docker, local model installs, or privileged system access. It should rely on browser-safe primitives and a strict task envelope so the control plane can route only safe work to it.
 
+The current web node remains a lightweight mesh participant. The planned
+Playwright browser worker in the [development tooling architecture](development-tooling-architecture.md)
+is a separate runtime for reproducible UI tests, screenshots, and traces; it is
+not executed inside an end user's browser tab.
+
 ## Interface with the control plane
 
 The web node cannot be addressed by the control plane: a browser tab has no

@@ -53,6 +53,19 @@ curl -s -X POST http://localhost:8085/logs/add -H 'Content-Type: application/jso
 - **Dashboard del CP** (`:8085/dashboard` → Log Viewer → **Code**): i tre tipi
   uniti in un flusso solo; il `TraceID` è nella riga espansa di ogni evento.
 
+## Tooling condiviso fra coding agent
+
+I partecipanti usano un unico ambiente HyperSpace per modifica, lint, test,
+debug, security review e futura verifica browser/rete. L'esperienza è comune,
+ma l'esecuzione segue i confini descritti in
+[development-tooling-architecture.md](development-tooling-architecture.md): il
+codice gira nella Dev Sandbox offline, mentre Playwright e i tool di pentest
+girano in worker dedicati.
+
+Una proposta può quindi riferire nello stesso filo il diff Forge e i report dei
+controlli tramite `traceId`. Il messaggio nel log resta narrativo: non concede
+privilegi, non seleziona target di rete e non applica automaticamente il diff.
+
 ## I limiti, dichiarati
 
 - **Nessuna macchina a stati.** Niente impedisce "approvato ma mai applicato" o

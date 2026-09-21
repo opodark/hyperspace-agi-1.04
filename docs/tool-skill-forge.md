@@ -4,6 +4,11 @@ The Forge is the controlled authoring area exposed by the Control Plane dashboar
 Generated code is always stored as an inert draft under the persistent Control Plane
 data directory; it is never imported or executed automatically.
 
+Within the [unified development tooling architecture](development-tooling-architecture.md),
+the Forge is the review and artifact layer shared by the offline Dev Sandbox and
+future benchmark, browser, dependency-audit, and Security Lab workers. It does
+not absorb their execution privileges.
+
 ## Workflow
 
 1. Describe a tool or skill in the **Forge** dashboard tab, or export a unified

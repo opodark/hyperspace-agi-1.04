@@ -5,6 +5,10 @@ accesso in scrittura al checkout operativo. Il sandbox è un runner separato e
 offline che lavora soltanto su copie usa-e-getta del codice incluso nella sua
 immagine.
 
+È il runtime offline dell'[ambiente di sviluppo unificato](development-tooling-architecture.md):
+gli utenti e i coding agent lo vedono insieme a Forge, benchmark e strumenti di
+security, mentre browser e pentest con rete girano in worker separati.
+
 Il backend preferito è Docker Sandboxes (`sbx`), eseguito dall'host-agent in
 una microVM con clone privato della repository sorgente montata in sola
 lettura. Se `sbx` non è installato, autenticato o disponibile, la creazione di
@@ -98,5 +102,7 @@ un essere umano o da un futuro gate di review separato.
 - Il runner è sequenziale e applica limiti a livello di container; non è ancora
   un pool di microVM per task ostili multi-tenant.
 - Nessun merge automatico: è deliberatamente fuori dal perimetro iniziale.
+- Browser, Nmap e ZAP non vengono aggiunti a questa immagine: appartengono ai
+  worker dedicati descritti nell'architettura del tooling.
 
 Il ciclo notturno è documentato in [nightly-development-dream.md](nightly-development-dream.md).

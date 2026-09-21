@@ -29,6 +29,7 @@ See the [HIP section of ROADMAP.md](ROADMAP.md#visione-a-lungo-termine--hyperspa
 - `registry/` — service discovery, node registry, public landing/dashboard.
 - `control-plane/` — orchestration, OpenAI-compatible API, tool calling loop, connector fabric, dashboard, task management.
 - Tool & Skill Forge — dashboard workflow for generating, editing, validating and explicitly approving inert tool or skill drafts; see [`docs/tool-skill-forge.md`](docs/tool-skill-forge.md).
+- Dev Sandbox and development tooling — one HyperSpace workflow for editing, tests, debugging, security review and future laboratory pentest workers, with execution isolated by runtime; see [`docs/development-tooling-architecture.md`](docs/development-tooling-architecture.md).
 - `node/` — agent worker runtime (ECDSA identity, PEX, `/execute`).
 - `memory-graph/` — exports control-plane memory to the Obsidian vault; note titling is routed through the control-plane task queue (`/task/create` + `/task/assign`), reusing the same node scoring as any other task.
 - `obsidian/` — Obsidian in the browser (KasmVNC) for browsing the memory vault.
@@ -172,4 +173,3 @@ cips, e altri contributori. Vedi [NOTICE](NOTICE).
 
 Ogni file sorgente porta in testa `SPDX-License-Identifier: Apache-2.0`, e
 `tests/test_licensing.py` lo verifica: la convenzione e' imposta, non ricordata.
-

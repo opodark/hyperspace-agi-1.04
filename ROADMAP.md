@@ -49,6 +49,14 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Documentare chiaramente i confini: cosa può essere modificato in autonomia, cosa richiede approvazione, cosa è vietato toccare.
 - Eseguire sviluppo e test agentici soltanto nel Code Sandbox offline; il checkout operativo riceve modifiche esclusivamente dopo review separata.
 
+### Tooling unificato per sviluppo e security
+- Presentare Dev Sandbox, Forge, benchmark, debug, test, security review e pentest di laboratorio come capacità di un unico HyperSpace.
+- Separare i runtime di esecuzione in base all'accesso richiesto: sandbox offline, dependency audit, browser worker e security-lab worker.
+- Usare un contratto comune per job, finding, report, artefatti e `traceId`, così coding agent e UI non dipendono dallo strumento concreto.
+- Trattare Nmap, ZAP e Playwright come strumenti utili al ciclo di sviluppo dei coding agent, mantenendoli fuori dall'immagine sandbox offline.
+- Mantenere il monorepo finché worker e adapter non richiedono release, distribuzione o manutenzione indipendenti.
+- Assumere nella fase corrente un ambiente privato single-tenant con due operatori fidati: l'hardening completo resta necessario prima dell'uso pubblico, multiutente o autonomo, ma non blocca benchmark e worker di laboratorio.
+
 ## Roadmap per fasi
 
 ### Fase 0 — Riallineamento strategico
@@ -76,6 +84,9 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Abilitare workflow di sviluppo assistito su file locali, review diff e task decomposition.
 - Estendere il Tool & Skill Forge dalla fondazione locale già implementata agli adapter di pubblicazione controllata per Open WebUI, MCP e OpenAPI.
 - Separare chiaramente runtime production e workspace di sviluppo.
+- Consolidare l'esperienza unica descritta in [docs/development-tooling-architecture.md](docs/development-tooling-architecture.md), mantenendo separati runner offline, browser e security lab.
+- Portare il benchmark dei modelli nella sandbox e confrontare workflow con e senza skill ECC su fixture verificabili.
+- Aggiungere in sequenza report persistenti, dependency audit, Playwright e infine Nmap/ZAP nel laboratorio privato.
 
 ### Fase 4 — Multi-node e mesh
 - Passare da accesso singolo via Tailscale a topologia multi-nodo più completa quando il branch mesh sarà pronto.
@@ -104,11 +115,14 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 | P1 | Nightly Development Dream | Esperimento notturno con microVM preferita, fallback offline, doppia verifica e review senza auto-apply | implementato |
 | P1 | Dream review lifecycle | Revisione, promozione o rifiuto delle ipotesi generate nei periodi di inattività | fondazione implementata |
 | P1 | Tool & Skill Forge | Generazione, modifica, validazione e approvazione esplicita di draft inerti | fondazione implementata |
-| P1 | Hermes Memory Backend | Sostituire interamente la memoria cognitiva HyperSpace con Hermes; mantenere API, policy, review e viste come adapter senza dual-write | progettato, migrazione da fare |
+| P1 | Unified Development Tooling | Un'unica UI e un contratto comune per Dev Sandbox, skill, test, debug e security review | architettura fissata; sandbox e Forge implementati |
+| P1 | Hermes Memory Backend | Sostituire interamente la memoria cognitiva HyperSpace con Hermes; mantenere API, policy, review e viste come adapter senza dual-write | implementato (backend default `hermes`); restano verifica operativa snapshot/recovery e legacy read-only |
 | P1 | `profiles/linux-primary/` | Base del futuro target Linux production | da fare |
 | P2 | `benchmarks/` | Misure comparabili su modelli, RAM e latenza | da fare |
-| P2 | `memory/schema/` | Contratti per memoria breve e persistente | da fare |
-| P2 | Dream evaluation | Dataset e metriche per utilità, novità, correttezza e costo dei sogni | da fare |
+| P2 | Browser Worker | Playwright, screenshot e Trace Viewer come artefatti di sviluppo | pianificato |
+| P2 | Security Lab Worker | Nmap e ZAP su target dichiarati nella rete privata di laboratorio | pianificato |
+| P2 | `memory/schema/` | Contratti per memoria breve e persistente | contratto v1 e JSON Schema in `memory/schema/`, implementazione in `shared/memory_schema.py` |
+| P2 | Dream evaluation | Dataset e metriche per utilità, novità, correttezza e costo dei sogni | metriche D3 in `shared/dream_evaluation.py`; correttezza e costo dipendono da annotazioni/strumentazione |
 | P2 | `ops/bootstrap/` | Script di setup e recovery nodo | da fare |
 
 ## Decisioni immediate
@@ -118,6 +132,8 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Usare **Tailscale** come soluzione di accesso remoto e collegamento sicuro in attesa della mesh completa.
 - Inserire **Claude Code con Sonnet 5** come teammate di sviluppo che opera sui file locali del repository sotto policy di progetto.
 - Mantenere i sogni locali, inattivi per default e separati dalla memoria autorevole finché il ciclo di revisione non è validato.
+- Tenere tool e skill sotto un unico HyperSpace, separando i processi di esecuzione in base a filesystem, browser e rete invece di creare prodotti distinti.
+- Dare priorità a benchmark sandboxizzato, report e nuovi strumenti di sviluppo; completare l'hardening end-to-end prima di ampliare utenti, autonomia o esposizione pubblica.
 
 ## Rischi principali
 - Ambiguità tra "framework di sviluppo" e "runtime operativo", con conseguente dispersione architetturale.
@@ -127,6 +143,8 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Confusione tra agenti runtime interni e agenti-collaboratori esterni al runtime.
 - Promozione di ipotesi plausibili ma errate nella memoria persistente, con contaminazione delle decisioni successive.
 - Consumo di risorse o latenza sul lavoro interattivo causati da cicli in background non correttamente interrotti.
+- Trasformare la sandbox offline in un'immagine monolitica con browser e accesso di rete, perdendo isolamento e rendendo i risultati meno riproducibili.
+- Lasciare che il threat model fidato della fase iniziale diventi implicitamente quello di un futuro deployment pubblico o multiutente.
 
 ## Criteri di successo
 - Un nodo Primary Brain avviabile in modo ripetibile su Windows con setup documentato.
@@ -134,6 +152,7 @@ Missione, lessico e principi architetturali sono fissati in [VISION.md](VISION.m
 - Memoria e logging sufficienti a ricostruire una run end-to-end.
 - Sogni ricostruibili dalle fonti, revisionabili e incapaci di modificare la memoria autorevole senza promozione esplicita.
 - Workflow collaborativo stabile tra sviluppo umano, Claude Code e runtime locale.
+- Un coding agent può attraversare modifica, lint, test, analisi statica, report e proposta Forge attraverso un contratto HyperSpace unico, mentre ogni passo gira nel runtime appropriato.
 - Profilo Linux già disegnato, anche se non ancora target primario di produzione.
 
 ## Sintesi operativa

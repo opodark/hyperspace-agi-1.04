@@ -5,6 +5,17 @@ backend di memoria di HyperSpace. Non deve esistere un secondo archivio
 long-term proprietario di HyperSpace sincronizzato in parallelo: Hermes e' la
 source of truth per memoria personale, sessionale, semantica e procedurale.
 
+## Stato (settembre 2026)
+
+La migrazione e' implementata nel codice e attiva per default: `MEMORY_BACKEND`
+e' `hermes` nel Compose; il control-plane instrada letture, scritture, ricerca e
+lifecycle verso il bridge (`shared/hermes_memory.py` → `scripts/hermes_memory_bridge.py`)
+e il backend legacy (`memory.json.gz`, `omega_query`/`omega_store` come archivio
+proprietario) e' disabilitato come percorso di scrittura. Restano i passi
+operativi del [Piano di sostituzione](#piano-di-sostituzione): snapshot verificato
+degli archivi legacy, test di backup/restore di Hermes, confronto per un periodo e
+rimozione finale del vecchio backend con approvazione esplicita.
+
 ## Responsabilita'
 
 Hermes possiede e persiste:
