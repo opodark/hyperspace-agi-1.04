@@ -1026,6 +1026,28 @@ def _channel_name() -> str:
             or "")
 
 
+# Perché il bot NON ha risposto: nei log, ma non a ogni giro.
+# Il driver chiede una risposta a ogni secondo finché il batch non matura: una
+# riga per richiesta sarebbe flood, zero righe rendono impossibile rispondere a
+# "perché tace?" — che è la prima domanda quando sembra sorda. Una per minuto, per
+# (canale, motivo), tiene le due cose insieme.
+_PACING_LOG_AT: dict = {}
+PACING_LOG_EVERY_S = 60.0
+
+
+def _log_pacing_reason(channel: str, decisione: dict) -> bool:
+    """Scrive il motivo di un silenzio, al massimo una volta al minuto."""
+    chiave = f"{channel}:{decisione.get('action', '')}"
+    adesso = time.time()
+    if adesso - _PACING_LOG_AT.get(chiave, 0.0) < PACING_LOG_EVERY_S:
+        return False
+    _PACING_LOG_AT[chiave] = adesso
+    push_log('channel', f"{channel}: risposta non inviata ({decisione.get('action')})",
+             detail=str(decisione.get("reason", ""))[:200],
+             source=f"channel:{channel}", status='info')
+    return True
+
+
 def _channel_remember(channel: str, key: str, kind: str, text: str, *,
                       surface: str = "", **extra) -> bool:
     """Scrive UN fatto della stanza nella memoria condivisa, con debounce.
@@ -2753,6 +2775,9 @@ def channel_reply():
                                       oldest_age_s=eta_piu_vecchio, force=forza,
                                       vitality=mesh_vitality(_node_list()))
     if decisione["action"] != "reply":
+        # Il motivo entra nei log (una volta al minuto, per non fare flood): è la
+        # risposta a "perché tace?", che prima si poteva solo dedurre.
+        _log_pacing_reason(canale, decisione)
         return jsonify({"ok": True, "channel": canale, "action": decisione["action"],
                         "reason": decisione["reason"]})
 

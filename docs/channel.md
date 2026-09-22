@@ -60,6 +60,19 @@ Escalation is deliberately slow: the **first** strike does not punish anyone, be
 | `CHANNEL_FLOOD_MAX` / `CHANNEL_FLOOD_WINDOW_S` | `6` / `15` | burst detection |
 | `CHANNEL_STRIKE_MUTE` / `CHANNEL_STRIKE_BAN` | `2` / `3` | escalation thresholds |
 
+The pacing defaults are tuned for a **crowded room**, where the bot must not
+answer every line. In a **conversation** they read as "she's switched off": on
+this node (2026-09-22) the values are `8` / `3` / `3`, and the measured reply
+latency went from ~15 s to 0.9-6.6 s by also halving the prompt
+(`CHANNEL_CONTEXT_MESSAGES=12`, `CHANNEL_NUM_CTX=4096`). Raising that context
+buys memory of the thread, and costs seconds on every answer: in a chat, seconds
+are the thing you notice.
+
+Moreover, when the pacing decides **not** to answer, the reason is written to the
+`channel` log (`wait`/`skip` plus why), at most once a minute per channel — the
+driver asks once a second while a batch ripens, so without the cap it would be a
+flood. "Why is she silent?" is a log line, not a guess.
+
 All of them are in the Setup tab under **Canali esterni** (the tokens as password fields). Saving applies immediately; strike counters are preserved (`reconfigure`, not a fresh guard).
 
 On the driver side, three variables: `CHANNEL_URL` (default `http://127.0.0.1:8088`), `CHANNEL_TOKEN` (empty = local mode) and `CHANNEL_NAME`.
@@ -261,6 +274,35 @@ Due Aurora nella stessa stanza sono possibili, ma il driver deve sapere due cose
   (`@username`) o risponde a un nostro messaggio. Gli altri messaggi restano nel
   contesto — così la risposta ha il filo della conversazione — ma non fanno
   intervenire.
+
+  **La conversazione resta aperta**: dopo una risposta, per
+  `TELEGRAM_CONVERSATION_WINDOW_S` (default 900 = 15 minuti) la mention non serve
+  più. Serve perché chi ha avviato una conversazione **non si chiama per nome a
+  ogni frase**, e pretendere il nome è esattamente ciò che fa sembrare sorda una
+  che stava rispondendo: nei log del 2026-09-22 quattro messaggi ingeriti e zero
+  tentativi di risposta, perché il nome non c'era. Passata la finestra, torna a
+  servire il nome: non resta in ascolto per sempre di una stanza che non la cerca.
+  A `0` si torna al comportamento precedente.
+- **mentre pensa, la chat lo vede**: prima di chiedere la risposta al
+  control-plane il driver manda `sendChatAction: typing` (rinnovato al massimo ogni
+  4 s). Non è estetica: il modello impiega qualche secondo, e senza quel segnale la
+  chat sembra morta proprio mentre lei sta rispondendo.
+
+### Una sola istanza per superficie
+
+Driver e ponte prendono un lucchetto (`data/telegram-driver.lock`,
+`data/comfy-bridge.lock`, vedi `shared/single_instance.py`) e il secondo processo
+**non parte**, con il motivo nel log. Serve perché Telegram consegna ogni update a
+**uno solo** dei poller di un bot: due driver non litigano e non lo scrivono nei
+log, si dividono le battute a metà — dall'esterno è una che risponde a metà.
+Il lucchetto è del sistema operativo, quindi muore con il processo (niente file
+da cancellare a mano) e il file contiene il PID di chi lo tiene.
+
+> Su Windows `.venv\Scripts\python.exe` è un *launcher* che lancia l'interprete
+> vero: **ogni superficie sono due processi** (shim + interprete), stessa riga di
+> comando. Se `-Check` mostra due PID per il driver, è normale — e non è il caso
+> "due driver": per distinguerlo si guarda se ci sono conflitti `getUpdates` nel
+> log del driver, che con due poller veri compaiono subito.
 
 La combinazione utile in un gruppo con più bot è quindi **privacy OFF** (vede
 tutto, quindi ha contesto) **+ mention ON** (parla solo se chiamata). In

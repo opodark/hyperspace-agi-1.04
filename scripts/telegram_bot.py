@@ -15,6 +15,15 @@ Config (variabili d'ambiente):
                        messaggio. Serve nei gruppi con PIÙ bot (due Aurora nello
                        stesso gruppo risponderebbero entrambe alla stessa
                        battuta); default 0 = risponde come oggi.
+  TELEGRAM_CONVERSATION_WINDOW_S
+                       per quanti secondi la conversazione resta aperta dopo una
+                       risposta (default 900 = 15 minuti). Dentro la finestra non
+                       serve ripetere il nome: chi ha avviato una conversazione non
+                       si chiama per nome a ogni frase. A 0 si torna a pretendere
+                       la menzione a ogni messaggio.
+  TELEGRAM_LOCK_FILE   lucchetto di istanza singola (default data/telegram-driver.lock).
+                       Serve perché Telegram consegna ogni update a UNO solo dei
+                       poller: due driver si dividono i messaggi senza dare errore.
 
 Operativo: per LEGGERE i messaggi il bot va aggiunto a un GRUPPO (o
 supergruppo), non a un canale broadcast (lì può solo pubblicare). Di default il
@@ -25,11 +34,13 @@ TELEGRAM_REQUIRE_MENTION=1 (parla solo se chiamato).
 """
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import sys
 import time
 from collections import deque
+from pathlib import Path
 
 import requests
 
@@ -42,6 +53,17 @@ if not TELEGRAM_TOKEN:
 if not CHANNEL_TOKEN:
     sys.exit("CHANNEL_TOKEN mancante")
 
+# Il lucchetto vive in shared/ dentro il repo: la radice si ricava dal file, non
+# dal cwd, che cambia a seconda di come si lancia il driver.
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from shared.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
+
+LOCK_FILE = (os.getenv("TELEGRAM_LOCK_FILE", "").strip()
+             or str(_REPO / "data" / "telegram-driver.lock"))
+
 API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 HEADERS = {"X-Hyperspace-Channel-Token": CHANNEL_TOKEN}
 MAX_CONTEXT = 20
@@ -50,6 +72,21 @@ STATE_REPORT_S = 60.0
 # Le immagini pronte si ritirano con lo stesso ritmo dei comandi: sono l'altra
 # cosa che il control-plane "spinge" verso il canale, e passa dall'outbox.
 OUTBOX_POLL_S = 15.0
+
+# Per quanto una conversazione resta APERTA dopo una nostra risposta.
+#
+# Perché serve: con la mention richiesta il bot parla solo se lo chiamano, e in
+# una conversazione avviata nessuno ripete il nome a ogni frase — verificato nei
+# log: quattro messaggi ingeriti, zero tentativi di risposta, perché il nome non
+# c'era. Chiedere il nome a ogni battuta è la differenza fra "un bot che risponde
+# quando lo chiami" e "una che sta parlando con te". Passata la finestra, torna a
+# servire il nome: non resta in ascolto per sempre.
+FINESTRA_CONVERSAZIONE_S = float(os.getenv("TELEGRAM_CONVERSATION_WINDOW_S", "900"))
+
+# Il modello impiega ~15 secondi: senza questo segnale la chat sembra morta
+# proprio mentre lei sta rispondendo. Telegram mostra "sta scrivendo" per ~5s,
+# quindi si rinnova — ma non a ogni giro, o sarebbe flood di richieste.
+SEGNALE_SCRITTURA_S = 4.0
 
 # In un gruppo con PIÙ bot (es. Aurora su Windows e un secondo bot sulla mesh)
 # servono due regole diverse, e sono due:
@@ -184,6 +221,37 @@ def normalizza_comando(testo) -> str:
     return testo
 
 
+def in_conversazione(entry, adesso: float, finestra: float = FINESTRA_CONVERSAZIONE_S) -> bool:
+    """Vero se abbiamo risposto da poco in questa chat: la conversazione è aperta.
+
+    È la differenza fra "parla quando la chiami" e "sta parlando con te": passata
+    la finestra si torna a chiedere il nome, quindi non resta in ascolto per
+    sempre di una stanza che non la sta cercando.
+    """
+    ultima = float((entry or {}).get("ultima_risposta_ts") or 0.0)
+    return bool(ultima) and (float(adesso) - ultima) <= max(0.0, float(finestra))
+
+
+def segnala_scrittura(chat_id, stato: dict, adesso: float) -> bool:
+    """Manda "sta scrivendo", al massimo ogni `SEGNALE_SCRITTURA_S` per chat.
+
+    Non è estetica: il modello impiega intorno ai quindici secondi, e senza questo
+    segnale la chat sembra morta proprio mentre lei sta rispondendo. Non solleva:
+    un segnale che non parte non deve impedire la risposta.
+    """
+    ultimo = float((stato or {}).get("typing_ts") or 0.0)
+    if float(adesso) - ultimo < SEGNALE_SCRITTURA_S:
+        return False
+    if stato is not None:
+        stato["typing_ts"] = float(adesso)
+    try:
+        tg("sendChatAction", chat_id=chat_id, action="typing")
+    except requests.RequestException as e:
+        print(f"[telegram] segnale di scrittura non inviato: {e}", flush=True)
+        return False
+    return True
+
+
 def immagini_da_consegnare(risposta) -> list:
     """Le consegne valide ricevute dal control-plane: `(id, file, chat)`.
 
@@ -244,7 +312,28 @@ def consegna_outbox() -> int:
     return inviate
 
 
+def un_solo_driver() -> SingleInstance:
+    """Impedisce il secondo driver: due poller sullo stesso bot si rubano i messaggi.
+
+    Telegram consegna ogni update a UNO solo dei poller di un bot. Due driver non
+    danno errore e non lo scrivono nei log: si dividono le battute a metà, e
+    dall'esterno sembra che lei risponda a metà conversazione. Su Windows è
+    successo davvero (lo stesso launcher partito due volte). Il lucchetto è del
+    sistema operativo, quindi muore con il processo: niente da cancellare a mano.
+
+    Restituisce il lucchetto (già registrato per il rilascio all'uscita) perché
+    chi lo prende può anche lasciarlo andare prima.
+    """
+    try:
+        lucchetto = SingleInstance(LOCK_FILE, label="driver Telegram").acquire()
+    except AlreadyRunning as e:
+        sys.exit(f"[telegram] {e}: non parte un secondo driver")
+    atexit.register(lucchetto.release)
+    return lucchetto
+
+
 def main():
+    un_solo_driver()
     offset = 0
     chats = {}  # chat_id -> {"surface", "messages", "batch_start", "addressed"}
     mode = "auto"
@@ -287,7 +376,9 @@ def main():
             entry = chats.setdefault(chat_id, {"surface": "chat",
                                                "messages": deque(maxlen=MAX_CONTEXT),
                                                "batch_start": time.time(),
-                                               "addressed": False})
+                                               "addressed": False,
+                                               "ultima_risposta_ts": 0.0,
+                                               "typing_ts": 0.0})
             entry["surface"] = surface_of(chat)
             author = author_of(msg)
             text = testo_senza_menzione(msg["text"], username, nome)
@@ -313,9 +404,15 @@ def main():
                 # risposta ha il filo della conversazione) ma non fanno
                 # intervenire — è ciò che permette a due bot di stare nello
                 # stesso gruppo senza rispondere entrambi alla stessa battuta.
-                if REQUIRE_MENTION and not entry.get("addressed"):
-                    continue
+                # Se però la conversazione è già aperta (le abbiamo risposto da
+                # poco) si continua a parlare: nessuno ripete il nome a ogni
+                # frase, e pretendere il nome era il motivo per cui sembrava
+                # sorda a chi stava chiacchierando con lei.
                 adesso = time.time()
+                if (REQUIRE_MENTION and not entry.get("addressed")
+                        and not in_conversazione(entry, adesso)):
+                    continue
+                segnala_scrittura(chat_id, entry, adesso)
                 res = cp_post("/channel/reply", {
                     "surface": entry["surface"],
                     # L'id della conversazione: serve al CP per sapere DOVE
@@ -335,6 +432,8 @@ def main():
                         entry["messages"].clear()
                         entry["batch_start"] = adesso
                         entry["addressed"] = False
+                        # Da qui la conversazione è aperta per FINESTRA_CONVERSAZIONE_S
+                        entry["ultima_risposta_ts"] = adesso
                         print(f"[telegram] inviata risposta a {chat_id}", flush=True)
                     except requests.RequestException as e:
                         cp_post("/channel/result", {"kind": "reply", "ok": False,

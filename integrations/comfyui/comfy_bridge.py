@@ -27,6 +27,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import sys
@@ -38,6 +39,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from shared.image_jobs import immagini_da_history, workflow  # noqa: E402
+from shared.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
+
+# Il lucchetto dell'istanza singola: si può puntare altrove con
+# COMFY_BRIDGE_LOCK_FILE (serve ai test, e a chi tiene il repo su un altro disco).
+LOCK_FILE = Path(os.environ.get("COMFY_BRIDGE_LOCK_FILE")
+                 or (Path(__file__).resolve().parents[2] / "data" / "comfy-bridge.lock"))
 
 CONTROL_PLANE_DEFAULT = "http://127.0.0.1:8085"
 COMFY_DEFAULT = "http://127.0.0.1:8188"
@@ -186,6 +193,16 @@ def main(argv=None) -> int:
     if not args.token:
         log("CHANNEL_TOKEN mancante: senza token il control-plane non serve i job")
         return 1
+    # Due ponti sulla stessa ComfyUI non litigano: prendono entrambi un job e la
+    # scheda li esegue in parallelo, il doppio del tempo per ognuno. Il lucchetto
+    # (del sistema operativo, quindi sparisce con il processo) lo impedisce.
+    if not args.once:
+        try:
+            _lucchetto = SingleInstance(LOCK_FILE, label="ponte ComfyUI").acquire()
+            atexit.register(_lucchetto.release)
+        except AlreadyRunning as e:
+            log(f"{e}: il secondo ponte non parte (due job in parallelo su una scheda sola)")
+            return 1
 
     while True:
         stato, dati = _richiesta(f"{base}/image/jobs", timeout=20, headers=intestazioni)

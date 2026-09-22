@@ -57,6 +57,14 @@ python integrations\comfyui\comfy_bridge.py --once    # un job ed esce
 python integrations\comfyui\comfy_bridge.py           # in attesa, in ciclo
 ```
 
+In ciclo il ponte prende un lucchetto (`data/comfy-bridge.lock`, vedi
+`shared/single_instance.py`): un **secondo** ponte non parte e lo scrive nel log.
+Due ponti non si pestano i piedi in modo visibile — prendono entrambi un job e la
+scheda li esegue in parallelo, il doppio del tempo per ognuno su un budget di 8 GB
+di VRAM. `--check` e `--once` non prendono il lucchetto: il primo non esegue
+niente, il secondo è pensato per girare una volta sola. Il lucchetto è del sistema
+operativo, quindi muore con il processo: non restano file da cancellare a mano.
+
 **Costo misurato** su questa macchina (RTX 5060 Laptop, Qwen-Image 2.1 Q5_K,
 text encoder su CPU): **1024×1024, 30 passi → 11 minuti e 50 s** (710 s). Un
 job da 768×768/25 passi è la misura ragionevole per una risposta conversazionale;

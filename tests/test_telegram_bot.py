@@ -202,5 +202,100 @@ class ConsegnaImmaginiTests(unittest.TestCase):
         self.assertEqual(self.driver.immagini_da_consegnare(None), [])
 
 
+class UnSoloDriverTests(unittest.TestCase):
+    """Due driver sullo stesso bot si rubano i messaggi: il secondo non deve partire.
+
+    Non è teoria: su Windows lo stesso launcher è partito due volte e i due driver
+    si sono divisi gli update di Telegram — nessun errore, solo una che rispondeva
+    a metà. Il lucchetto lo rende impossibile comunque venga lanciato.
+    """
+
+    def test_il_secondo_driver_esce_invece_di_girare(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as cartella:
+            driver = carica_driver(TELEGRAM_LOCK_FILE=str(Path(cartella) / "unico.lock"))
+            lucchetto = driver.un_solo_driver()   # il primo prende il lucchetto
+            try:
+                with self.assertRaises(SystemExit) as uscita:
+                    driver.un_solo_driver()       # il secondo deve arrendersi
+                self.assertIn("secondo driver", str(uscita.exception))
+            finally:
+                # Su Windows un file bloccato non si cancella: senza rilascio il
+                # teardown della cartella temporanea fallirebbe.
+                lucchetto.release()
+
+    def test_il_lucchetto_predefinito_sta_nei_dati_del_repo(self):
+        driver = carica_driver()
+        self.assertTrue(Path(driver.LOCK_FILE).name == "telegram-driver.lock")
+        self.assertEqual(Path(driver.LOCK_FILE).parent, ROOT / "data")
+
+
+class ConversazioneTests(unittest.TestCase):
+    """Chi ha avviato una conversazione non ripete il nome a ogni frase.
+
+    Verificato dai log: quattro messaggi ingeriti e ZERO tentativi di risposta,
+    perché il nome non c'era. La finestra risolve quello senza trasformare il bot
+    in un ascoltatore permanente di una stanza che non la sta cercando.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.driver = carica_driver()
+
+    def test_senza_una_nostra_risposta_non_c_e_conversazione(self):
+        self.assertFalse(self.driver.in_conversazione({}, 1000.0))
+        self.assertFalse(self.driver.in_conversazione({"ultima_risposta_ts": 0.0}, 1000.0))
+
+    def test_dentro_la_finestra_la_conversazione_e_aperta(self):
+        entry = {"ultima_risposta_ts": 1000.0}
+        self.assertTrue(self.driver.in_conversazione(entry, 1060.0, finestra=900))
+
+    def test_passata_la_finestra_torna_a_servire_il_nome(self):
+        entry = {"ultima_risposta_ts": 1000.0}
+        self.assertFalse(self.driver.in_conversazione(entry, 1901.0, finestra=900))
+
+    def test_una_finestra_a_zero_non_apre_niente(self):
+        entry = {"ultima_risposta_ts": 1000.0}
+        self.assertFalse(self.driver.in_conversazione(entry, 1001.0, finestra=0))
+
+
+class SegnaleScritturaTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.driver = carica_driver()
+
+    def _finto_tg(self, errore=False):
+        chiamate = []
+
+        def finto(metodo, **params):
+            if errore:
+                raise self.driver.requests.RequestException("niente rete")
+            chiamate.append((metodo, params))
+            return {}
+
+        self.driver.tg = finto
+        return chiamate
+
+    def test_il_segnale_non_si_ripete_a_ogni_giro(self):
+        chiamate = self._finto_tg()
+        stato = {}
+        self.assertTrue(self.driver.segnala_scrittura(1, stato, 100.0))
+        self.assertFalse(self.driver.segnala_scrittura(1, stato, 101.0))
+        self.assertEqual(len(chiamate), 1)
+        self.assertEqual(chiamate[0][0], "sendChatAction")
+        self.assertEqual(chiamate[0][1]["action"], "typing")
+
+    def test_dopo_l_intervallo_si_manda_di_nuovo(self):
+        chiamate = self._finto_tg()
+        stato = {}
+        self.driver.segnala_scrittura(1, stato, 100.0)
+        self.assertTrue(self.driver.segnala_scrittura(1, stato, 105.0))
+        self.assertEqual(len(chiamate), 2)
+
+    def test_un_errore_di_rete_non_impedisce_la_risposta(self):
+        self._finto_tg(errore=True)
+        self.assertFalse(self.driver.segnala_scrittura(1, {}, 100.0))
+
+
 if __name__ == "__main__":
     unittest.main()

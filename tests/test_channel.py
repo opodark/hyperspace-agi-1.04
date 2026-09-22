@@ -274,6 +274,19 @@ class ChannelWiringTests(unittest.TestCase):
         self.assertIn("should_disclose", body)
         self.assertIn("think", body, "un canale non aspetta: reasoning spento esplicito")
 
+    def test_il_motivo_di_un_silenzio_finisce_nei_log(self):
+        """"Perché non ha risposto?" deve avere una risposta nei log.
+
+        Il driver chiede a ogni giro finché il batch non matura, quindi la riga è
+        limitata nel tempo (una al minuto): senza limite sarebbe flood, senza riga
+        la domanda resterebbe senza risposta — che è il caso da cui nasce.
+        """
+        body = ast.unparse(self.functions["channel_reply"])
+        self.assertIn("_log_pacing_reason", body)
+        limite = ast.unparse(self.functions["_log_pacing_reason"])
+        self.assertIn("PACING_LOG_EVERY_S", limite)
+        self.assertIn("push_log", limite)
+
 
 class MemoriaTests(unittest.TestCase):
     """Tip, ondate e debounce: cosa finisce in memoria e cosa no."""
