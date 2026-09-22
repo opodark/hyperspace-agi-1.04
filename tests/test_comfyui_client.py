@@ -263,6 +263,37 @@ class PonteResilienteTests(unittest.TestCase):
         self.assertNotIn("raise", corpo.split("while True")[1][:1200],
                          "nel ciclo non si solleva: si logga e si riprova")
 
+    def test_il_motivo_di_un_fallimento_e_l_eccezione_non_il_dump(self):
+        """Il dump si tronca prima dell'informazione utile: si prende l'eccezione.
+
+        Caso vero (2026-09-22): la scheda ha fallito con `CUDA error: unknown error`
+        e al control-plane è arrivato `execution_error', {'prompt_i…` — il perché
+        era stato tagliato via.
+        """
+        messaggi = [
+            ["execution_start", {"prompt_id": "abc"}],
+            ["execution_cached", {"nodes": ["451"], "prompt_id": "abc"}],
+            ["execution_error", {"prompt_id": "abc", "node_id": "458",
+                                 "node_type": "KSampler", "executed": ["452"],
+                                 "exception_type": "torch.AcceleratorError",
+                                 "exception_message": "CUDA error: unknown error\n"
+                                                      "Search for `cudaErrorUnknown'"}],
+        ]
+        motivo = self.ponte.motivo_fallimento(messaggi)
+        self.assertIn("torch.AcceleratorError", motivo)
+        self.assertIn("KSampler", motivo)
+        self.assertIn("CUDA error: unknown error", motivo)
+        self.assertNotIn("execution_start", motivo, "il dump non è il motivo")
+        self.assertLessEqual(len(motivo), 280)
+
+    def test_senza_eccezione_resta_il_dump(self):
+        motivo = self.ponte.motivo_fallimento([["execution_interrupted", {"x": 1}]])
+        self.assertIn("execution_interrupted", motivo)
+
+    def test_esegui_job_usa_il_motivo_leggibile(self):
+        sorgente = inspect.getsource(self.ponte.esegui_job)
+        self.assertIn("motivo_fallimento", sorgente)
+
 
 if __name__ == "__main__":
     unittest.main()

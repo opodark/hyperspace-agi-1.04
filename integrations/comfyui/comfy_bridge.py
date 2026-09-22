@@ -116,6 +116,35 @@ def _verifiche(comfy_url: str, output_dir: str) -> list:
     return problemi
 
 
+def motivo_fallimento(messaggi) -> str:
+    """Il perché di un fallimento, leggibile: tipo, nodo e messaggio dell'eccezione.
+
+    Perché non si prende il dump dei messaggi: il dump si tronca a 300 caratteri e
+    l'informazione utile — l'eccezione — sta **in fondo**. Il 2026-09-22 la scheda ha
+    fallito con `CUDA error: unknown error` e quello che è arrivato al control-plane
+    era `'execution_start' | 'execution_cached' | 'execution_error', {'prompt_i…`:
+    il motivo vero non c'era più.
+    """
+    for messaggio in messaggi or []:
+        if not isinstance(messaggio, (list, tuple)) or len(messaggio) < 2:
+            continue
+        if str(messaggio[0]) != "execution_error" or not isinstance(messaggio[1], dict):
+            continue
+        dettaglio = messaggio[1]
+        tipo = str(dettaglio.get("exception_type") or "errore")
+        testo = " ".join(str(dettaglio.get("exception_message") or "").split())
+        nodo = str(dettaglio.get("node_type") or dettaglio.get("node_id") or "")
+        pezzi = [tipo]
+        if nodo:
+            pezzi.append(f"in {nodo}")
+        motivo = " ".join(pezzi)
+        if testo:
+            motivo = f"{motivo}: {testo}"
+        return motivo[:280]
+    dump = [str(m) for m in (messaggi or [])]
+    return f"ComfyUI ha fallito: {' | '.join(dump)}"[:280]
+
+
 def esegui_job(job: dict, *, comfy_url: str = COMFY_DEFAULT, output_dir: str = "",
                timeout_s: float = 900.0, prefisso: str = PREFISSO) -> tuple:
     """Esegue UN job su ComfyUI. Ritorna (ok, percorso_file, errore).
@@ -143,8 +172,8 @@ def esegui_job(job: dict, *, comfy_url: str = COMFY_DEFAULT, output_dir: str = "
             continue
         esito = run.get("status") or {}
         if str(esito.get("status_str") or "") == "error":
-            messaggi = [str(m) for m in (esito.get("messages") or [])]
-            return False, "", ("ComfyUI ha fallito: " + " | ".join(messaggi))[:300]
+            # Il motivo leggibile, non il dump: vedi motivo_fallimento().
+            return False, "", motivo_fallimento(esito.get("messages"))
         file_prodotti = immagini_da_history(run)
         if not file_prodotti:
             time.sleep(2)
