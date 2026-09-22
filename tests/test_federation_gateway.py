@@ -62,10 +62,12 @@ class FederationGatewayTests(unittest.TestCase):
         with patch.object(gateway, "_rate_check", return_value=True), \
              patch.object(gateway.requests, "request", return_value=upstream) as request_call:
             response = self.client.post(
-                "/v1/chat/completions", json={"model": "qwen3.5:4b"}, buffered=False)
+                "/v1/chat/completions", json={"model": "qwen3.5:4b"})
+            response_body = response.data
         self.assertEqual(response.status_code, 200)
+        self.assertIn(b"gateway connected", response_body)
+        self.assertIn(b"[DONE]", response_body)
         self.assertTrue(request_call.call_args.kwargs["stream"])
-        response.close()
 
     def test_spoofed_attestation_is_replaced_with_gateway_signature(self):
         secret = "g" * 32
