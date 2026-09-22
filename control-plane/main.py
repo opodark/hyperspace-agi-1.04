@@ -7242,7 +7242,7 @@ if __name__ == '__main__':
     threading.Thread(target=metrics_loop, daemon=True).start()
     threading.Thread(target=development_dream_loop, daemon=True).start()
     threading.Thread(target=persona_dream_loop, daemon=True).start()
-    app.run(host='0.0.0.0', port=8085, debug=False)
+    app.run(host='0.0.0.0', port=8085, debug=False, threaded=True)
 else:
     _load_nodes_from_db()
     _load_tasks_from_db()
