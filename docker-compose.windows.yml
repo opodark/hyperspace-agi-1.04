@@ -199,6 +199,7 @@ services:
       - "${MESH_BIND_IP:-127.0.0.1}:${FEDERATION_GATEWAY_PORT:-8095}:8095"
     environment:
       CP_URL: "http://hyperspace-core:8085"
+      GATEWAY_CHAT_TIMEOUT_S: "${GATEWAY_CHAT_TIMEOUT_S:-600}"
       PYTHONUNBUFFERED: "1"
 
   open-webui:

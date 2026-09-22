@@ -3021,11 +3021,13 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
                    node_id: str = "", builtin_tools=None) -> dict:
     messages       = list(data.get("messages", []))
     model          = data.get("model", DEFAULT_MODEL)
-    supports_tools = _model_supports_tools(model)
+    tools_disabled = bool(data.get("_hyperspace_tools_off"))
+    backend_data   = {k: v for k, v in data.items() if k != "_hyperspace_tools_off"}
+    supports_tools = _model_supports_tools(model) and not tools_disabled
     push_log('system', f'tool_loop: model={model} tools={supports_tools} signed={sign}', status='info')
 
     if not supports_tools:
-        payload = {**data, "messages": messages, "stream": False}
+        payload = {**backend_data, "messages": messages, "stream": False}
         payload.pop("tools", None)
         try:
             return _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
@@ -3042,7 +3044,7 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
 
     def _retry_without_tools(reason):
         push_log('system', f'tool_loop fallback no-tools: {str(reason)[:120]}', status='warn')
-        plain = {**data, "messages": messages, "stream": False}
+        plain = {**backend_data, "messages": messages, "stream": False}
         plain.pop("tools", None)
         try:
             return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
@@ -3052,7 +3054,7 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
             return {"error": {"message": str(e2), "type": "server_error"}}
 
     for iteration in range(max_iterations):
-        payload = {**data, "messages": messages, "tools": all_tools, "stream": False}
+        payload = {**backend_data, "messages": messages, "tools": all_tools, "stream": False}
         try:
             resp = _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
         except NodeBusyError:
@@ -3352,6 +3354,7 @@ def v1_chat_completions():
     tools_available = []
     client_had_tools = bool(data.get("tools"))
     tools_off = _tools_requested_off(request.headers.get("X-Hyperspace-Tools", ""))
+    data["_hyperspace_tools_off"] = tools_off
     if _model_supports_tools(model):
         client_tools = data.get("tools") or []
         client_names = {t.get("function", {}).get("name") for t in client_tools}

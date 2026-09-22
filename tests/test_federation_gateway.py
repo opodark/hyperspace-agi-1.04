@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
+import json
 import os
 import unittest
 from pathlib import Path
@@ -53,21 +54,34 @@ class FederationGatewayTests(unittest.TestCase):
         self.assertEqual(response.status_code, 204)
         rate_check.assert_not_called()
 
-    def test_public_chat_is_forwarded_as_a_stream(self):
+    def test_public_chat_uses_one_bounded_inference_and_exposes_sse(self):
         upstream = Mock(
             status_code=200,
-            headers={"Content-Type": "text/event-stream"},
+            headers={"Content-Type": "application/json"},
         )
-        upstream.iter_content.return_value = iter([b'data: {"choices":[]}\n\n', b"data: [DONE]\n\n"])
+        upstream.json.return_value = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+        }
         with patch.object(gateway, "_rate_check", return_value=True), \
              patch.object(gateway.requests, "request", return_value=upstream) as request_call:
             response = self.client.post(
-                "/v1/chat/completions", json={"model": "qwen3.5:4b"})
+                "/v1/chat/completions",
+                json={"model": "qwen3.5:4b", "stream": True, "max_tokens": 999})
             response_body = response.data
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"gateway connected", response_body)
         self.assertIn(b"[DONE]", response_body)
         self.assertTrue(request_call.call_args.kwargs["stream"])
+        forwarded = json.loads(request_call.call_args.kwargs["data"])
+        self.assertFalse(forwarded["stream"])
+        self.assertFalse(forwarded["think"])
+        self.assertEqual(forwarded["max_tokens"], 256)
+        self.assertEqual(forwarded["options"]["num_ctx"], 4096)
+        self.assertEqual(
+            request_call.call_args.kwargs["headers"]["X-Hyperspace-Tools"], "off")
+        self.assertEqual(request_call.call_args.kwargs["timeout"],
+                         (10, gateway.CHAT_UPSTREAM_TIMEOUT_S))
+        self.assertGreaterEqual(gateway.CHAT_UPSTREAM_TIMEOUT_S, 600)
 
     def test_public_chat_preflight_keeps_cors_headers(self):
         upstream = Mock(
