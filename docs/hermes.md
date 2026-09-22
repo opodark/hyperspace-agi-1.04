@@ -174,6 +174,22 @@ quindi un bridge già in esecuzione continua a pretendere quello vecchio.
 .\scripts\start_hermes_memory_bridge.ps1
 ```
 
+### Cambiare backend NON porta la memoria con sé
+
+`MEMORY_BACKEND=legacy` e `MEMORY_BACKEND=hermes` sono due archivi **diversi**: al
+passaggio, le voci già scritte restano nel file gzip e la memoria nuova nasce
+vuota. Per portarle (una volta sola, e senza rischiare di contarle due volte):
+
+```powershell
+python scripts\memory_migrate.py --dry-run     # cosa entrerebbe, e cosa l'envelope non prevede
+python scripts\memory_migrate.py               # migra: idempotente
+```
+
+Il file legacy resta al suo posto (rollback: rimettere `legacy` nel `.env`), e i
+campi che l'involucro `hyperspace.memory.v1` non prevede — telemetria come
+`duration_ms` e `tokens_per_sec` — sono **contati e stampati**, invece di sparire
+in silenzio.
+
 Il launcher usa `127.0.0.1`: su Docker Desktop `host.docker.internal` riesce a
 raggiungerlo, ma la LAN no. Non allargare il bind senza una regola firewall
 precisa. Verifica: `GET /health` con header `Authorization: Bearer <token>`.

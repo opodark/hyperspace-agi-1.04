@@ -184,7 +184,9 @@ già progettata.
    `HOST_ROLE=primary-brain`, sempre acceso, Hermes già installato) e va resa
    raggiungibile sul tailnet: oggi ascolta solo in locale — dal Mac
    `http://100.64.31.18:8098` non risponde, mentre il suo CP sulla 8085 sì.
-2. **Azzerarla** (è il "ripartire da zero"): `MEMORY.md`, `USER.md`, `state.db`.
+2. **Portare la memoria** che c'è già: `python scripts/memory_migrate.py`
+   (idempotente, con `--dry-run`; vedi `docs/hermes.md`). In alternativa
+   **azzerarla** (`MEMORY.md`, `USER.md`, `state.db`) per ripartire da zero.
 3. Passare il token a chi si collega: è un segreto, quindi fuori banda, e finisce
    in `data/hermes-memory.token` (gitignored, come tutta `data/`).
 4. Sul Mac, nell'`.env`: `MEMORY_BACKEND=hermes`,
