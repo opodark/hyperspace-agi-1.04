@@ -2608,6 +2608,26 @@ def image_status():
     return jsonify({"ok": True, **image_queue.stato()})
 
 
+@app.route('/image/job/<job_id>')
+def image_job(job_id):
+    """Un job per id: "dov'è finita la mia immagine?" senza leggere tutta la coda.
+
+    Cerca prima fra i job vivi, poi nello storico: un job già concluso e potato
+    (scadenza di 15 minuti) resta leggibile finché è fra gli ultimi venti, ed è
+    esattamente il caso di chi arriva un minuto dopo la fine.
+    """
+    errore = _channel_error()
+    if errore:
+        return errore
+    job = image_queue.job(job_id)
+    if job:
+        return jsonify({"ok": True, "job": job, "da_storico": False})
+    for voce in image_queue.stato().get("ultimi", []):
+        if str(voce.get("id")) == str(job_id):
+            return jsonify({"ok": True, "job": voce, "da_storico": True})
+    return jsonify({"ok": False, "error": "job sconosciuto"}), 404
+
+
 @app.route('/channel/outbox')
 def channel_outbox():
     """Le immagini pronte da consegnare a QUESTO canale (il driver le tira).
