@@ -26,6 +26,47 @@ class FederationGatewayTests(unittest.TestCase):
         response = self.client.post("/bottles/announce")
         self.assertEqual(response.status_code, 404)
 
+    def test_public_web_node_surface_has_worker_and_chat_routes(self):
+        for path in ("/web/register", "/web/poll", "/web/result"):
+            self.assertIn(("POST", path), gateway.ALLOWED_ROUTES)
+            self.assertIn(("OPTIONS", path), gateway.ALLOWED_ROUTES)
+            self.assertIn(path, gateway._RATE_LIMITS)
+        self.assertNotIn(("POST", "/web/tasks"), gateway.ALLOWED_ROUTES)
+        self.assertNotIn(("GET", "/web/status"), gateway.ALLOWED_ROUTES)
+        self.assertIn(("GET", "/v1/models"), gateway.ALLOWED_ROUTES)
+        self.assertIn(("OPTIONS", "/v1/models"), gateway.ALLOWED_ROUTES)
+        self.assertIn(("POST", "/v1/chat/completions"), gateway.ALLOWED_ROUTES)
+        self.assertIn(("OPTIONS", "/v1/chat/completions"), gateway.ALLOWED_ROUTES)
+        self.assertIn("/v1/models", gateway._RATE_LIMITS)
+        self.assertIn("/v1/chat/completions", gateway._RATE_LIMITS)
+        self.assertNotIn(("GET", "/nodes/active"), gateway.ALLOWED_ROUTES)
+        self.assertNotIn(("GET", "/logs"), gateway.ALLOWED_ROUTES)
+
+    def test_web_node_preflight_does_not_consume_rate_limit(self):
+        upstream = Mock(
+            content=b"", status_code=204,
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+        with patch.object(gateway, "_rate_check") as rate_check, \
+             patch.object(gateway.requests, "request", return_value=upstream):
+            response = self.client.options("/web/register")
+        self.assertEqual(response.status_code, 204)
+        rate_check.assert_not_called()
+
+    def test_public_chat_is_forwarded_as_a_stream(self):
+        upstream = Mock(
+            status_code=200,
+            headers={"Content-Type": "text/event-stream"},
+        )
+        upstream.iter_content.return_value = iter([b'data: {"choices":[]}\n\n', b"data: [DONE]\n\n"])
+        with patch.object(gateway, "_rate_check", return_value=True), \
+             patch.object(gateway.requests, "request", return_value=upstream) as request_call:
+            response = self.client.post(
+                "/v1/chat/completions", json={"model": "qwen3.5:4b"}, buffered=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(request_call.call_args.kwargs["stream"])
+        response.close()
+
     def test_spoofed_attestation_is_replaced_with_gateway_signature(self):
         secret = "g" * 32
         upstream = Mock(
