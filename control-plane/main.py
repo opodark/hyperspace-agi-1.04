@@ -2836,6 +2836,30 @@ def channel_ingest():
                     "guard": channel_guard.snapshot(canale)})
 
 
+# ── DIARIO CONVERSAZIONI (diagnostica) ──────────────────────────────────────
+# Le ultime battute scambiate sui canali, per la finestrella /conversations.
+# In memoria e con un tetto: è un cruscotto di diagnostica, non un archivio.
+_MAX_CONVERSATION_TURNS = 200
+_conversation_log = deque(maxlen=_MAX_CONVERSATION_TURNS)
+
+
+def _record_conversation(channel: str, surface: str, chat: str, context: list,
+                         action: str, text: str = "", reason: str = "") -> None:
+    """Annota una battuta (messaggi in arrivo + risposta/azione) nel diario."""
+    _conversation_log.append({
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "channel": channel,
+        "surface": surface,
+        "chat": str(chat or "")[:64],
+        "messages": [{"author": str(m.get("author", ""))[:64],
+                      "text": str(m.get("text", ""))[:1000]}
+                     for m in (context or []) if isinstance(m, dict)],
+        "action": action,
+        "text": str(text or "")[:2000],
+        "reason": str(reason or "")[:200],
+    })
+
+
 @app.route('/channel/reply', methods=['POST'])
 def channel_reply():
     """"Cosa scrivo adesso?": il CP decide il ritmo, genera e verifica.
@@ -2854,9 +2878,13 @@ def channel_reply():
     eta_piu_vecchio = max(0.0, float(data.get("oldest_age_s") or 0.0))
     forza = bool(data.get("force"))
     max_chars = int(data.get("max_chars") or 0) or 90
+    superficie = str(data.get("surface", "chat")).strip().lower() or "chat"
+    chat = str(data.get("chat", "") or "").strip()
 
     presentazione = _channel_presentazione(contesto)
     if presentazione is not None:
+        _record_conversation(canale, superficie, chat, contesto, "reply",
+                             text=presentazione, reason="auto-presentazione")
         return jsonify({"ok": True, "channel": canale, "action": "reply",
                         "text": presentazione, "command": True,
                         "disclosure": {"required": True, "rule": "auto-presentazione"}})
@@ -2864,9 +2892,10 @@ def channel_reply():
     # Chi chiede un'immagine non aspetta il RITMO del bot: è una richiesta
     # esplicita dell'operatore, non una battuta da dosare. Il job entra in coda e
     # la risposta parte subito; l'immagine arriva dopo, via outbox.
-    immagine = _channel_immagine(contesto, channel=canale,
-                                 destinazione=str(data.get("chat", "") or "").strip())
+    immagine = _channel_immagine(contesto, channel=canale, destinazione=chat)
     if immagine is not None:
+        _record_conversation(canale, superficie, chat, contesto, "reply",
+                             text=immagine, reason="comando-immagine")
         return jsonify({"ok": True, "channel": canale, "action": "reply",
                         "text": immagine, "command": True,
                         "disclosure": {"required": False, "rule": "comando-immagine"}})
@@ -2878,10 +2907,12 @@ def channel_reply():
         # Il motivo entra nei log (una volta al minuto, per non fare flood): è la
         # risposta a "perché tace?", che prima si poteva solo dedurre.
         _log_pacing_reason(canale, decisione)
+        _record_conversation(canale, superficie, chat, contesto,
+                             decisione["action"], reason=decisione.get("reason", ""))
         return jsonify({"ok": True, "channel": canale, "action": decisione["action"],
                         "reason": decisione["reason"]})
 
-    esito = _channel_reply(channel=canale, surface=str(data.get("surface", "chat")),
+    esito = _channel_reply(channel=canale, surface=superficie,
                            context=contesto, max_chars=max_chars, force=forza)
     if esito["action"] == "reply":
         # Il cooldown parte all'INTENTO di inviare, non alla conferma: se il
@@ -2892,6 +2923,8 @@ def channel_reply():
              detail=(esito.get("text", "") or esito.get("reason", ""))[:120],
              source=f"channel:{canale}",
              status='success' if esito["action"] == "reply" else 'warn')
+    _record_conversation(canale, superficie, chat, contesto, esito.get("action", ""),
+                         text=esito.get("text", ""), reason=esito.get("reason", ""))
     return jsonify({"ok": esito["action"] != "error", "channel": canale, **esito})
 
 
@@ -7218,6 +7251,18 @@ def desktop():
 @app.route('/dashboard')
 def dashboard_alias():
     return send_from_directory(BASE_DIR, 'dashboard.html')
+
+
+@app.route('/conversations')
+def conversations_page():
+    """La finestrella di diagnostica: tutte le conversazioni dei chatbot."""
+    return send_from_directory(BASE_DIR, 'conversations.html')
+
+
+@app.route('/conversations/data')
+def conversations_data():
+    """Le ultime battute scambiate sui canali, per /conversations (diagnostica)."""
+    return jsonify({"ok": True, "turns": list(_conversation_log)})
 
 # ── STARTUP ───────────────────────────────────────────────────────────────────
 def _initialize_development_dream():
