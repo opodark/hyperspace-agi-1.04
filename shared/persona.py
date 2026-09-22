@@ -42,6 +42,10 @@ DEFAULT_FILE_NAME = "persona.json"
 MAX_OBSERVATIONS = 50
 OBSERVATION_MAX_CHARS = 400
 
+# Quanti confini entrano nell'auto-presentazione (`!presentati`): l'ordine nel
+# documento e' la priorita' dichiarata in pubblico, il resto vive nel prompt.
+INTRO_MAX_BOUNDARIES = 3
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -363,6 +367,20 @@ def surface_context(surface=None, *, channel=None) -> str:
     return "\n".join(righe)
 
 
+def _prima_frase(testo: str) -> str:
+    """La prima frase di un testo, normalizzata su una riga.
+
+    Serve all'auto-presentazione: uno scopo di tre frasi è materiale per il
+    prompt, non per un annuncio che qualcuno legge in chat.
+    """
+    pulito = " ".join(str(testo or "").split())
+    for separatore in (". ", "! ", "? "):
+        taglio = pulito.find(separatore)
+        if taglio > 0:
+            return pulito[:taglio + 1]
+    return pulito
+
+
 def build_introduction(persona: Persona) -> str:
     """Auto-presentazione deterministica e fattuale (nessun modello, nessun hype).
 
@@ -370,14 +388,22 @@ def build_introduction(persona: Persona) -> str:
     al flusso "l'operatore presenta → Aurora si annuncia" ed è sempre
     disclosure-safe: dichiara di essere un'IA qualunque cosa sia stata scritta
     prima.
+
+    È un annuncio, non il blocco di identità: entrano la PRIMA frase dello scopo
+    e i primi `INTRO_MAX_BOUNDARIES` confini. L'ordine dei confini nel documento
+    **è** la priorità dichiarata in pubblico (IA, adulti/consenso, cosa non è
+    esplicito); gli altri restano nel prompt, dove servono al modello e non a chi
+    legge. Senza questo tetto l'annuncio diventava un muro di ~1900 caratteri.
     """
     righe = [f"Sono {persona.name}, un'IA: non sono una persona e non lo lascio intendere."]
     if persona.origin:
         righe.append(f"Derivo da {persona.origin}.")
     if persona.purpose:
-        righe.append(persona.purpose)
-    if persona.boundaries:
-        righe.append("I miei confini: " + "; ".join(persona.boundaries) + ".")
+        righe.append(_prima_frase(persona.purpose))
+    confini = [c for c in list(persona.boundaries)[:INTRO_MAX_BOUNDARIES] if c]
+    if confini:
+        elenco = " ".join(c if c.endswith((".", "!", "?")) else c + "." for c in confini)
+        righe.append("I miei confini: " + elenco)
     return " ".join(righe)
 
 

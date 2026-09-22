@@ -6,10 +6,12 @@ contesto è deterministico e non entra mai nel documento d'identità.
 """
 import ast
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
-from shared.persona import (SURFACE_CONTEXTS, build_introduction, build_system_block,
-                            default_persona, normalize_surface, surface_context)
+from shared.persona import (INTRO_MAX_BOUNDARIES, SURFACE_CONTEXTS, build_introduction,
+                            build_system_block, default_persona, normalize_surface,
+                            surface_context)
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_SOURCE = ROOT / "control-plane" / "main.py"
@@ -81,6 +83,23 @@ class IntroductionTests(unittest.TestCase):
         intro = build_introduction(default_persona("Aurora"))
         self.assertIn("Derivo da", intro)
         self.assertIn("HyperSpace AGI", intro)
+
+    def test_intro_usa_solo_la_prima_frase_dello_scopo(self):
+        persona = replace(default_persona("Aurora"),
+                          purpose="Prima frase dello scopo. Seconda frase che non entra.")
+        intro = build_introduction(persona)
+        self.assertIn("Prima frase dello scopo.", intro)
+        self.assertNotIn("Seconda frase", intro)
+
+    def test_intro_dichiara_solo_i_primi_confini(self):
+        """L'ordine dei confini nel documento e' la priorita' pubblica: gli altri
+        restano nel blocco di identita', dove servono al modello."""
+        persona = replace(default_persona("Aurora"),
+                          boundaries=tuple(f"confine numero {n}" for n in range(1, 7)))
+        intro = build_introduction(persona)
+        for numero in range(1, INTRO_MAX_BOUNDARIES + 1):
+            self.assertIn(f"confine numero {numero}.", intro)
+        self.assertNotIn(f"confine numero {INTRO_MAX_BOUNDARIES + 1}", intro)
 
 
 class SurfaceWiringTests(unittest.TestCase):

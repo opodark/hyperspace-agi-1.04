@@ -34,7 +34,11 @@ Il bot riconosce l'operatore da `CHANNEL_OPERATOR`.
 Flusso: l'operatore annuncia e presenta Aurora, poi lei si annuncia. Il comando
 `!presentati` (alias `!intro`) fa rispondere Aurora con
 `build_introduction(persona)`: un testo deterministico e fattuale, generato
-dalla persona e non dal modello, quindi sempre disclosure-safe.
+dalla persona e non dal modello, quindi sempre disclosure-safe. È breve per
+costruzione — entra la **prima frase** dello scopo e i primi
+`INTRO_MAX_BOUNDARIES` (3) confini — perché un annuncio si legge in chat: la
+posizione dei confini nel documento è la priorità dichiarata in pubblico
+(IA, adulti/consenso, cosa non è esplicito), il resto vive nel prompt.
 
 ## Setup
 
