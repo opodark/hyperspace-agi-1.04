@@ -12,10 +12,12 @@ from __future__ import annotations
 import ast
 import gzip
 import json
+import os
 import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +25,8 @@ sys.path.insert(0, str(ROOT))
 
 from shared.hermes_memory import HermesMemoryError  # noqa: E402
 from shared.memory_schema import entry_id, normalize_entry  # noqa: E402
-from shared.memory_sync import MemoryMirror, MemoryOutbox, MemorySync  # noqa: E402
+from shared.memory_sync import (MemoryMirror, MemoryOutbox, MemorySync,  # noqa: E402
+                                from_env)
 
 
 class FintoHermes:
@@ -351,6 +354,42 @@ class MirrorTests(BaseSync):
         self.mirror.path.write_bytes(b"non sono un gzip")
         self.assertEqual(self.mirror.load(), [])
         self.assertEqual(self.mirror.count(), 0)
+
+
+class CostruzioneTests(unittest.TestCase):
+    """La coda deve stare dentro un volume: fuori, sparisce al primo rebuild."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.cartella = Path(self._dir.name)
+        self.log: list = []
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def _logga(self, tipo, messaggio, **extra):
+        self.log.append((tipo, messaggio, extra))
+
+    def test_avvisa_se_il_file_di_memoria_non_e_dichiarato(self):
+        with unittest.mock.patch.dict(os.environ, {"MEMORY_FILE": ""}, clear=False):
+            sync = from_env(FintoHermes(), log=self._logga,
+                            memory_file=str(self.cartella / "memory.json.gz"))
+        self.assertTrue(sync.outbox, "la coda funziona anche senza la variabile")
+        self.assertIn("MEMORY_FILE", " ".join(riga[1] for riga in self.log))
+
+    def test_non_avvisa_se_il_file_e_dentro_un_volume(self):
+        with unittest.mock.patch.dict(
+                os.environ, {"MEMORY_FILE": "/app/memory/memory.json.gz"}, clear=False):
+            from_env(FintoHermes(), log=self._logga,
+                     memory_file=str(self.cartella / "memory.json.gz"))
+        self.assertEqual([riga for riga in self.log if "MEMORY_FILE" in riga[1]], [])
+
+    def test_la_coda_sta_accanto_al_file_di_memoria(self):
+        with unittest.mock.patch.dict(os.environ, {"MEMORY_FILE": ""}, clear=False):
+            sync = from_env(FintoHermes(), log=None,
+                            memory_file=str(self.cartella / "memory.json.gz"))
+        self.assertEqual(Path(sync.outbox.path).parent, self.cartella)
+        self.assertEqual(Path(sync.mirror.path), self.cartella / "memory.json.gz")
 
 
 class CablaggioControlPlaneTests(unittest.TestCase):

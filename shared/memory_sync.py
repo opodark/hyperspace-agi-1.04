@@ -471,6 +471,18 @@ def from_env(client, log: Optional[Callable[..., None]] = None,
     coda = os.getenv("MEMORY_OUTBOX_FILE", "").strip() or str(
         percorso_memoria.with_name("memory-outbox.jsonl"))
     acceso = ("1", "true", "yes", "on")
+    # Senza MEMORY_FILE il percorso è quello di default: accanto all'app, e in un
+    # container significa FUORI dal volume. Lì il mirror e la coda si perdono a ogni
+    # rebuild — cioè proprio la cosa che questa coda esiste per non far succedere.
+    if log and not os.getenv("MEMORY_FILE", "").strip():
+        try:
+            log("memory_sync",
+                "memoria: MEMORY_FILE non impostato — mirror e coda stanno fuori dal volume "
+                "e si perdono a ogni ricostruzione del container",
+                detail="imposta MEMORY_FILE su un percorso dentro un volume "
+                       "(es. /app/memory/memory.json.gz)", status="warn")
+        except TypeError:
+            log("memory_sync", "memoria: MEMORY_FILE non impostato (mirror e coda fuori volume)")
     return MemorySync(
         client,
         mirror=MemoryMirror(percorso_memoria,

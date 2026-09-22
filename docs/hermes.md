@@ -224,6 +224,14 @@ voce già arrivata produce un `duplicate`, non un doppione.
 Una coda che non si svuota è un peer spento da giorni: a 500 voci in attesa il CP
 scrive un avviso (una volta, non a ogni scrittura).
 
+**Dove deve stare la coda**: accanto al file di memoria, quindi **dentro un volume**.
+Se `MEMORY_FILE` non è dichiarato, il percorso è quello di default — accanto all'app,
+che in un container significa *fuori* dai volumi: lì mirror e coda spariscono a ogni
+ricostruzione, cioè proprio quello che la coda esiste per impedire. Il CP lo dice nei
+log all'avvio (`MEMORY_FILE non impostato — mirror e coda stanno fuori dal volume`).
+Sul **Mac** è il caso da sistemare: il suo `MEMORY_FILE` non è dichiarato, quindi
+prima di affidarsi alla coda va messo dentro un volume (es. `/app/memory/memory.json.gz`).
+
 Una sola fonte di verita' (aggiornato 2026-09-20): il token vive in
 `%HS_DATA_DIR%/hermes-memory.token` (default `data/runtime/data/hermes-memory.token`),
 letto sia dal control-plane (mount `/app/data`) sia dal bridge (via `--token-file`).
