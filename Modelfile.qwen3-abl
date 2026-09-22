@@ -1,0 +1,6 @@
+# qwen3-8b-abliterated — modello non censurato per la voce di Anna/Aurora.
+# Sorgente GGUF: https://huggingface.co/Mungert/Qwen3-8B-abliterated-GGUF
+#   file: Qwen3-8B-abliterated-q4_k_m.gguf (5.19 GB)
+# Il pull diretto `ollama pull hf.co/...` è bloccato dal redirect CDN, quindi si
+# scarica il GGUF a mano e poi:  ollama create qwen3-8b-abliterated -f Modelfile.qwen3-abl
+FROM /Users/opo/models/qwen3-8b-abliterated-q4_k_m.gguf
