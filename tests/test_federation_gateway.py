@@ -69,6 +69,28 @@ class FederationGatewayTests(unittest.TestCase):
         self.assertIn(b"[DONE]", response_body)
         self.assertTrue(request_call.call_args.kwargs["stream"])
 
+    def test_public_chat_preflight_keeps_cors_headers(self):
+        upstream = Mock(
+            content=b"", status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "https://os.zerozerocomputer.it",
+                "Access-Control-Allow-Headers": "content-type",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+            },
+        )
+        with patch.object(gateway.requests, "request", return_value=upstream):
+            response = self.client.options(
+                "/v1/chat/completions",
+                headers={
+                    "Origin": "https://os.zerozerocomputer.it",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.headers["Access-Control-Allow-Headers"], "content-type")
+        self.assertIn("POST", response.headers["Access-Control-Allow-Methods"])
+
     def test_spoofed_attestation_is_replaced_with_gateway_signature(self):
         secret = "g" * 32
         upstream = Mock(

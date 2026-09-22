@@ -188,7 +188,7 @@ def proxy(path):
     # gli header. Funnel e alcuni browser interpretano quel silenzio come una
     # connessione morta. Apriamo subito uno stream SSE con un keepalive; se il
     # backend restituisce JSON nativo, lo trasformiamo nello stesso contratto.
-    if full_path == "/v1/chat/completions":
+    if full_path == "/v1/chat/completions" and request.method == "POST":
         origin = request.headers.get("Origin", "*") or "*"
         method = request.method
         body = request.get_data()
