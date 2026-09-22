@@ -13,7 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from shared.image_jobs import (LIMITE_LATO, ImmagineQueue,  # noqa: E402
+from shared.image_jobs import (DEFAULT_CLAIM_TTL_S, DEFAULT_JOB_TTL_S,  # noqa: E402
+                               LIMITE_LATO, ImmagineQueue,
                                immagini_da_history, nuovo_job, workflow)
 
 
@@ -26,6 +27,29 @@ class OrologioFinto:
 
     def avanza(self, secondi):
         self.adesso += secondi
+
+
+class TempiTests(unittest.TestCase):
+    """I due tempi della coda devono stare in un ordine preciso, non a caso.
+
+    Il 2026-09-22: un ritratto ha superato i 600s di claim mentre ComfyUI campionava
+    ancora; il job è tornato "pending" (quindi rieseguibile: due generazioni per lo
+    stesso lavoro su una scheda da 8 GB) e il risultato sarebbe potuto arrivare dopo
+    la potatura, cioè perso. Questi due test legano i tempi a ciò che il ponte fa.
+    """
+
+    def test_il_claim_dura_piu_dell_esecuzione_massima_del_ponte(self):
+        from integrations.comfyui.comfy_bridge import esegui_job
+        import inspect
+        firma = inspect.signature(esegui_job)
+        timeout_ponte = float(firma.parameters["timeout_s"].default)
+        self.assertGreater(
+            DEFAULT_CLAIM_TTL_S, timeout_ponte,
+            "un claim più corto del timeout del ponte fa rieseguire un job vivo")
+
+    def test_il_job_sopravvive_al_suo_claim(self):
+        self.assertGreater(DEFAULT_JOB_TTL_S, DEFAULT_CLAIM_TTL_S,
+                           "se il job scade prima del claim, il risultato si perde")
 
 
 class JobTests(unittest.TestCase):

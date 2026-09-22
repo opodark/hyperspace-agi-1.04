@@ -253,6 +253,8 @@ def main(argv=None) -> int:
         print(f"accodamento fallito (HTTP {stato}): {dati.get('error') or dati.get('errore')}")
         return 1
     job = dati["job"]
+    if dati.get("scheda"):
+        print(f"  {dati['scheda']}")
     print(f"job {job['id']}: {job['larghezza']}x{job['altezza']} passi={job['passi']} "
           f"seed={job['seed']}")
     print(f"il ponte lo esegue (misura tipica ~5 minuti): aspetto fino a {int(args.attesa)}s")

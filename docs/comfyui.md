@@ -14,6 +14,27 @@ insieme**. Qwen-Image 2.1 in GGUF Q5_K con il suo text encoder da 8B prende quas
 tutta la memoria: la prova fatta in casa gira a 768×768, 25 passi, ed è già al
 limite.
 
+Non è un'ipotesi: il 2026-09-22, generando il ritratto di Aurora (`docs/social.md`),
+ComfyUI è morto con `torch.AcceleratorError: CUDA error: unknown error` nel
+KSampler. I numeri di `nvidia-smi`: 8151 MiB totali, **6170 occupati da Ollama**
+(`llama-server`, il modello del canale tenuto residente 12 ore da
+`OLLAMA_KEEP_ALIVE=12h`), **1730 liberi**. Il diffusion non ci stava. Peggio: dopo
+quell'errore la coda di ComfyUI resta con `queue_running` vuoto e il job dentro
+`queue_pending` — l'esecutore non riparte da solo, e ComfyUI va riavviato.
+
+Da qui **una scheda, un modello**, che è una decisione dichiarata e non una speranza:
+prima di accodare un'immagine il control-plane chiede a Ollama di scaricare
+`CHANNEL_MODEL` (`keep_alive: 0`) — `shared/gpu_budget.py` decide, `/image/generate`
+esegue, e l'esito compare nella risposta (`scheda`) e nei log. Ollama ricarica il
+modello alla prima richiesta: si paga qualche secondo al primo messaggio dopo
+un'immagine, non si paga un crash. Si spegne con `IMAGE_FREE_GPU=false`.
+
+E una misura che vale più di un tetto: con la scheda occupata la stessa generazione
+è passata da 313s a oltre 700s. Il claim della coda è stato tarato di conseguenza
+(`DEFAULT_CLAIM_TTL_S` = 1800s, sopra il timeout del ponte di 900s), altrimenti un
+job ancora in corso veniva considerato morto e rieseguito.
+
+
 Da qui la divisione del lavoro, che è anche la tesi del progetto:
 
 | | Dove | Perché |

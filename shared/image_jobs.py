@@ -23,8 +23,16 @@ STATI = ("pending", "running", "done", "failed")
 # Tetti espliciti, come per i canali: la coda è memoria del control-plane, non un
 # disco. I job sono pochi e piccoli (un prompt e quattro numeri).
 DEFAULT_MAX_JOBS = 8
-DEFAULT_JOB_TTL_S = 900.0
-DEFAULT_CLAIM_TTL_S = 600.0
+# I due tempi non sono decorativi e devono stare in quest'ordine:
+#   claim < esecuzione massima del ponte (900s)  -> il job verrebbe RIESEGUITO
+#   job   < claim + margine                      -> il risultato arriverebbe dopo la
+#                                                   potatura, e andrebbe perso
+# Il 2026-09-22 è successo esattamente questo: un ritratto su scheda carica ha
+# superato i 600s, il claim è scaduto, il job è tornato "pending" mentre ComfyUI
+# stava ancora campionando. Con 313s di misura "libera" e 700s su scheda occupata,
+# i valori vecchi (900/600) erano tarati sul caso migliore.
+DEFAULT_JOB_TTL_S = 3600.0
+DEFAULT_CLAIM_TTL_S = 1800.0
 
 # Limiti del grafo: la scheda di win11 ha 8 GB e un text encoder da 8B. Un tetto
 # dichiarato è meglio di un OOM che si porta dietro anche il modello caricato.

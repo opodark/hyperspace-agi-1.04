@@ -70,6 +70,7 @@ from shared.forge_skills import ECC_BUNDLE_DIR, load_ecc_bundle, attach_skills, 
 from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryClient, HermesMemoryError
 from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
+from shared import gpu_budget
 from shared.web_node import (
     WebNodeError,
     WebNodeRegistry,
@@ -2536,6 +2537,26 @@ def persona_dream_run():
 # 204 su /image/jobs significa "niente da fare": è la risposta normale di un
 # ponte in attesa, non un errore.
 
+def _libera_scheda_per_immagine() -> str:
+    """Fa posto sulla scheda prima di accodare un'immagine (una scheda, un modello).
+
+    Il diffusion di ComfyUI e il modello della chat non stanno insieme in 8 GB, e la
+    contesa si presentava come `CUDA error: unknown error` (2026-09-22: 6.2 GB a
+    Ollama, 1.7 liberi). Non blocca mai: se Ollama non risponde, il job si accoda lo
+    stesso e il motivo resta scritto.
+    """
+    modello = gpu_budget.da_scaricare()
+    if not modello:
+        return ""
+    base = (os.getenv("OLLAMA_RAW_BASE_URL", "") or "http://127.0.0.1:11434").rstrip("/")
+    try:
+        risposta = requests.post(f"{base}{gpu_budget.SCARICA_PATH}",
+                                 json=gpu_budget.richiesta_scarico(modello), timeout=30)
+    except requests.RequestException as e:
+        return gpu_budget.descrivi_esito(0, errore=str(e)[:120], modello=modello)
+    return gpu_budget.descrivi_esito(risposta.status_code, modello=modello)
+
+
 @app.route('/image/generate', methods=['POST'])
 def image_generate():
     """Mette in coda un job immagine e torna subito con l'id."""
@@ -2543,6 +2564,8 @@ def image_generate():
     if errore:
         return errore
     dati = request.get_json(silent=True) or {}
+    # Una scheda, un modello: prima di accodare si fa posto (vedi shared/gpu_budget.py).
+    scheda = _libera_scheda_per_immagine()
     try:
         job = nuovo_job(dati.get("prompt", ""),
                         negativo=dati.get("negativo", ""),
@@ -2562,9 +2585,10 @@ def image_generate():
         return jsonify({"ok": False, "error": str(e)}), 429
     push_log('channel', 'Job immagine in coda',
              detail=f"id={accodato['id']} {accodato['larghezza']}x{accodato['altezza']} "
-                    f"passi={accodato['passi']} da={accodato['richiedente'] or '?'}",
+                    f"passi={accodato['passi']} da={accodato['richiedente'] or '?'}"
+                    + (f" · {scheda}" if scheda else ""),
              status='info')
-    return jsonify({"ok": True, "job": accodato}), 201
+    return jsonify({"ok": True, "job": accodato, "scheda": scheda}), 201
 
 
 @app.route('/image/jobs')
