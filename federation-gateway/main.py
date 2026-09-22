@@ -191,6 +191,7 @@ def proxy(path):
             data=request.get_data(),
             params=request.args,
             timeout=130,
+            stream=(full_path == "/v1/chat/completions"),
         )
     except Exception as e:
         return {"error": f"control-plane non raggiungibile: {e}"}, 502
@@ -199,8 +200,10 @@ def proxy(path):
         (k, v) for k, v in upstream.headers.items()
         if k.lower() not in _EXCLUDED_RESPONSE_HEADERS
     ]
+    body = (upstream.iter_content(chunk_size=8192)
+            if full_path == "/v1/chat/completions" else upstream.content)
     return Response(
-        upstream.content,
+        body,
         status=upstream.status_code,
         headers=headers,
         content_type=upstream.headers.get("Content-Type", "application/json"),

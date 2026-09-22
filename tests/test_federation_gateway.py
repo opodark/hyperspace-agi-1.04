@@ -53,6 +53,20 @@ class FederationGatewayTests(unittest.TestCase):
         self.assertEqual(response.status_code, 204)
         rate_check.assert_not_called()
 
+    def test_public_chat_is_forwarded_as_a_stream(self):
+        upstream = Mock(
+            status_code=200,
+            headers={"Content-Type": "text/event-stream"},
+        )
+        upstream.iter_content.return_value = iter([b'data: {"choices":[]}\n\n', b"data: [DONE]\n\n"])
+        with patch.object(gateway, "_rate_check", return_value=True), \
+             patch.object(gateway.requests, "request", return_value=upstream) as request_call:
+            response = self.client.post(
+                "/v1/chat/completions", json={"model": "qwen3.5:4b"}, buffered=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(request_call.call_args.kwargs["stream"])
+        response.close()
+
     def test_spoofed_attestation_is_replaced_with_gateway_signature(self):
         secret = "g" * 32
         upstream = Mock(
