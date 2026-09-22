@@ -210,3 +210,79 @@ which is the truth you want when the bot seems dead.
 - **Streaming is not part of the contract**: replies arrive whole.
 - **The driver's local moderation is not disabled automatically.** With a channel active the CP decides; leaving `MODERAZIONE_ATTIVA=True` in the driver too would give two judges.
 - **`CHANNEL_ENABLED=false` and an empty `CHANNEL_CLIENTS` look the same to the driver** (it falls back locally): if the bot seems "not using HyperSpace", read `/channel/status` first.
+
+## Telegram
+
+Il terzo canale, dopo CAM4/Chaturbate e Discord — ed è l'unico il cui driver vive
+**nel repo**: `scripts/telegram_bot.py`. Il motivo sta nel contratto: un driver
+esiste per guidare ciò che il control-plane non raggiunge, e qui non c'è un
+browser ma l'API del bot (`getUpdates` in long-polling, nessun webhook, nessuna
+porta in ingresso).
+
+Due token, due posti, due ruoli — confonderli è l'errore che si manifesta come un
+401 che non dice quale dei due lati è sbagliato:
+
+| Token | Dove | Ruolo |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` (da @BotFather) | `data\telegram-bot.env`, ignorato da git | il driver pubblica su Telegram |
+| token del canale | `CHANNEL_CLIENTS="cam4=…;telegram=…"` nel `.env` | il driver parla col control-plane |
+
+Il token del bot **non** va nel `.env`: quel file arriva a tutti i container
+(`env_file`) e un container non deve poter pubblicare su Telegram.
+
+Avvio: `.\scripts\start-telegram.ps1` (o `-Check`, che non avvia nulla e dice cosa
+manca: token del bot, token del canale, privacy mode, control-plane raggiungibile,
+con 401 e 503 distinti). L'identità resta una sola e vive in
+`data/persona-aurora.json`: il driver non la conosce, la inietta il CP.
+
+### Privacy mode: la decisione che cambia cosa vede il bot
+
+`getMe` riporta `can_read_all_group_messages`. Se è `false`, in gruppo il bot
+riceve **solo menzioni e comandi**, non la conversazione. Si cambia da @BotFather
+(`/setprivacy` → Disable) o rendendo il bot admin del gruppo: non esiste un metodo
+API per farlo, quindi è un passo manuale — ed è il primo sospetto quando "il bot
+non risponde".
+
+### Due bot nello stesso gruppo
+
+Due Aurora nella stessa stanza sono possibili, ma il driver deve sapere due cose:
+
+- **i messaggi degli altri bot si ignorano sempre** (`from.is_bot`): senza questo
+  A pubblica → B legge → B risponde → A legge, all'infinito. Non è spam, è
+  cortesia: nessuna moderazione lo ferma.
+- con `TELEGRAM_REQUIRE_MENTION=1` si risponde **solo** a chi ci nomina
+  (`@username`) o risponde a un nostro messaggio. Gli altri messaggi restano nel
+  contesto — così la risposta ha il filo della conversazione — ma non fanno
+  intervenire.
+
+La combinazione utile in un gruppo con più bot è quindi **privacy OFF** (vede
+tutto, quindi ha contesto) **+ mention ON** (parla solo se chiamata). In
+alternativa `python scripts/hs.py mode off` silenzia del tutto uno dei due.
+
+### Vetrina del bot (nome, about, descrizione)
+
+Non è il prompt: è ciò che legge una persona prima di scrivere. Quello che legge
+il modello è il documento d'identità.
+
+```powershell
+python scripts\telegram_profile.py                 # legge e basta
+python scripts\telegram_profile.py --apply         # scrive nome/about/descrizione
+python scripts\telegram_profile.py --token-env data\telegram-bot2.env `
+       --name "…" --about "…" --description "…"    # il SECONDO bot
+```
+
+Un file di segreti per bot e i tre override: i limiti dell'API (64/120/512) si
+vedono prima di sbagliare, e dopo si rilegge cosa il bot risponde davvero.
+
+### Limiti di questo driver
+
+- `!bot on|off|auto` **non** è implementato qui: la modalità si cambia con
+  `python scripts/hs.py mode off|auto` e il driver la ritira entro ~15 s (polling
+  su `/channel/commands`). `!presentati` / `!intro` invece funzionano, perché li
+  gestisce il control-plane.
+- Il driver **consuma** gli update mentre legge: se il control-plane non risponde,
+  i messaggi di quel giro si perdono (non c'è una coda persistente). Prima lo
+  stack, poi il driver.
+- `TELEGRAM_REQUIRE_MENTION=1` richiede `getMe` all'avvio: senza `@username` il
+  driver esce invece di restare muto per sempre (un bot che non sa il proprio nome
+  non riconoscerebbe nessuna chiamata).
