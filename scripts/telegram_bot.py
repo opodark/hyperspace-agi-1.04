@@ -26,6 +26,7 @@ TELEGRAM_REQUIRE_MENTION=1 (parla solo se chiamato).
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -105,8 +106,8 @@ def da_bot(msg) -> bool:
     return bool((msg.get("from") or {}).get("is_bot"))
 
 
-def testo_senza_menzione(text, username: str) -> str:
-    """Toglie una menzione INIZIALE del nostro @username.
+def testo_senza_menzione(text, username: str, nome: str = "") -> str:
+    """Toglie una menzione INIZIALE: `@username`, `@nome` o il nome da solo.
 
     Perché serve: con TELEGRAM_REQUIRE_MENTION il comando dell'operatore arriva
     come "@aurora_2001bot !presentati", e il CP riconosce i comandi confrontando
@@ -117,23 +118,67 @@ def testo_senza_menzione(text, username: str) -> str:
     deve poter avere una risposta.
     """
     originale = str(text or "").strip()
-    if not username:
-        return originale
-    marchio = "@" + username.lower()
-    if originale.lower().startswith(marchio):
-        resto = originale[len(marchio):].strip()
-        return resto or originale
+    marchi = [("@" + username).lower() if username else ""]
+    if nome:
+        marchi += ["@" + nome.lower(), nome.lower()]
+    for marchio in marchi:
+        if marchio and originale.lower().startswith(marchio):
+            resto = originale[len(marchio):].lstrip()
+            # Solo un separatore ATTACCATO al nome: "Aurora, ci sei?" -> "ci sei?".
+            # Mai il "!" di un comando: "Aurora !presentati" deve restare
+            # "!presentati", altrimenti il CP non riconosce piu' il comando.
+            if resto[:1] in (",", "?", ":"):
+                resto = resto[1:].strip()
+            return resto or originale
     return originale
 
 
-def rivolta_a_noi(msg, username: str, bot_id) -> bool:
-    """Vero se il messaggio ci nomina o risponde a un nostro messaggio."""
-    if not username:
-        return False
-    if ("@" + username.lower()) in str(msg.get("text") or "").lower():
+def rivolta_a_noi(msg, username: str, bot_id, nome: str = "") -> bool:
+    """Vero se il messaggio ci nomina, ci chiama per nome o risponde a noi."""
+    testo = str(msg.get("text") or "")
+    if username and ("@" + username.lower()) in testo.lower():
         return True
     risposta = msg.get("reply_to_message") or {}
-    return bool(bot_id) and (risposta.get("from") or {}).get("id") == bot_id
+    if bot_id and (risposta.get("from") or {}).get("id") == bot_id:
+        return True
+    return _inizia_con_nome(testo, nome)
+
+
+def nome_chiamata(me) -> str:
+    """Come ci si rivolge al bot per nome: la prima parola del suo nome.
+
+    Serve perché `@aurora presentati` NON è una menzione Telegram: è testo
+    normale, e un bot che riconosce solo `@username` resta muto proprio quando
+    qualcuno lo chiama per nome — verificato in "UltraMind", dove le chiamate
+    erano due "presentati" con il nome vero e una con `@aurora`.
+    Sotto le tre lettere non si usa: un nome troppo corto comparirebbe in mezza
+    conversazione.
+    """
+    primo = str((me or {}).get("first_name") or "").split(" ")[0].strip()
+    return primo.lower() if len(primo) >= 3 else ""
+
+
+def _inizia_con_nome(testo: str, nome: str) -> bool:
+    """Vero se il messaggio si apre chiamandoci per nome (con o senza @)."""
+    if not nome:
+        return False
+    return bool(re.match(rf"^@?{re.escape(nome)}\b", str(testo or "").strip(),
+                         re.IGNORECASE))
+
+
+def normalizza_comando(testo) -> str:
+    """`presentati` detto per nome diventa il comando che il control-plane conosce.
+
+    Perché: il CP riconosce solo `!presentati`/`!intro` e confronta il testo
+    DALL'INIZIO. Chi chiama la bot per nome e dice "presentati" sta chiedendo
+    l'annuncio — e l'annuncio deterministico (disclosure-safe, generato dalla
+    persona) è esattamente ciò che deve uscire, non un'invenzione del modello.
+    Si normalizza qui, dove la chiamata per nome è già stata riconosciuta.
+    """
+    pulito = " ".join(str(testo or "").split()).strip().lower().rstrip("!.")
+    if pulito in ("presentati", "intro", "!presentati", "!intro"):
+        return "!presentati"
+    return testo
 
 
 def main():
@@ -146,18 +191,19 @@ def main():
     # risposte ai nostri messaggi). Se getMe non risponde e la modalità mention è
     # attiva si esce: un bot che non sa il proprio nome resterebbe muto per
     # sempre senza dirlo, che è il modo peggiore di fallire.
-    username, bot_id = "", 0
+    username, bot_id, nome = "", 0, ""
     try:
         me = tg("getMe").get("result") or {}
         username, bot_id = str(me.get("username") or ""), me.get("id") or 0
+        nome = nome_chiamata(me)
     except requests.RequestException as e:
         if REQUIRE_MENTION:
             sys.exit(f"getMe non ha risposto ({e}): senza @username la modalità "
                      "TELEGRAM_REQUIRE_MENTION non può funzionare")
         print(f"[telegram] getMe non ha risposto: {e}", flush=True)
     print(f"[telegram] driver avviato -> {CHANNEL_URL} (mode={mode}, "
-          f"bot=@{username or '?'}, mention={'richiesta' if REQUIRE_MENTION else 'no'})",
-          flush=True)
+          f"bot=@{username or '?'}, nome={nome or '-'}, "
+          f"mention={'richiesta' if REQUIRE_MENTION else 'no'})", flush=True)
     while True:
         # 1. Nuovi messaggi
         try:
@@ -180,9 +226,12 @@ def main():
                                                "addressed": False})
             entry["surface"] = surface_of(chat)
             author = author_of(msg)
-            text = testo_senza_menzione(msg["text"], username)
-            if rivolta_a_noi(msg, username, bot_id):
+            text = testo_senza_menzione(msg["text"], username, nome)
+            if rivolta_a_noi(msg, username, bot_id, nome):
                 entry["addressed"] = True
+                # Chi ci chiama per nome e dice "presentati" sta chiedendo
+                # l'annuncio: si traduce nel comando che il CP conosce.
+                text = normalizza_comando(text)
             if not entry["messages"]:
                 entry["batch_start"] = time.time()
             entry["messages"].append({"author": author, "text": text})

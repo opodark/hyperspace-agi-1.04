@@ -69,6 +69,16 @@ class ChiamataPerNomeTests(unittest.TestCase):
     def setUpClass(cls):
         cls.driver = carica_driver()
 
+    def test_il_nome_e_la_prima_parola_del_nome_del_bot(self):
+        # Il nome vero di Aurora e' "Aurora · IA di HyperSpace, voce della mesh".
+        me = {"first_name": "Aurora · IA di HyperSpace, voce della mesh"}
+        self.assertEqual(self.driver.nome_chiamata(me), "aurora")
+
+    def test_un_nome_troppo_corto_non_si_usa(self):
+        # "ai" comparirebbe in mezza conversazione.
+        self.assertEqual(self.driver.nome_chiamata({"first_name": "Ai"}), "")
+        self.assertEqual(self.driver.nome_chiamata({}), "")
+
     def test_la_menzione_iniziale_sparisce(self):
         # Serve al comando dell'operatore: il CP confronta il testo dall'inizio.
         self.assertEqual(
@@ -107,6 +117,49 @@ class ChiamataPerNomeTests(unittest.TestCase):
         self.assertFalse(self.driver.rivolta_a_noi({"text": "@x ciao"}, "", 42))
         self.assertFalse(self.driver.rivolta_a_noi(
             {"text": "ciao", "reply_to_message": {"from": {"id": 42}}}, NOSTRO, 0))
+
+    def test_il_nome_all_inizio_e_una_chiamata(self):
+        """In "UltraMind" le chiamate erano "@aurora presentati" e "aurora?":
+        il nome NON e' una menzione Telegram, e' testo."""
+        for testo in ("@aurora presentati", "aurora, ci sei?", "Aurora?"):
+            with self.subTest(testo=testo):
+                self.assertTrue(self.driver.rivolta_a_noi({"text": testo}, NOSTRO, 42,
+                                                          "aurora"))
+
+    def test_il_nome_a_meta_frase_non_e_una_chiamata(self):
+        for testo in ("la mia aurora boreale", "auroraboreale e' un fenomeno"):
+            with self.subTest(testo=testo):
+                self.assertFalse(self.driver.rivolta_a_noi({"text": testo}, NOSTRO, 42,
+                                                           "aurora"))
+
+    def test_si_toglie_anche_il_nome_iniziale(self):
+        self.assertEqual(
+            self.driver.testo_senza_menzione("@aurora presentati", NOSTRO, "aurora"),
+            "presentati")
+        self.assertEqual(
+            self.driver.testo_senza_menzione("Aurora presentati", NOSTRO, "aurora"),
+            "presentati")
+
+
+class ComandoPresentazioneTests(unittest.TestCase):
+    """Tre "presentati" sono rimasti senza risposta in UltraMind: il CP conosce
+    solo `!presentati`, quindi la traduzione va fatta dove il nome e' stato
+    riconosciuto."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.driver = carica_driver()
+
+    def test_presentati_diventa_il_comando_del_control_plane(self):
+        for detto in ("presentati", "Presentati!", "presentati.", "intro",
+                      "!presentati", "!intro"):
+            with self.subTest(detto=detto):
+                self.assertEqual(self.driver.normalizza_comando(detto), "!presentati")
+
+    def test_una_frase_che_parla_di_presentazioni_non_diventa_un_comando(self):
+        for detto in ("presentati tutti gli altri", "vi presento Mario", "ciao"):
+            with self.subTest(detto=detto):
+                self.assertEqual(self.driver.normalizza_comando(detto), detto)
 
 
 class ModalitaMentionTests(unittest.TestCase):
