@@ -203,12 +203,14 @@ def main(argv=None) -> int:
         return 1
 
     vetrina = vetrina_dal_documento(documento)
-    dichiarata = isinstance(documento.get("vetrina"), dict)
+    dichiarata = documento.get("vetrina") if isinstance(documento.get("vetrina"), dict) else {}
+    stile_dichiarato = bool(str(dichiarata.get("stile") or "").strip())
     print(f"documento: {percorso}")
     print(f"identità:  {documento.get('name', '?')} ({documento.get('kind', '?')})")
     print(f"vetrina:   seed {vetrina['seed']} · {vetrina['larghezza']}x{vetrina['altezza']} · "
-          f"{vetrina['passi']} passi"
-          + ("" if dichiarata else "  [default del modulo: dichiara `vetrina` nel documento]"))
+          f"{vetrina['passi']} passi · stile "
+          + ("dal documento" if stile_dichiarato else "default del modulo (dichiaralo "
+             "in `vetrina` per cambiarlo)"))
     if args.forza:
         print("ATTENZIONE: --forza attivo — la vetrina può contraddire il documento, "
               "e la cosa resta scritta qui e nei log")

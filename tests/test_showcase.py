@@ -23,8 +23,9 @@ sys.path.insert(0, str(ROOT))
 
 from shared.showcase import (CONFLITTI_IDENTITA, NEGATIVO_BASE, STILE_DEFAULT,  # noqa: E402
                              VIETATI_ASSOLUTI, istruzione_botfather,
-                             negativo_ritratto, prompt_ritratto,
-                             verifica_vetrina, vetrina_dal_documento)
+                             marcatori_presenti, negativo_ritratto,
+                             prompt_ritratto, verifica_vetrina,
+                             vetrina_dal_documento)
 
 CLI = ROOT / "scripts" / "ritratto.py"
 PERSONA = json.loads((ROOT / "data" / "persona-aurora.json").read_text(encoding="utf-8"))
@@ -53,20 +54,24 @@ class VetrinaTests(unittest.TestCase):
     def test_lo_stile_dichiarato_di_aurora_non_fa_conflitti(self):
         self.assertEqual(verifica_vetrina(vetrina_dal_documento(PERSONA), PERSONA), [])
 
-    def test_il_default_dichiara_di_non_avere_volto(self):
-        """Lezione del 2026-09-22: il modello ha disegnato una testa con un volto.
+    def test_il_default_dichiara_di_essere_una_rappresentazione(self):
+        """La correzione del 2026-09-22: il volto non è vietato, il fotorealismo sì.
 
-        Il documento dice "non ho un corpo": perché l'immagine non lo contraddica, la
-        richiesta deve dirlo in chiaro — e il negativo deve togliere ciò che il modello
-        aggiunge da sé, che è esattamente quello che è successo.
+        "Non ho un corpo" esclude la rivendicazione, non la rappresentazione: una
+        figura va bene se si vede che è digitale, e la dichiarazione va scritta (con
+        Qwen la richiesta va detta, non lasciata intendere).
         """
         vetrina = vetrina_dal_documento({"name": "X"})
-        self.assertIn("senza volto", vetrina["stile"])
-        self.assertIn("senza corpo", vetrina["stile"])
-        self.assertIn("nessuna figura", vetrina["stile"])
+        self.assertTrue(marcatori_presenti(vetrina), vetrina["stile"])
+        self.assertIn("realtà aumentata", vetrina["stile"])
+        self.assertIn("non fotografici", vetrina["stile"])
         negativo = vetrina["negativo"].lower()
-        for parola in ("volto umano", "testa", "figura umana", "pelle"):
+        for parola in ("fotografia", "pelle realistica", "selfie"):
             self.assertIn(parola, negativo)
+
+    def test_la_dichiarazione_entra_sempre_nel_prompt(self):
+        prompt = prompt_ritratto(vetrina_dal_documento({"name": "X"}))
+        self.assertIn("costruzione digitale", prompt)
 
 
 class PromptTests(unittest.TestCase):
@@ -96,17 +101,40 @@ class PromptTests(unittest.TestCase):
 
 class VerificaVetrinaTests(unittest.TestCase):
 
-    def test_un_corpo_umano_e_un_conflitto_col_documento(self):
+    def test_il_fotorealismo_e_una_rivendicazione_di_corpo(self):
         vetrina = {**vetrina_dal_documento(PERSONA),
                    "stile": "photorealistic portrait of a woman"}
         problemi = verifica_vetrina(vetrina, PERSONA)
         self.assertTrue(problemi)
-        self.assertTrue(any("corpo" in problema for problema in problemi))
+        self.assertTrue(any("rivendicazione" in problema for problema in problemi))
 
     def test_forza_dichiara_il_conflitto_invece_di_nasconderlo(self):
+        """`--forza` non toglie i problemi: li fa diventare una decisione scritta."""
         vetrina = {**vetrina_dal_documento(PERSONA),
-                   "stile": "photorealistic portrait of a woman"}
+                   "stile": "photorealistic portrait of a woman, augmented reality light"}
         self.assertEqual(verifica_vetrina(vetrina, PERSONA, forza=True), [])
+
+    def test_una_figura_senza_segni_digitali_e_un_problema_che_forza_non_toglie(self):
+        """Una donna elegante senza nient'altro è una donna: non una rappresentazione."""
+        vetrina = {**vetrina_dal_documento(PERSONA),
+                   "stile": "una donna elegante, sguardo intenso, luce soffusa"}
+        problemi = verifica_vetrina(vetrina, PERSONA, forza=True)
+        self.assertTrue(any("rappresentazione" in problema for problema in problemi),
+                        "senza marcatori digitali la figura sembra una persona")
+
+    def test_basta_un_segno_perche_sia_una_rappresentazione(self):
+        for segno in ("realtà aumentata", "olografica", "illustrazione digitale",
+                      "particelle di luce"):
+            with self.subTest(segno=segno):
+                vetrina = {**vetrina_dal_documento(PERSONA),
+                           "stile": f"una donna elegante, {segno}"}
+                self.assertEqual(verifica_vetrina(vetrina, PERSONA), [])
+
+    def test_una_vetrina_senza_figure_non_ha_bisogno_di_marcatori(self):
+        vetrina = {**vetrina_dal_documento(PERSONA),
+                   "stile": "un vortice di luce verde e violetta su fondo nero"}
+        self.assertEqual(verifica_vetrina(vetrina, PERSONA), [])
+        self.assertEqual(marcatori_presenti(vetrina), [])
 
     def test_i_confini_assoluti_non_si_aggirano_nemmeno_con_forza(self):
         for richiesta in ("a photo of a nude woman", "a child, 10 years old"):

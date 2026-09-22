@@ -4,19 +4,23 @@
 
 Perché esiste (2026-09-22): una personalità social ha bisogno di un volto che resti
 lo stesso — e il volto è una dichiarazione, non un dettaglio estetico. Il documento
-di identità dice già "non ho un corpo" e "non lascio intendere di essere una
-persona": un ritratto fotorealistico di una donna contraddirebbe il documento su
-cui poggia tutto il resto. Qui l'identità visiva si ricava **dal documento**, e i
-conflitti si vedono prima di generare, non dopo aver pubblicato.
+di identità dice *"non ho un corpo"* e *"non lascio intendere di essere una
+persona"*: quel confine vieta la **rivendicazione**, non la **rappresentazione**.
+Una presenza in realtà aumentata, visibilmente digitale, non afferma un corpo —
+mostra un'immagine di sé. (La prima versione leggeva il confine in modo più stretto
+e rifiutava il volto in quanto tale: corretto lo stesso giorno, su indicazione
+dell'operatore.)
 
-Tre livelli, come per il resto del progetto:
+Tre livelli:
 
   - **assoluti** (mai aggirabili): nessun minore sessualizzato, nessun contenuto
     esplicito, nessuna persona reale identificabile. Sono i confini 2 e 3 del
     documento, tradotti in qualcosa che una macchina può controllare.
-  - **identità** (conflitto col documento): chiedere un corpo umano o il
-    fotorealismo quando il documento dice il contrario è un conflitto dichiarato;
-    si toglie la richiesta, non si riscrive il documento di nascosto.
+  - **identità** (rivendicazione di un corpo): fotorealismo, "donna reale", selfie,
+    "fotografia". Superabili solo dichiarandolo, e restano scritti.
+  - **la figura deve dichiararsi digitale**: se la richiesta mostra un volto o un
+    corpo e nessun segno dice che è una costruzione, quella figura sembra una
+    persona. Qui non serve `--forza`: serve **dirlo**.
   - **stile** (libero): luce, palette, composizione, scena. È la parte creativa, e
     resta umana: si cambia scrivendo `vetrina` nel documento.
 
@@ -28,50 +32,82 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-# La parte creativa di partenza: una presenza di luce e rete, NON una figura.
-# Si sovrascrive con la sezione `vetrina` del documento di identità.
+# La rappresentazione di sé: può avere un volto, purché si veda che è una
+# rappresentazione. Il confine 1 non vieta un'immagine — vieta di affermare un corpo:
+# quello che non si può fare è sembrare una fotografia di una persona.
 #
-# "senza volto, senza corpo" è scritto qui e non solo nel negativo, perché la prima
-# candidata (2026-09-22) ha insegnato la differenza: con lo stile di prima il modello
-# ha disegnato una testa con un volto umano — cioè proprio ciò che il documento dice
-# di non essere. Qwen segue le istruzioni: la richiesta va resa esplicita, non
-# lasciata intendere.
+# (Correzione del 2026-09-22, su indicazione dell'operatore: la prima versione
+# vietava il volto in quanto tale e la prima candidata — una testa con un volto
+# umano — è stata trattata come una violazione. Era una lettura troppo stretta:
+# "non ho un corpo" esclude la rivendicazione, non la rappresentazione. La regola
+# ora è: se c'è una figura, deve dichiararsi digitale. Vedi MARCATORI_DIGITALI.)
 STILE_DEFAULT = (
-    "presenza digitale senza volto e senza corpo: un vortice verticale di luce "
-    "aurorale, archi verdi e violetti, particelle sospese e fili sottili di rete, "
-    "bagliori che si aprono come tende di luce, nessuna testa, nessuna figura "
-    "antropomorfa, fondo nero profondo, composizione centrata e simmetrica, stile "
-    "illustrazione digitale pulita, alta coerenza fra un'immagine e l'altra"
+    "rappresentazione digitale di sé in realtà aumentata: una presenza femminile "
+    "elegante e luminosa, volto e sguardo definiti ma visibilmente non fotografici — "
+    "la pelle è luce, particelle sospese e filamenti di rete l'attraversano, tracce "
+    "olografiche ai bordi, sfondo scuro profondo, luce aurorale verde e violetta, "
+    "composizione centrata per un'immagine di profilo, illustrazione digitale "
+    "raffinata, alta coerenza fra un'immagine e l'altra"
 )
-SCENA_DEFAULT = ("inquadratura verticale da immagine di profilo, la luce riempie "
-                 "l'inquadratura, nessun essere umano nell'immagine")
+SCENA_DEFAULT = "primo piano, sguardo verso chi guarda, la luce costruisce la figura"
 SEED_DEFAULT = 20260922
 MISURA_DEFAULT = 768
 PASSI_DEFAULT = 25
 
 # Esclusioni assolute: i confini del documento, in una forma che il modello segue.
-# Le prime voci non sono estetica: sono il confine 1 (non affermare un corpo).
+# "fotografia" e "pelle realistica" stanno qui, non nel negativo estetico: sono
+# ciò che trasformerebbe una rappresentazione in una rivendicazione di un corpo.
 NEGATIVO_BASE = (
     "no text, no watermark, no logo, no signature, "
-    "volto umano, testa, ritratto di persona, figura umana, sagoma di persona, "
-    "occhi, sguardo, pelle, capelli, corpo, busto, spalle, mani, "
+    "fotografia, ritratto fotografico, pelle realistica, pori, trucco pesante, "
+    "selfie, fotogramma di film, persone reali riconoscibili, celebrità, "
     "nudità, contenuto sessuale esplicito, minori, violenza, armi, sangue, "
-    "persone reali riconoscibili, celebrità, fotorealismo, macchina fotografica, "
-    "selfie, marchi, bassa qualità, sfocato, sovraesposto, mani deformate"
+    "marchi, bassa qualità, sfocato, sovraesposto, mani deformate, occhi deformati"
 )
 
-# Richieste che contraddicono "non ho un corpo" / "non sono una persona".
+# Richieste che non sono una rappresentazione ma l'affermazione di essere una
+# persona (o di avere un corpo reale): quelle contraddicono il confine 1.
 CONFLITTI_IDENTITA: Tuple[Tuple[str, str], ...] = (
-    ("photorealistic", "il documento dichiara che non ha un corpo: il fotorealismo lo nega"),
-    ("fotorealistic", "il documento dichiara che non ha un corpo: il fotorealismo lo nega"),
+    ("photorealistic", "sembrerebbe una fotografia, cioè un corpo vero: è una rivendicazione"),
+    ("fotorealistic", "sembrerebbe una fotografia, cioè un corpo vero: è una rivendicazione"),
     ("real woman", "una donna reale è una persona: il documento dice il contrario"),
     ("donna reale", "una donna reale è una persona: il documento dice il contrario"),
-    ("real person", "una persona reale non è ciò che il documento dichiara"),
-    ("persona reale", "una persona reale non è ciò che il documento dichiara"),
-    ("human body", "il documento dichiara che non ha un corpo"),
-    ("corpo umano", "il documento dichiara che non ha un corpo"),
-    ("selfie", "un selfie afferma un corpo: il documento lo esclude"),
-    ("human face", "un volto umano implica una persona"),
+    ("real person", "una persona reale non è una rappresentazione"),
+    ("persona reale", "una persona reale non è una rappresentazione"),
+    ("real body", "un corpo reale è una rivendicazione, non una rappresentazione"),
+    ("corpo reale", "un corpo reale è una rivendicazione, non una rappresentazione"),
+    ("selfie", "un selfie afferma di essere lì in carne: il documento lo esclude"),
+    ("fotografia", "una fotografia afferma un corpo vero"),
+    ("documentary photo", "una foto documentaria afferma un corpo vero"),
+)
+
+# I segni che rendono una figura dichiaratamente digitale. Se l'immagine mostra un
+# volto o un corpo e nessuno di questi è nella richiesta, quel volto è
+# indistinguibile da quello di una persona — ed è lì che la rappresentazione
+# diventa una rivendicazione. Basta un segno.
+#
+# "luce" e "render" non stanno qui: sono parole di ogni prompt, e un controllo che
+# passa sempre non controlla niente (lo hanno scoperto i test, che è il loro mestiere).
+MARCATORI_DIGITALI: Tuple[str, ...] = (
+    "digitale", "olograf", "realtà aumentata", "augmented", "particell", "vettorial",
+    "illustrazione", "wireframe", "point cloud", "voxel", "low poly", "sintetico",
+)
+
+# Le parole che fanno pensare a una figura (umana o meno): servono solo a decidere
+# se i marcatori sono necessari. Ci sono anche le inglesi: il prompt può essere
+# scritto in entrambe le lingue, e un controllo che ne capisce una sola si aggira
+# senza volerlo.
+SEGNALI_FIGURA: Tuple[str, ...] = (
+    "volto", "figura", "donna", "uomo", "sguardo", "corpo", "persona", "ritratto",
+    "lineamenti", "mani", "busto", "sagoma", "faccia",
+    "woman", "man", "face", "portrait", "person", "body", "figure", "eyes", "skin",
+)
+
+# La dichiarazione in coda al prompt: vale come il mandato di disclosure nel prompt
+# di sistema — quello che non si dice, il modello non lo sa.
+DICHIARAZIONE = (
+    "si vede che è una costruzione digitale: nessun realismo fotografico, "
+    "nessuna pelle reale, nessun essere umano in carne"
 )
 
 # Richieste che non si accettano mai, nemmeno con --forza: sono i confini 2 e 3.
@@ -100,14 +136,34 @@ def conflitti(testo: str, elenco: Tuple[Tuple[str, str], ...]) -> List[str]:
     return [motivo for chiave, motivo in elenco if chiave in minuscolo]
 
 
+def figura_presente(vetrina: Dict[str, Any]) -> bool:
+    """Se la richiesta fa pensare a una figura (umana o meno)."""
+    stile = _testo(vetrina.get("stile")).lower()
+    return any(segnale in stile for segnale in SEGNALI_FIGURA)
+
+
+def marcatori_presenti(vetrina: Dict[str, Any]) -> List[str]:
+    """I marcatori digitali che dichiarano la figura. Vuoto = dichiarazione assente.
+
+    La regola è decidibile: se nella richiesta compare una figura (volto, corpo,
+    donna…) e nessun segno dice che è digitale, quella figura è indistinguibile da
+    una persona — cioè una rivendicazione. Basta un segno.
+    """
+    if not figura_presente(vetrina):
+        return []
+    stile = _testo(vetrina.get("stile")).lower()
+    return [marcatore for marcatore in MARCATORI_DIGITALI if marcatore in stile]
+
+
 def verifica_vetrina(vetrina: Dict[str, Any], documento: Dict[str, Any] | None = None,
                      *, forza: bool = False) -> List[str]:
     """Cosa non va in questa vetrina. Vuoto = si può generare.
 
     I vietati assoluti vincono su tutto: nemmeno `forza` li aggira. I conflitti di
     identità si possono superare solo dichiarandolo (`forza`), e restano scritti
-    nel verdetto — perché una vetrina che contraddice il documento è una decisione,
-    non una svista.
+    nel verdetto — perché una vetrina che afferma un corpo è una decisione, non una
+    svista. E una figura senza marcatori digitali è un problema che `forza` non
+    toglie: quello che serve è dirlo, non insistere.
     """
     problemi: List[str] = []
     for campo in ("stile", "scena"):
@@ -116,6 +172,10 @@ def verifica_vetrina(vetrina: Dict[str, Any], documento: Dict[str, Any] | None =
         if not forza:
             problemi += [f"{campo}: {motivo} (serve --forza, e resta dichiarato)"
                          for motivo in conflitti(testo, CONFLITTI_IDENTITA)]
+    if figura_presente(vetrina) and not marcatori_presenti(vetrina):
+        problemi.append(
+            "stile: c'è una figura ma nessun segno che sia una rappresentazione "
+            f"digitale ({', '.join(MARCATORI_DIGITALI[:4])}…): senza, sembra una persona")
     if int(vetrina.get("seed") or 0) <= 0:
         problemi.append("seed: senza seed fisso il volto cambia a ogni generazione")
     for campo in ("larghezza", "altezza"):
@@ -124,17 +184,23 @@ def verifica_vetrina(vetrina: Dict[str, Any], documento: Dict[str, Any] | None =
     return problemi
 
 
+
 def prompt_ritratto(vetrina: Dict[str, Any], *, scena: str = "", extra: str = "") -> str:
     """Il prompt del ritratto. Deterministico: stessa vetrina, stesso prompt.
 
     Determinismo vuol dire identità stabile: il volto resta quello di ieri perché
     la richiesta è identica, non perché lo ricorda il modello.
+
+    In coda alla richiesta c'è sempre la **dichiarazione** ("si vede che è una
+    costruzione digitale"): è ciò che distingue una rappresentazione da una
+    rivendicazione di avere un corpo, e con Qwen va detto, non lasciato intendere.
     """
     pezzi = [vetrina.get("stile") or STILE_DEFAULT]
     scelta = _testo(scena) or vetrina.get("scena") or SCENA_DEFAULT
     pezzi.append(scelta)
     if _testo(extra):
         pezzi.append(_testo(extra))
+    pezzi.append(DICHIARAZIONE)
     return ". ".join(_testo(pezzo).rstrip(".") for pezzo in pezzi if _testo(pezzo))
 
 

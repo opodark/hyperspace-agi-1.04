@@ -19,8 +19,11 @@ ComfyUI è morto con `torch.AcceleratorError: CUDA error: unknown error` nel
 KSampler. I numeri di `nvidia-smi`: 8151 MiB totali, **6170 occupati da Ollama**
 (`llama-server`, il modello del canale tenuto residente 12 ore da
 `OLLAMA_KEEP_ALIVE=12h`), **1730 liberi**. Il diffusion non ci stava. Peggio: dopo
-quell'errore la coda di ComfyUI resta con `queue_running` vuoto e il job dentro
-`queue_pending` — l'esecutore non riparte da solo, e ComfyUI va riavviato.
+quell'errore ComfyUI **non è più utilizzabile** — il suo server risponde `HTTP 500
+Server got itself in trouble`, la coda resta con `queue_running` vuoto, i prompt
+nuovi entrano in `queue_pending` e non partono mai. Da fuori non si ripara: va
+riavviato ComfyUI. Riconoscerlo è facile: `comfy_bridge.py --check` lo dice, e
+`/queue` mostra `pending` che non scende.
 
 Da qui **una scheda, un modello**, che è una decisione dichiarata e non una speranza:
 prima di accodare un'immagine il control-plane chiede a Ollama di scaricare

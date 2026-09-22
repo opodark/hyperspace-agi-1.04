@@ -34,28 +34,40 @@ Quindi "storie" si ottiene in uno di questi tre modi, in ordine di onestà:
    strumenti di questo progetto, e da decidere con gli occhi aperti. Non è la strada
    che consiglio per iniziare.
 
-## L'identità visiva è una dichiarazione, non un'estetica
+## L'identità visiva è una rappresentazione dichiarata, non un'estetica
 
-Il documento di Aurora dice: *"non ho un corpo"*, *"non affermo e non lascio
-intendere di essere una persona"*. La prima candidata generata (2026-09-22) è stata
-una **testa con un volto umano** avvolta da luce aurorale: bella, e in conflitto con
-il documento — il prompt diceva "volto non umano" e il modello ha disegnato una
-faccia con gli occhi. Lezione: con Qwen la richiesta va **detta**, non lasciata
-intendere.
+La prima versione di questa regola vietava il volto in quanto tale, e la prima
+candidata — una testa di luce con un volto umano, generata il 2026-09-22 — è stata
+trattata come una violazione. **Era una lettura troppo stretta**, corretta
+dall'operatore: il confine dice *"non ho un corpo"* e *"non affermo e non lascio
+intendere di essere una persona"*. Vieta la **rivendicazione**, non la
+**rappresentazione**: una presenza in realtà aumentata, dichiaratamente digitale, non
+afferma un corpo — mostra un'immagine di sé.
 
-Da qui le regole di `shared/showcase.py`, tre livelli:
+Da qui la regola, tutta decidibile in `shared/showcase.py`:
 
 - **assolute** (mai aggirabili, nemmeno con `--forza`): nessun minore, nessun
-  contenuto esplicito, nessuna persona reale identificabile — sono i confini 2 e 3;
-- **identità** (conflitto col documento, superabile solo dichiarandolo): chiedere un
-  corpo umano, il fotorealismo, un selfie. Se serve, si cambia **il documento**, non
-  si aggira in silenzio;
-- **stile** (libera): luce, palette, composizione, scena. Si cambia scrivendo
-  `vetrina` nel documento, oppure con `--scena` e `--seed` per esplorare.
+  contenuto esplicito, nessuna persona reale identificabile — i confini 2 e 3;
+- **identità** (fotorealismo, "donna reale", selfie, "fotografia"): sono
+  *rivendicazioni di un corpo*, superabili solo dichiarandolo con `--forza` — o
+  meglio, cambiando il documento, che è la sede della decisione;
+- **la figura deve dichiararsi digitale**: se la richiesta mostra un volto, un corpo,
+  una donna e nessun segno dice che è una costruzione (`digitale`, `olograf`,
+  `realtà aumentata`, `particelle`, `illustrazione`…), quella figura è
+  indistinguibile da una persona. Basta un segno, e `--forza` non lo toglie: quello
+  che serve è **dirlo**, non insistere;
+- **stile** (libero): luce, palette, composizione, scena.
+
+In coda a ogni prompt c'è anche la **dichiarazione** — *"si vede che è una
+costruzione digitale: nessun realismo fotografico, nessuna pelle reale, nessun
+essere umano in carne"* — perché con Qwen la richiesta va detta, non lasciata
+intendere (lezione della prima candidata: il prompt diceva "volto non umano" e il
+modello ha disegnato comunque una faccia).
 
 Il **seed è parte dell'identità**: stesso prompt e stesso seed = stesso volto, perché
 la richiesta è identica. Cambiare seed significa *proporre un altro volto*, e la
 scelta resta umana — come le annotazioni su di sé.
+
 
 ## La vetrina: come funziona
 
