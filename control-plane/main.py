@@ -1070,6 +1070,49 @@ def _channel_memories(channel: str, limit: int = 5) -> list:
 # Tetto sugli eventi per chiamata: un batch enorme è un abuso, non un caso d'uso.
 CHANNEL_INGEST_MAX_EVENTS = _channel_int("CHANNEL_INGEST_MAX_EVENTS", 100)
 
+# Comandi con cui si chiede un'immagine. Perché un COMANDO e non un tool del
+# modello: il percorso del canale non ha tool (per scelta: in una stanza non si
+# esegue codice né si cerca sul web), e un'immagine è una richiesta esplicita.
+# L'alternativa — lasciare che il modello decida quando occupare la scheda per
+# dodici minuti — è un'inferenza su una risorsa che non si condivide così.
+COMANDI_IMMAGINE = ("!immagine", "!immagine:", "!foto", "!image", "!imagine")
+
+
+def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str | None:
+    """`!immagine <idea>`: mette in coda un job e risponde SUBITO.
+
+    Chi può chiederla: l'operatore, quando `CHANNEL_OPERATOR` è configurato. La
+    coda sulla GPU di casa è una e non si parallelizza: senza questo freno
+    chiunque passi in chat potrebbe occuparla per un quarto d'ora.
+    """
+    ultimo = str((context[-1] if context else {}).get("text", "")).strip()
+    pezzi = ultimo.split(" ", 1)
+    comando = pezzi[0].lower().rstrip(":") if pezzi else ""
+    if f"!{comando.lstrip('!')}" not in COMANDI_IMMAGINE:
+        return None
+    autore = str((context[-1] if context else {}).get("author", "")).strip().lower()
+    if CHANNEL_OPERATOR and autore not in CHANNEL_OPERATOR:
+        return ("Le immagini le chiede chi mi ha costruita: non posso mettere in coda "
+                "una richiesta di chiunque, la scheda è una sola.")
+    idea = pezzi[1].strip() if len(pezzi) > 1 else ""
+    if not idea:
+        return "Dimmi cosa disegnare, così: `!immagine una torre al tramonto`."
+    try:
+        accodato = image_queue.accoda(nuovo_job(idea, richiedente=autore, canale=channel,
+                                                destinazione=destinazione))
+    except ValueError:
+        return "Un'immagine senza descrizione non esiste: scrivi cosa disegnare."
+    except RuntimeError as e:
+        return f"Non posso adesso: {e}."
+    push_log('channel', f"{channel}: richiesta immagine",
+             detail=f"id={accodato['id']} da={autore or '?'} idea={idea[:60]}",
+             source=f"channel:{channel}", status='info')
+    if not destinazione:
+        return ("L'ho messa in coda, ma non so dove mandartela: chiedila dalla chat "
+                "(nel canale il driver manda l'id della conversazione).")
+    return (f"La disegno: {accodato['larghezza']}x{accodato['altezza']}, "
+            f"{accodato['passi']} passi. Arriva qui appena è pronta.")
+
 
 def _trascrizione(context) -> str:
     """Trascrizione compatta: ultimi N messaggi, ognuno troncato.
@@ -2446,6 +2489,7 @@ def image_generate():
                         seed=dati.get("seed", 0),
                         richiedente=dati.get("richiedente", ""),
                         canale=_channel_name(),
+                        destinazione=dati.get("destinazione", ""),
                         modello=dati.get("modello", ""))
     except (ValueError, TypeError) as e:
         return jsonify({"ok": False, "error": str(e)[:160]}), 400
@@ -2499,6 +2543,36 @@ def image_status():
     if errore:
         return errore
     return jsonify({"ok": True, **image_queue.stato()})
+
+
+@app.route('/channel/outbox')
+def channel_outbox():
+    """Le immagini pronte da consegnare a QUESTO canale (il driver le tira).
+
+    Perché esiste: il control-plane non ha il file e non sa parlare con la
+    piattaforma; il driver ha entrambi. Quindi anche la consegna è una cosa che il
+    driver *tira* — come le decisioni — invece di una porta che si apre.
+    """
+    errore = _channel_error()
+    if errore:
+        return errore
+    return jsonify({"ok": True, "channel": _channel_name(),
+                    "messages": image_queue.da_consegnare(_channel_name())})
+
+
+@app.route('/channel/outbox/ack', methods=['POST'])
+def channel_outbox_ack():
+    """Il driver dichiara consegnata un'immagine: senza l'ack si ripeterebbe."""
+    errore = _channel_error()
+    if errore:
+        return errore
+    dati = request.get_json(silent=True) or {}
+    ok = image_queue.consegnato(str(dati.get("id", "")))
+    if ok:
+        push_log('channel', f"{_channel_name()}: immagine consegnata",
+                 detail=f"id={dati.get('id')}", source=f"channel:{_channel_name()}",
+                 status='success')
+    return jsonify({"ok": ok}), (200 if ok else 404)
 
 
 @app.route('/channel/status')
@@ -2664,6 +2738,16 @@ def channel_reply():
         return jsonify({"ok": True, "channel": canale, "action": "reply",
                         "text": presentazione, "command": True,
                         "disclosure": {"required": True, "rule": "auto-presentazione"}})
+
+    # Chi chiede un'immagine non aspetta il RITMO del bot: è una richiesta
+    # esplicita dell'operatore, non una battuta da dosare. Il job entra in coda e
+    # la risposta parte subito; l'immagine arriva dopo, via outbox.
+    immagine = _channel_immagine(contesto, channel=canale,
+                                 destinazione=str(data.get("chat", "") or "").strip())
+    if immagine is not None:
+        return jsonify({"ok": True, "channel": canale, "action": "reply",
+                        "text": immagine, "command": True,
+                        "disclosure": {"required": False, "rule": "comando-immagine"}})
 
     decisione = channel_pacing.decide(channel=canale, pending=pendenti,
                                       oldest_age_s=eta_piu_vecchio, force=forza,

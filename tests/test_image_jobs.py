@@ -106,6 +106,53 @@ class CodaTests(unittest.TestCase):
         self.assertEqual(self.coda.stato()["ultimi"][0]["esito"]["errore"], "scheda piena")
 
 
+class ConsegnaTests(unittest.TestCase):
+    """Outbox: un'immagine pronta per una chat, consegnata una volta sola."""
+
+    def setUp(self):
+        self.orologio = OrologioFinto()
+        self.coda = ImmagineQueue(clock=self.orologio)
+
+    def _pronta(self, canale="telegram", destinazione="123"):
+        job = self.coda.accoda(nuovo_job("un gatto", canale=canale,
+                                         destinazione=destinazione,
+                                         adesso=self.orologio()))
+        self.coda.prossimo()
+        return self.coda.concludi(job["id"], True, file="C:/out/x.png")
+
+    def test_una_immagine_pronta_con_destinazione_si_consegna(self):
+        self._pronta()
+        consegne = self.coda.da_consegnare("telegram")
+        self.assertEqual(len(consegne), 1)
+        self.assertEqual(consegne[0]["file"], "C:/out/x.png")
+        self.assertEqual(consegne[0]["destinazione"], "123")
+
+    def test_senza_destinazione_non_c_e_niente_da_consegnare(self):
+        self._pronta(destinazione="")
+        self.assertEqual(self.coda.da_consegnare("telegram"), [])
+
+    def test_la_consegna_non_si_ripete(self):
+        self._pronta()
+        identificativo = self.coda.da_consegnare("telegram")[0]["id"]
+        self.assertTrue(self.coda.consegnato(identificativo))
+        self.assertEqual(self.coda.da_consegnare("telegram"), [])
+
+    def test_un_altro_canale_non_ruba_la_consegna(self):
+        self._pronta(canale="telegram")
+        self.assertEqual(self.coda.da_consegnare("cam4"), [])
+
+    def test_un_job_non_concluso_non_si_consegna(self):
+        job = self.coda.accoda(nuovo_job("x", canale="telegram", destinazione="1"))
+        self.assertEqual(self.coda.da_consegnare("telegram"), [])
+        self.assertFalse(self.coda.consegnato(job["id"]))
+
+    def test_lo_stato_dice_quante_restano_da_consegnare(self):
+        self._pronta()
+        self.assertEqual(self.coda.stato()["da_consegnare"], 1)
+        self.coda.consegnato(self.coda.da_consegnare("telegram")[0]["id"])
+        self.assertEqual(self.coda.stato()["da_consegnare"], 0)
+
+
 class GrafoTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

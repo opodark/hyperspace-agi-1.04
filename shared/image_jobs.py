@@ -35,11 +35,15 @@ LIMITE_PASSI = 60
 def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
               altezza: int = 768, passi: int = 25, seed: int = 0,
               richiedente: str = "", canale: str = "", modello: str = "",
-              adesso: float | None = None) -> dict:
+              destinazione: str = "", adesso: float | None = None) -> dict:
     """Costruisce un job valido. Solleva ValueError se il prompt è vuoto.
 
     I numeri si limitano invece di essere rifiutati: chi chiede 4096 px ha chiesto
     qualcosa di impossibile, non di sbagliato, e il tetto si vede nel job.
+
+    `destinazione` è DOVE va consegnata l'immagine finita (l'id della chat): il
+    control-plane non sa parlare con Telegram, sa solo che quel file è per quella
+    conversazione. È il driver a consegnarla, perché è lui che ha il file.
     """
     testo = " ".join(str(prompt or "").split())
     if not testo:
@@ -55,6 +59,8 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         "richiedente": str(richiedente or "")[:64],
         "canale": str(canale or "")[:32],
         "modello": str(modello or "")[:120],
+        "destinazione": str(destinazione or "")[:64],
+        "consegnato": False,
         "stato": "pending",
         "creato_ts": float(adesso if adesso is not None else time.time()),
         "preso_ts": 0.0,
@@ -124,16 +130,51 @@ class ImmagineQueue:
             trovato = self._job.get(str(job_id or ""))
             return dict(trovato) if trovato else None
 
+    def da_consegnare(self, canale: str) -> list:
+        """Le immagini PRONTE da consegnare a questo canale, non ancora consegnate.
+
+        Perché un outbox e non una chiamata del CP verso la piattaforma: il CP non
+        ha il file e non sa parlare con Telegram. Il driver invece ha entrambi —
+        quindi *tira* anche questo, come tira le decisioni da /channel/reply.
+        """
+        canale = str(canale or "").strip().lower()
+        with self._lock:
+            self._pota_locked()
+            pronte = []
+            for job in self._job.values():
+                if (job["stato"] == "done" and not job.get("consegnato")
+                        and job.get("destinazione")
+                        and str(job.get("canale", "")).lower() == canale):
+                    pronte.append({"id": job["id"], "file": job["esito"].get("file", ""),
+                                   "destinazione": job["destinazione"],
+                                   "prompt": job["prompt"][:200],
+                                   "richiedente": job["richiedente"]})
+            pronte.sort(key=lambda j: j["id"])
+            return pronte
+
+    def consegnato(self, job_id: str) -> bool:
+        """Segna un'immagine come consegnata: senza questo si ripeterebbe."""
+        with self._lock:
+            job = self._job.get(str(job_id or ""))
+            if job is None or job["stato"] != "done":
+                return False
+            job["consegnato"] = True
+            return True
+
     def stato(self) -> dict:
         with self._lock:
             self._pota_locked()
             per_stato = {stato: 0 for stato in STATI}
             for job in self._job.values():
                 per_stato[job["stato"]] += 1
+            da_consegnare = [j["id"] for j in self._job.values()
+                             if j["stato"] == "done" and not j.get("consegnato")
+                             and j.get("destinazione")]
             return {
                 "per_stato": per_stato,
                 "in_coda": per_stato["pending"],
                 "in_esecuzione": per_stato["running"],
+                "da_consegnare": len(da_consegnare),
                 "max_jobs": self.max_jobs,
                 "ttl_s": self.ttl_s,
                 "ultimi": [{"id": j["id"], "stato": j["stato"],

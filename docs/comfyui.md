@@ -62,14 +62,29 @@ text encoder su CPU): **1024×1024, 30 passi → 11 minuti e 50 s** (710 s). Un
 job da 768×768/25 passi è la misura ragionevole per una risposta conversazionale;
 il default di `/image/generate` è esattamente quello.
 
-### Fase 3 — da fare
+### Fase 3 — fatta e verificata
 
-- un tool `image_generate` per Aurora, così la richiesta nasce dalla conversazione
-  ("fammi un'immagine di…") e non da uno script;
-- la consegna dell'immagine nel canale (il driver Telegram la pubblica: è lui che
-  ha il file, non il control-plane);
-- il prompt scritto con la **memoria della stanza**: i canali hanno già un
-  contesto, e l'immagine può nascere da quella conversazione.
+- **`!immagine <idea>` nel canale**: il comando entra dalla chat, il control-plane
+  risponde subito ("La disegno: 768x768, 25 passi") e mette il job in coda. Chi può
+  chiederlo: l'**operatore** (`CHANNEL_OPERATOR` nel `.env`); senza quella variabile
+  il comando è aperto a chiunque sia in chat — una scelta, non un caso, ma da fare
+  sapendo che la scheda è una sola.
+- **La consegna**: `GET /channel/outbox` (il driver tira le immagini pronte) +
+  `POST /channel/outbox/ack`. Il file lo ha il driver, la destinazione l'ha decisa
+  chi ha chiesto: si incontrano nell'outbox, e il driver manda la foto con
+  `sendPhoto`. Un file che non c'è non viene confermato — il tentativo si ripete.
+
+Prova reale (2026-09-22): `!immagine una torre sulla scogliera al tramonto` →
+coda → ponte → **313 s** → `output\HyperSpace\bridge_00001_.png` → **inviata in
+chat**. `da_consegnare: 0` dopo l'ack: consegnata una volta sola.
+
+### Fase 4 — da fare
+
+- il **tool** `image_generate` per le superfici che HANNO i tool (console, web
+  node): lì il modello può decidere di disegnare, qui il canale resta a comando;
+- il prompt scritto con la **memoria della stanza**: la conversazione di
+  "ultramind" può diventare il materiale dell'immagine.
+
 
 
 ## Il contratto con il control-plane

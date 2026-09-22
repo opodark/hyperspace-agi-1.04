@@ -23,11 +23,18 @@ Auth: header `X-Hyperspace-Channel-Token`, one token per channel (`CHANNEL_CLIEN
 | Endpoint | Request | Response |
 |---|---|---|
 | `POST /channel/ingest` | `{surface, events: [{author, text, key}]}` | `{accepted, spam, results: [{author, verdict, reasons, strikes, action}], actions}` |
-| `POST /channel/reply` | `{surface, context: [{author, text}], pending, oldest_age_s, force, max_chars}` | `{action: "reply"\|"wait"\|"skip", text?, reason, disclosure}` |
+| `POST /channel/reply` | `{surface, chat?, context: [{author, text}], pending, oldest_age_s, force, max_chars}` | `{action: "reply"\|"wait"\|"skip", text?, reason, disclosure}` |
 | `POST /channel/result` | `{kind, ok, target?, error?, duration_ms?}` | `{ok}` |
+| `GET /channel/outbox` | — | `{channel, messages: [{id, file, destinazione, prompt}]}` |
+| `POST /channel/outbox/ack` | `{id}` | `{ok}` |
 | `GET /channel/status` | — | policy (names only), guard counters, pacing, model |
 
 `GET /channel/status`, like `/connectors` and `/mcp/status`, is read-only and holds no secrets.
+
+`chat` è l'id della conversazione da cui si parla: serve al CP per sapere **dove**
+consegnare un'immagine chiesta con `!immagine <idea>`. Il file lo ha il driver (gira
+dove scrive ComfyUI), la destinazione la decide chi chiede: l'outbox è il punto in
+cui le due cose si incontrano, e il driver la tira come tira le decisioni.
 
 **No long-poll.** The driver asks when it believes the batch is ripe (it is the one measuring the room) and the control plane answers with the decision. A blocking outbox would add concurrency and timeouts for nothing: the reply is one batched sentence, not a job queue.
 
