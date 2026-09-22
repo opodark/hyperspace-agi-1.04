@@ -8,8 +8,10 @@ SRC = Path(__file__).parents[1] / "control-plane/main.py"
 CONSTS = {
     "_TOOL_CAPABLE_OVERRIDE", "_TOOL_CAPABLE_PATTERNS", "_VISION_PATTERNS",
     "_NATIVE_CHAT_FALLBACK_OVERRIDE", "_NATIVE_CHAT_FALLBACK_PATTERNS",
+    "TOOLS_OFF_VALUES",
 }
-FUNCS = {"_model_supports_tools", "_use_native_chat_fallback", "_tool_capability_reason"}
+FUNCS = {"_model_supports_tools", "_use_native_chat_fallback", "_tool_capability_reason",
+         "_tools_requested_off"}
 
 
 def _load(tool_override="", native_override=""):
@@ -145,6 +147,40 @@ class ToolCapabilityReasonTests(unittest.TestCase):
                     reason = s["_tool_capability_reason"](model)
                     self.assertEqual(capable, "NESSUN pattern" not in reason and "vision" not in reason,
                                      f"{model}: capable={capable} reason={reason!r}")
+
+
+class ToolOptOutTests(unittest.TestCase):
+    """`X-Hyperspace-Tools: off`: un client macchina chiede UNA risposta.
+
+    Il caso reale che l'ha motivato: il nodo ComfyUI che scrive un prompt per il
+    modello d'immagine. Con i tool iniettati, `qwen3.5:4b` (che contiene il
+    pattern `qwen3`) farebbe un giro di web_search: due chiamate al modello e
+    latenza doppia per un testo che serve a CLIP, non a una ricerca.
+    """
+
+    def test_i_valori_che_spengono_l_iniezione(self):
+        f = _load()["_tools_requested_off"]
+        for valore in ("off", "OFF", " off ", "0", "false", "no", "disabilitati"):
+            with self.subTest(valore=valore):
+                self.assertTrue(f(valore))
+
+    def test_qualunque_altro_valore_lascia_l_iniezione_accesa(self):
+        # Il confronto e' esatto: "offline" non e' "off".
+        f = _load()["_tools_requested_off"]
+        for valore in ("", None, "on", "true", "si", "yes", "offf", "offline"):
+            with self.subTest(valore=valore):
+                self.assertFalse(f(valore))
+
+    def test_la_rotta_legge_l_header_e_lo_usa(self):
+        """Se qualcuno toglie la lettura dell'header, il flag diventa un
+        documento invece di un comportamento."""
+        tree = ast.parse(SRC.read_text(encoding="utf-8"))
+        corpo = next(ast.unparse(n) for n in tree.body
+                     if isinstance(n, ast.FunctionDef) and n.name == "v1_chat_completions")
+        self.assertIn("X-Hyperspace-Tools", corpo)
+        self.assertIn("_tools_requested_off", corpo)
+        self.assertIn("tools_off", corpo)
+        self.assertIn("BUILTIN_TOOLS", corpo)
 
 
 if __name__ == "__main__":

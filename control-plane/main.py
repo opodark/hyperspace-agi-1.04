@@ -422,6 +422,23 @@ def _warn_tools_stripped(model: str) -> None:
              f"elenco completo su GET /models/capabilities.",
              status='warn')
 
+# ── TOOL INIETTATI: SI POSSONO SPEGNERE, ESPLICITAMENTE ──────────────────────
+# Un client MACCHINA (un grafo ComfyUI, uno script, un job) vuole UNA chiamata
+# deterministica: "scrivimi un prompt" non deve diventare un giro di web_search
+# con due chiamate al modello e una latenza che nessuno ha chiesto. Il flag e'
+# una richiesta, non un'euristica:
+#
+#     X-Hyperspace-Tools: off
+#
+# Vale SOLO per i tool che aggiunge il control-plane: quelli passati dal client
+# restano suoi (chi li scrive sa cosa vuole).
+TOOLS_OFF_VALUES = ("off", "0", "false", "no", "disabilitati")
+
+def _tools_requested_off(valore) -> bool:
+    valore = str(valore or "").strip().lower()
+    return valore in TOOLS_OFF_VALUES
+
+
 # ── BUDGET DI TEMPO DI UNA RICHIESTA ─────────────────────────────────────────
 # Perche' esistono: in sessione di test reale `deepseek-r1:8b` con 600 token di
 # risposta NON concludeva entro i 180s fissi, ne' sul nodo Windows ne' su Ollama
@@ -3037,25 +3054,29 @@ def v1_chat_completions():
     #
     # 1. Tool: se il modello è tool-capable, il CP inietta i BUILTIN_TOOLS
     #    (web_search, omega_*, get_mesh_status + connettori) accanto a quelli
-    #    eventualmente già passati dal client, senza duplicarli.
+    #    eventualmente già passati dal client, senza duplicarli — a meno che il
+    #    client abbia chiesto esplicitamente di no (`X-Hyperspace-Tools: off`).
     # 2. Reasoning: deciso da _decide_thinking() — OFF quando ci sono tool
     #    (reasoning e tool-calling sono mutuamente esclusivi), altrimenti
     #    rispetta la richiesta esplicita del client, altrimenti OFF.
     tools_available = []
     client_had_tools = bool(data.get("tools"))
+    tools_off = _tools_requested_off(request.headers.get("X-Hyperspace-Tools", ""))
     if _model_supports_tools(model):
         client_tools = data.get("tools") or []
         client_names = {t.get("function", {}).get("name") for t in client_tools}
-        tools_available = client_tools + [
+        aggiunti = [] if tools_off else [
             tool for tool in BUILTIN_TOOLS
             if tool["function"]["name"] not in client_names
         ]
+        tools_available = client_tools + aggiunti
         data["tools"] = tools_available
     else:
         data.pop("tools", None)
         # Il client aveva chiesto dei tool e li stiamo togliendo: senza questo
-        # avviso un modello nuovo non tool-capable fallirebbe in silenzio.
-        if client_had_tools:
+        # avviso un modello nuovo non tool-capable fallirebbe in silenzio. Se a
+        # toglierli e' stato il client stesso, invece, non c'e' niente da dire.
+        if client_had_tools and not tools_off:
             _warn_tools_stripped(model)
 
     data["think"] = _decide_thinking(model, data, messages, tools_available)
