@@ -286,6 +286,8 @@ class ChannelWiringTests(unittest.TestCase):
         limite = ast.unparse(self.functions["_log_pacing_reason"])
         self.assertIn("PACING_LOG_EVERY_S", limite)
         self.assertIn("push_log", limite)
+        # Il motivo nel messaggio, non solo nel detail: i log mostrano il messaggio.
+        self.assertIn("reason", limite)
 
 
 class MemoriaTests(unittest.TestCase):

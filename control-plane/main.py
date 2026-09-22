@@ -1036,14 +1036,22 @@ PACING_LOG_EVERY_S = 60.0
 
 
 def _log_pacing_reason(channel: str, decisione: dict) -> bool:
-    """Scrive il motivo di un silenzio, al massimo una volta al minuto."""
+    """Scrive il motivo di un silenzio, al massimo una volta al minuto.
+
+    Il motivo sta nel **messaggio**, non solo nel campo detail: `hs.py logs` mostra
+    il messaggio, e "risposta non inviata (wait)" senza il perché lascerebbe la
+    domanda dov'era. Il detail resta per la ricerca.
+    """
     chiave = f"{channel}:{decisione.get('action', '')}"
     adesso = time.time()
     if adesso - _PACING_LOG_AT.get(chiave, 0.0) < PACING_LOG_EVERY_S:
         return False
     _PACING_LOG_AT[chiave] = adesso
-    push_log('channel', f"{channel}: risposta non inviata ({decisione.get('action')})",
-             detail=str(decisione.get("reason", ""))[:200],
+    motivo = str(decisione.get("reason", "")).strip()
+    testo = f"{channel}: risposta non inviata ({decisione.get('action')})"
+    if motivo:
+        testo = f"{testo} — {motivo[:120]}"
+    push_log('channel', testo, detail=motivo[:200],
              source=f"channel:{channel}", status='info')
     return True
 
