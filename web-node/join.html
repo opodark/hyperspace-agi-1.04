@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#070b18">
+  <meta name="description" content="Entra nella mesh HyperSpace dal browser e condividi capacità di calcolo in modo esplicito e controllato.">
+  <title>Entra nella mesh · HyperSpace</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070b18;--panel:#0d1428cc;--line:#263454;--text:#f4f6ff;--muted:#9ba9c7;--cyan:#57e6d9;--violet:#9a7cff;--rose:#f693bd;--ok:#70e6aa;--bad:#ff8295}
+    *{box-sizing:border-box}html{min-height:100%;background:var(--bg)}
+    body{min-height:100vh;margin:0;color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,sans-serif;background:radial-gradient(circle at 18% 4%,#253160 0,transparent 34%),radial-gradient(circle at 88% 18%,#38224c 0,transparent 29%),var(--bg)}
+    body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.25;background-image:linear-gradient(#fff1 1px,transparent 1px),linear-gradient(90deg,#fff1 1px,transparent 1px);background-size:48px 48px;mask-image:linear-gradient(to bottom,#000,transparent 72%)}
+    main{position:relative;width:min(1040px,calc(100% - 32px));margin:auto;padding:48px 0 64px}
+    nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:72px}.brand{display:flex;gap:11px;align-items:center;font-weight:750;letter-spacing:.02em}.mark{width:28px;height:28px;border:1px solid #83fff0;border-radius:50%;box-shadow:0 0 24px #57e6d988;position:relative}.mark:after{content:"";position:absolute;inset:8px;border-radius:50%;background:var(--cyan);box-shadow:0 0 15px var(--cyan)}.tag{border:1px solid var(--line);border-radius:999px;color:var(--muted);padding:5px 10px;font-size:12px}
+    .hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:54px;align-items:center}.eyebrow{color:var(--cyan);font-size:12px;text-transform:uppercase;letter-spacing:.18em;font-weight:800}.hero h1{font-size:clamp(42px,7vw,78px);line-height:.98;letter-spacing:-.055em;margin:14px 0 24px;max-width:760px}.gradient{background:linear-gradient(110deg,var(--cyan),#b2a1ff 55%,var(--rose));background-clip:text;color:transparent}.lead{font-size:clamp(17px,2vw,21px);color:#bec8df;max-width:650px;margin:0}.trust{display:flex;gap:18px;flex-wrap:wrap;margin-top:28px;color:var(--muted);font-size:13px}.trust span:before{content:"✓";color:var(--ok);margin-right:7px}
+    .card{background:var(--panel);border:1px solid var(--line);border-radius:24px;padding:25px;box-shadow:0 28px 90px #0008;backdrop-filter:blur(18px)}.card h2{font-size:21px;margin:0 0 5px}.small{color:var(--muted);font-size:13px;margin:0}.field{margin-top:20px}label{display:block;font-size:13px;color:#c8d2e9;margin-bottom:7px}input[type=text]{width:100%;border:1px solid var(--line);background:#070b18;color:var(--text);border-radius:11px;padding:12px 13px;font:inherit;outline:none}input:focus{border-color:var(--cyan);box-shadow:0 0 0 3px #57e6d922}.consent{display:grid;grid-template-columns:20px 1fr;gap:10px;align-items:start;margin:20px 0;color:#d8def0}.consent input{width:17px;height:17px;margin-top:3px;accent-color:var(--violet)}button{width:100%;border:0;border-radius:12px;padding:13px 16px;font:700 15px inherit;color:#08101d;background:linear-gradient(115deg,var(--cyan),#ab91ff);cursor:pointer;box-shadow:0 10px 30px #7f7cff33}button:hover{filter:brightness(1.08)}button:disabled{cursor:not-allowed;filter:grayscale(.5);opacity:.48}.secondary{margin-top:10px;color:#dce3f7;background:transparent;border:1px solid var(--line);box-shadow:none}.status{display:flex;align-items:center;gap:10px;margin-top:18px;padding:12px;border-radius:12px;background:#080d1b;color:var(--muted);font-size:13px}.dot{width:9px;height:9px;border-radius:50%;background:#68738a;box-shadow:0 0 0 4px #68738a22}.status.online .dot{background:var(--ok);box-shadow:0 0 15px var(--ok)}.status.error .dot{background:var(--bad);box-shadow:0 0 15px var(--bad)}
+    .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.metric{border:1px solid #1b2742;border-radius:10px;padding:10px}.metric b{display:block;font-size:17px}.metric span{color:var(--muted);font-size:11px}.details{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:80px}.detail{border-top:1px solid var(--line);padding:22px 6px}.detail b{display:block;margin-bottom:7px}.detail p{color:var(--muted);margin:0;font-size:13px}.webgpu{color:var(--muted);margin:16px 0 0;font-size:12px}.webgpu strong{color:#dce3f7}footer{margin-top:62px;padding-top:22px;border-top:1px solid #1b2742;display:flex;justify-content:space-between;gap:20px;color:#6f7e9e;font-size:12px}
+    @media(max-width:780px){main{padding-top:24px}.hero{grid-template-columns:1fr;gap:38px}nav{margin-bottom:48px}.details{grid-template-columns:1fr;margin-top:55px}.detail{padding:17px 3px}.hero h1{font-size:48px}footer{flex-direction:column}}
+  </style>
+</head>
+<body>
+<main>
+  <nav><div class="brand"><i class="mark"></i><span id="siteName">ZeroZeroComputer</span></div><span class="tag">browser node · alpha</span></nav>
+  <div class="hero">
+    <section>
+      <div class="eyebrow">HyperSpace distributed intelligence</div>
+      <h1>Un browser.<br><span class="gradient">Un nodo della mesh.</span></h1>
+      <p class="lead">Lascia aperta questa pagina e contribuisci a piccoli task compatibili con il browser. Sei tu a decidere quando entrare e quando uscire.</p>
+      <div class="trust"><span>Nessun accesso ai file</span><span>Nessun codice arbitrario</span><span>Stop immediato</span></div>
+    </section>
+    <section class="card" aria-labelledby="joinTitle">
+      <h2 id="joinTitle">Collega questo dispositivo</h2>
+      <p class="small">Il nodo esiste soltanto mentre questa scheda resta aperta.</p>
+      <div class="field"><label for="nodeLabel">Come vuoi chiamarlo?</label><input id="nodeLabel" type="text" maxlength="80" placeholder="es. Portatile di Alberto"></div>
+      <label class="consent"><input id="consent" type="checkbox"><span>Acconsento a condividere le capacità indicate di questo browser con la mesh HyperSpace.</span></label>
+      <button id="join" disabled>Entra nella mesh</button>
+      <button id="leave" class="secondary" disabled>Esci dalla mesh</button>
+      <div id="status" class="status" role="status"><i class="dot"></i><span id="statusText">Pronto a collegarsi</span></div>
+      <div class="metrics">
+        <div class="metric"><b id="completed">0</b><span>task completati</span></div>
+        <div class="metric"><b id="failed">0</b><span>task falliti</span></div>
+        <div class="metric"><b id="capCount">—</b><span>capacità</span></div>
+      </div>
+      <p class="webgpu"><strong id="gpuState">Controllo WebGPU…</strong><br><span id="capsText"></span></p>
+    </section>
+  </div>
+  <section class="details">
+    <div class="detail"><b>Consenso reversibile</b><p>Nessun collegamento automatico. Puoi uscire in ogni momento o semplicemente chiudere la scheda.</p></div>
+    <div class="detail"><b>Lavoro limitato</b><p>Il control plane assegna soltanto task web-safe, piccoli e con limiti di tempo e dimensione.</p></div>
+    <div class="detail"><b>Identità trasparente</b><p>Alla mesh arrivano un ID casuale, il nome scelto e le capacità tecniche del browser.</p></div>
+  </section>
+  <footer><span id="meshName">HyperSpace</span><span>Il calcolo resta sul dispositivo; alla mesh torna soltanto il risultato del task.</span></footer>
+</main>
+<script src="./join-config.js"></script>
+<script type="module">
+  import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
+  import { requestWebGpuAdapter } from "./src/webgpu.js";
+  const $ = id => document.getElementById(id);
+  const config = window.HYPERSPACE_JOIN || {};
+  const gatewayUrl = String(config.gatewayUrl || "").replace(/\/+$/, "");
+  $("siteName").textContent = config.siteName || "ZeroZeroComputer";
+  $("meshName").textContent = config.meshName || "HyperSpace";
+  const nodeId = localStorage.getItem("hyperspace.publicNodeId") || newNodeId();
+  localStorage.setItem("hyperspace.publicNodeId", nodeId);
+  $("nodeLabel").value = localStorage.getItem("hyperspace.publicNodeLabel") || "";
+  const caps = detectCapabilities(globalThis);
+  $("capCount").textContent = caps.length;
+  $("capsText").textContent = caps.length ? caps.join(" · ") : "Nessuna capacità disponibile";
+  requestWebGpuAdapter(globalThis).then(adapter => { $("gpuState").textContent = adapter ? "WebGPU disponibile" : "WebGPU non disponibile"; });
+  let node = null;
+  function state(kind, text){ $("status").className = `status ${kind || ""}`; $("statusText").textContent = text; }
+  function buttons(){ const active=Boolean(node?.state.running); $("join").disabled=active||!$("consent").checked||!gatewayUrl; $("leave").disabled=!active; }
+  $("consent").addEventListener("change", buttons);
+  $("join").addEventListener("click", async () => {
+    const label=$("nodeLabel").value.trim(); localStorage.setItem("hyperspace.publicNodeLabel",label);
+    state("","Connessione alla mesh…"); $("join").disabled=true;
+    try {
+      node=new WebNode({baseUrl:gatewayUrl,nodeId,label,consent:true,onState:s=>{
+        $("completed").textContent=s.tasksDone; $("failed").textContent=s.tasksFailed;
+        if(s.lastError) state("error",s.lastError); else if(s.running) state("online","Nodo attivo nella mesh"); buttons();
+      }});
+      await node.start(); state("online","Nodo attivo nella mesh");
+    } catch(error){ node=null; state("error",error.message); }
+    buttons();
+  });
+  $("leave").addEventListener("click",()=>{ node?.stop(); node=null; state("","Disconnesso dalla mesh"); buttons(); });
+  window.addEventListener("beforeunload",()=>node?.stop());
+  if(!gatewayUrl){ state("error","Gateway non configurato"); }
+  else if(location.protocol!=="https:"&&location.hostname!=="localhost"){ state("error","Apri la pagina in HTTPS"); }
+  buttons();
+</script>
+</body>
+</html>
