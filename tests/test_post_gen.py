@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.post_gen import build_post_prompt, filtra_post, parse_post  # noqa: E402
+from shared.post_gen import (build_post_prompt, filtra_post,  # noqa: E402
+                             parse_post, prossima_mossa)
 
 SISTEMA = "Ti chiami Anna. Tono: giocosa. Non dire di essere umana."
 
@@ -74,6 +75,29 @@ class FiltraPostTests(unittest.TestCase):
         feed = [{"author": "aurora", "caption": "stesso testo"}]
         ok, _ = filtra_post({"caption": "stesso testo"}, autore="anna", feed=feed)
         self.assertTrue(ok)
+
+
+class ProssimaMossaTests(unittest.TestCase):
+    def test_il_primo_giro_e_di_anna_e_non_e_reazione(self):
+        m = prossima_mossa([], turno=0)
+        self.assertEqual(m["autore"], "anna")
+        self.assertIsNone(m["replica_a"])
+
+    def test_alterna_gli_autori(self):
+        self.assertEqual(prossima_mossa([], turno=0)["autore"], "anna")
+        self.assertEqual(prossima_mossa([], turno=1)["autore"], "aurora")
+        self.assertEqual(prossima_mossa([], turno=2)["autore"], "anna")
+
+    def test_reagisce_al_post_dell_altra(self):
+        feed = [{"author": "anna", "caption": "ciao"}]
+        m = prossima_mossa(feed, turno=1)  # tocca ad Aurora
+        self.assertEqual(m["autore"], "aurora")
+        self.assertEqual(m["replica_a"]["caption"], "ciao")
+
+    def test_non_reagisce_al_proprio_post(self):
+        feed = [{"author": "aurora", "caption": "x"}]
+        m = prossima_mossa(feed, turno=1)  # tocca ad Aurora, l'ultimo è suo
+        self.assertIsNone(m["replica_a"])
 
 
 if __name__ == "__main__":

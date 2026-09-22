@@ -104,3 +104,17 @@ def filtra_post(candidato: dict, *, autore: str, feed=()) -> tuple[bool, str]:
            for p in (feed or ())):
         return False, "già pubblicato"
     return True, ""
+
+
+def prossima_mossa(feed: list, *, autori=("anna", "aurora"), turno: int = 0) -> dict:
+    """Decide chi posta adesso e se è una reazione.
+
+    Alterna gli autori a ogni giro; se l'ultimo post del feed è dell'ALTRA
+    persona, il nuovo post è una REAZIONE a quello — così le due si rispondono
+    invece di scrivere in parallelo. Ritorna {autore, replica_a}, dove
+    `replica_a` è il post a cui rispondere oppure None (contenuto nuovo).
+    """
+    autore = autori[turno % len(autori)]
+    ultimo = feed[0] if feed else None
+    replica_a = ultimo if (ultimo and ultimo.get("author") != autore) else None
+    return {"autore": autore, "replica_a": replica_a}
