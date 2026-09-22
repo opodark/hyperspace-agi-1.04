@@ -47,6 +47,9 @@ HEADERS = {"X-Hyperspace-Channel-Token": CHANNEL_TOKEN}
 MAX_CONTEXT = 20
 COMMAND_POLL_S = 15.0
 STATE_REPORT_S = 60.0
+# Le immagini pronte si ritirano con lo stesso ritmo dei comandi: sono l'altra
+# cosa che il control-plane "spinge" verso il canale, e passa dall'outbox.
+OUTBOX_POLL_S = 15.0
 
 # In un gruppo con PIÙ bot (es. Aurora su Windows e un secondo bot sulla mesh)
 # servono due regole diverse, e sono due:
@@ -181,12 +184,73 @@ def normalizza_comando(testo) -> str:
     return testo
 
 
+def immagini_da_consegnare(risposta) -> list:
+    """Le consegne valide ricevute dal control-plane: `(id, file, chat)`.
+
+    Filtrare qui e non nel ciclo permette di testare la regola senza rete: senza
+    file, senza destinazione o senza id non si consegna niente (e un id mancante
+    non si potrebbe nemmeno confermare).
+    """
+    pronte = []
+    for messaggio in (risposta or {}).get("messages") or []:
+        if not isinstance(messaggio, dict):
+            continue
+        percorso = str(messaggio.get("file") or "").strip()
+        chat = str(messaggio.get("destinazione") or "").strip()
+        job_id = str(messaggio.get("id") or "").strip()
+        if percorso and chat and job_id:
+            pronte.append({"id": job_id, "file": percorso, "chat": chat,
+                           "prompt": str(messaggio.get("prompt") or "").strip()})
+    return pronte
+
+
+def invia_foto(chat_id: str, percorso: str, didascalia: str = "") -> dict:
+    """Pubblica un'immagine. Multipart: si manda il FILE, non un percorso.
+
+    Il control-plane il file non ce l'ha — ce l'ha il driver, che gira sulla
+    macchina dove ComfyUI scrive. Per questo la consegna è una cosa che il driver
+    tira dall'outbox invece di una chiamata del CP.
+    """
+    with open(percorso, "rb") as immagine:
+        risposta = requests.post(f"{API}/sendPhoto",
+                                 data={"chat_id": chat_id,
+                                       "caption": str(didascalia or "")[:900]},
+                                 files={"photo": immagine}, timeout=120)
+    risposta.raise_for_status()
+    return risposta.json()
+
+
+def consegna_outbox() -> int:
+    """Consegna le immagini pronte. Ritorna quante ne ha inviate.
+
+    Un file che non c'è NON viene confermato: il tentativo si ripete al giro
+    successivo. Confermarlo perderebbe l'immagine per sempre — e su una macchina
+    che rigenera in undici minuti, perderla è il caso peggiore.
+    """
+    inviate = 0
+    for consegna in immagini_da_consegnare(cp_get("/channel/outbox")):
+        if not os.path.isfile(consegna["file"]):
+            print(f"[telegram] immagine non trovata: {consegna['file']}", flush=True)
+            continue
+        didascalia = consegna["prompt"][:200] if consegna["prompt"] else "Ecco l'immagine."
+        try:
+            invia_foto(consegna["chat"], consegna["file"], didascalia)
+        except (requests.RequestException, OSError) as e:
+            print(f"[telegram] invio immagine fallito: {e}", flush=True)
+            continue
+        cp_post("/channel/outbox/ack", {"id": consegna["id"]})
+        inviate += 1
+        print(f"[telegram] immagine inviata a {consegna['chat']}", flush=True)
+    return inviate
+
+
 def main():
     offset = 0
     chats = {}  # chat_id -> {"surface", "messages", "batch_start", "addressed"}
     mode = "auto"
     last_commands = 0.0
     last_state = 0.0
+    last_outbox = 0.0
     # Chi siamo: servono @username (per le menzioni) e id (per riconoscere le
     # risposte ai nostri messaggi). Se getMe non risponde e la modalità mention è
     # attiva si esce: un bot che non sa il proprio nome resterebbe muto per
@@ -254,6 +318,10 @@ def main():
                 adesso = time.time()
                 res = cp_post("/channel/reply", {
                     "surface": entry["surface"],
+                    # L'id della conversazione: serve al CP per sapere DOVE
+                    # consegnare un'immagine chiesta da qui (il file lo ha il
+                    # driver, ma la destinazione la decide chi parla).
+                    "chat": str(chat_id),
                     "context": [{"author": m["author"], "text": m["text"]}
                                 for m in entry["messages"]],
                     "pending": len(entry["messages"]),
@@ -289,6 +357,13 @@ def main():
             last_state = now
             cp_post("/channel/state", {"mode": mode, "active": True,
                                        "version": "telegram-1.0"})
+
+        # 4. Immagini pronte: il CP le mette in outbox, il driver le consegna.
+        # Il file ce l'ha il driver (gira dove scrive ComfyUI), la destinazione
+        # l'ha decisa chi ha chiesto l'immagine: qui si uniscono le due cose.
+        if now - last_outbox >= OUTBOX_POLL_S:
+            last_outbox = now
+            consegna_outbox()
 
         time.sleep(1)
 

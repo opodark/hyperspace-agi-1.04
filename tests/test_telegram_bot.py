@@ -172,5 +172,35 @@ class ModalitaMentionTests(unittest.TestCase):
         self.assertTrue(carica_driver(TELEGRAM_REQUIRE_MENTION="1").REQUIRE_MENTION)
 
 
+class ConsegnaImmaginiTests(unittest.TestCase):
+    """La consegna: il CP mette in outbox, il driver manda il FILE.
+
+    Il control-plane non ha l'immagine e non sa parlare con Telegram: la unisce il
+    driver, che ha entrambi. Queste sono le regole di quella unione.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.driver = carica_driver()
+
+    def test_solo_le_consegne_complete_passano(self):
+        risposta = {"messages": [
+            {"id": "a1", "file": "C:/out/x.png", "destinazione": "123",
+             "prompt": "un gatto"},
+            {"id": "a2", "file": "", "destinazione": "123"},          # senza file
+            {"id": "a3", "file": "C:/out/y.png", "destinazione": ""},  # senza chat
+            {"id": "", "file": "C:/out/z.png", "destinazione": "1"},   # senza id
+            "spazzatura",
+        ]}
+        consegne = self.driver.immagini_da_consegnare(risposta)
+        self.assertEqual([c["id"] for c in consegne], ["a1"])
+        self.assertEqual(consegne[0]["chat"], "123")
+
+    def test_un_outbox_vuoto_non_e_un_errore(self):
+        self.assertEqual(self.driver.immagini_da_consegnare({}), [])
+        self.assertEqual(self.driver.immagini_da_consegnare({"messages": []}), [])
+        self.assertEqual(self.driver.immagini_da_consegnare(None), [])
+
+
 if __name__ == "__main__":
     unittest.main()
