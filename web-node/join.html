@@ -16,7 +16,9 @@
     .hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:54px;align-items:center}.eyebrow{color:var(--cyan);font-size:12px;text-transform:uppercase;letter-spacing:.18em;font-weight:800}.hero h1{font-size:clamp(42px,7vw,78px);line-height:.98;letter-spacing:-.055em;margin:14px 0 24px;max-width:760px}.gradient{background:linear-gradient(110deg,var(--cyan),#b2a1ff 55%,var(--rose));background-clip:text;color:transparent}.lead{font-size:clamp(17px,2vw,21px);color:#bec8df;max-width:650px;margin:0}.trust{display:flex;gap:18px;flex-wrap:wrap;margin-top:28px;color:var(--muted);font-size:13px}.trust span:before{content:"✓";color:var(--ok);margin-right:7px}
     .card{background:var(--panel);border:1px solid var(--line);border-radius:24px;padding:25px;box-shadow:0 28px 90px #0008;backdrop-filter:blur(18px)}.card h2{font-size:21px;margin:0 0 5px}.small{color:var(--muted);font-size:13px;margin:0}.field{margin-top:20px}label{display:block;font-size:13px;color:#c8d2e9;margin-bottom:7px}input[type=text]{width:100%;border:1px solid var(--line);background:#070b18;color:var(--text);border-radius:11px;padding:12px 13px;font:inherit;outline:none}input:focus{border-color:var(--cyan);box-shadow:0 0 0 3px #57e6d922}.consent{display:grid;grid-template-columns:20px 1fr;gap:10px;align-items:start;margin:20px 0;color:#d8def0}.consent input{width:17px;height:17px;margin-top:3px;accent-color:var(--violet)}button{width:100%;border:0;border-radius:12px;padding:13px 16px;font:700 15px inherit;color:#08101d;background:linear-gradient(115deg,var(--cyan),#ab91ff);cursor:pointer;box-shadow:0 10px 30px #7f7cff33}button:hover{filter:brightness(1.08)}button:disabled{cursor:not-allowed;filter:grayscale(.5);opacity:.48}.secondary{margin-top:10px;color:#dce3f7;background:transparent;border:1px solid var(--line);box-shadow:none}.status{display:flex;align-items:center;gap:10px;margin-top:18px;padding:12px;border-radius:12px;background:#080d1b;color:var(--muted);font-size:13px}.dot{width:9px;height:9px;border-radius:50%;background:#68738a;box-shadow:0 0 0 4px #68738a22}.status.online .dot{background:var(--ok);box-shadow:0 0 15px var(--ok)}.status.error .dot{background:var(--bad);box-shadow:0 0 15px var(--bad)}
     .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.metric{border:1px solid #1b2742;border-radius:10px;padding:10px}.metric b{display:block;font-size:17px}.metric span{color:var(--muted);font-size:11px}.details{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:80px}.detail{border-top:1px solid var(--line);padding:22px 6px}.detail b{display:block;margin-bottom:7px}.detail p{color:var(--muted);margin:0;font-size:13px}.webgpu{color:var(--muted);margin:16px 0 0;font-size:12px}.webgpu strong{color:#dce3f7}footer{margin-top:62px;padding-top:22px;border-top:1px solid #1b2742;display:flex;justify-content:space-between;gap:20px;color:#6f7e9e;font-size:12px}
-    @media(max-width:780px){main{padding-top:24px}.hero{grid-template-columns:1fr;gap:38px}nav{margin-bottom:48px}.details{grid-template-columns:1fr;margin-top:55px}.detail{padding:17px 3px}.hero h1{font-size:48px}footer{flex-direction:column}}
+    .section-head{display:flex;align-items:end;justify-content:space-between;gap:24px;margin:88px 0 22px}.section-head h2{font-size:clamp(30px,4vw,46px);letter-spacing:-.04em;line-height:1;margin:7px 0 0}.section-head p{color:var(--muted);max-width:470px;margin:0}.mesh-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(290px,.65fr);gap:15px}.orbital{position:relative;min-height:410px;overflow:hidden;padding:0;background:radial-gradient(circle at 50% 48%,#162447 0,transparent 43%),#080d1b}.orbital canvas{display:block;width:100%;height:410px}.canvas-copy{position:absolute;left:23px;top:20px;pointer-events:none}.canvas-copy b{display:block}.canvas-copy span{color:var(--muted);font-size:12px}.legend{position:absolute;bottom:18px;left:23px;display:flex;gap:14px;color:var(--muted);font-size:11px}.legend i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:var(--cyan);box-shadow:0 0 9px var(--cyan)}.legend i.model{background:var(--violet);box-shadow:0 0 9px var(--violet)}.mesh-side{display:grid;gap:12px}.signal{padding:19px}.signal .number{font-size:42px;line-height:1;font-weight:780;letter-spacing:-.05em}.signal p{margin:7px 0 0;color:var(--muted);font-size:12px}.model-strip{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px}.model-chip{font-size:10px;border:1px solid #334365;border-radius:999px;padding:4px 7px;color:#cbd6ef;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;color:var(--muted);padding:5px 10px;font-size:11px}.pill.live{color:var(--ok);border-color:#70e6aa55;background:#70e6aa0d}
+    .chat-shell{display:grid;grid-template-columns:280px minmax(0,1fr);padding:0;overflow:hidden;min-height:570px}.chat-side{border-right:1px solid var(--line);padding:22px;background:#090f20}.chat-side h3{margin:0 0 5px}.chat-side button{margin-top:9px}.chat-side select,textarea{width:100%;border:1px solid var(--line);background:#070b18;color:var(--text);border-radius:11px;padding:11px 12px;font:inherit;outline:none}.chat-side select:focus,textarea:focus{border-color:var(--cyan)}.model-meta{margin:14px 0 19px;padding:12px;border:1px solid #20304e;border-radius:12px;background:#070b18;color:var(--muted);font-size:12px}.chat-main{display:flex;flex-direction:column;min-width:0}.chat-top{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}.chat-log{flex:1;min-height:340px;max-height:500px;overflow:auto;padding:23px 21px;display:flex;flex-direction:column;gap:17px}.empty{margin:auto;text-align:center;color:var(--muted);max-width:330px}.empty i{display:block;width:54px;height:54px;border-radius:50%;margin:0 auto 14px;background:radial-gradient(circle,var(--cyan),#57e6d922 28%,transparent 65%);box-shadow:0 0 40px #57e6d933}.msg{max-width:84%;white-space:pre-wrap;overflow-wrap:anywhere;padding:13px 15px;border-radius:16px;background:#111a30;border:1px solid #243252}.msg.user{align-self:flex-end;background:#231e42;border-color:#4d437b}.msg.assistant{align-self:flex-start}.msg.error{border-color:#ff829566;color:#ffc2cb}.who{display:block;color:var(--cyan);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;margin-bottom:5px}.msg.user .who{color:#c2b6ff}.composer{padding:15px 18px;border-top:1px solid var(--line);background:#090f20}.composer textarea{min-height:72px;resize:none}.composer-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:9px}.composer-row span{font-size:11px;color:var(--muted)}.composer-row button{min-width:110px;width:auto}.chat-side .secondary{width:100%}
+    @media(max-width:850px){main{padding-top:24px}.hero,.mesh-grid{grid-template-columns:1fr;gap:38px}nav{margin-bottom:48px}.section-head{align-items:start;flex-direction:column;margin-top:65px}.chat-shell{grid-template-columns:1fr}.chat-side{border-right:0;border-bottom:1px solid var(--line)}.details{grid-template-columns:1fr;margin-top:55px}.detail{padding:17px 3px}.hero h1{font-size:48px}footer{flex-direction:column}.orbital,.orbital canvas{height:360px;min-height:360px}}
   </style>
 </head>
 <body>
@@ -45,6 +47,20 @@
       <p class="webgpu"><strong id="gpuState">Controllo WebGPU…</strong><br><span id="capsText"></span></p>
     </section>
   </div>
+  <div class="section-head"><div><div class="eyebrow">Live topology</div><h2>La mesh, a colpo d’occhio.</h2></div><p>Ogni orbita rappresenta una macchina raggiungibile; i satelliti mostrano i modelli che mette a disposizione.</p></div>
+  <section class="mesh-grid">
+    <div class="card orbital"><canvas id="meshCanvas" aria-label="Visualizzazione animata della mesh"></canvas><div class="canvas-copy"><b>HyperSpace topology</b><span id="meshFreshness">in attesa della telemetria</span></div><div class="legend"><span><i></i> nodo</span><span><i class="model"></i> modello</span></div></div>
+    <div class="mesh-side">
+      <div class="card signal"><div class="number" id="machineCount">—</div><p>macchine visibili nella mesh</p></div>
+      <div class="card signal"><div class="number" id="modelCount">—</div><p>modelli disponibili</p><div class="model-strip" id="modelStrip"></div></div>
+      <div class="card signal"><span class="pill" id="meshHealth">connessione in corso</span><p id="meshNote">Il catalogo si aggiorna dalla rete reale.</p></div>
+    </div>
+  </section>
+  <div class="section-head"><div><div class="eyebrow">Mesh chat</div><h2>Una chat, molti cervelli.</h2></div><p>Scegli il modello; HyperSpace decide il nodo migliore oppure rispetta il pin su una macchina precisa.</p></div>
+  <section class="card chat-shell">
+    <aside class="chat-side"><h3>Destinazione</h3><p class="small">Modello e percorso di calcolo.</p><div class="field"><label for="model">Modello</label><select id="model"><option>Caricamento…</option></select></div><div class="model-meta" id="modelMeta">Interrogo la mesh.</div><button class="secondary" id="reloadModels">Aggiorna catalogo</button><button class="secondary" id="clearChat">Nuova conversazione</button></aside>
+    <div class="chat-main"><div class="chat-top"><b>Conversazione HyperSpace</b><span class="pill" id="chatStatus">pronta</span></div><div class="chat-log" id="chatLog"><div class="empty" id="emptyChat"><i></i><b>La mesh è in ascolto.</b><p>Fai una domanda o scegli un modello specifico.</p></div></div><div class="composer"><textarea id="prompt" placeholder="Scrivi alla mesh…"></textarea><div class="composer-row"><span>Invio per spedire · Shift+Invio per andare a capo</span><button id="send" disabled>Invia ↗</button></div></div></div>
+  </section>
   <section class="details">
     <div class="detail"><b>Consenso reversibile</b><p>Nessun collegamento automatico. Puoi uscire in ogni momento o semplicemente chiudere la scheda.</p></div>
     <div class="detail"><b>Lavoro limitato</b><p>Il control plane assegna soltanto task web-safe, piccoli e con limiti di tempo e dimensione.</p></div>
@@ -86,8 +102,56 @@
   });
   $("leave").addEventListener("click",()=>{ node?.stop(); node=null; state("","Disconnesso dalla mesh"); buttons(); });
   window.addEventListener("beforeunload",()=>node?.stop());
+
+  // Catalogo reale, chat streaming e panoramica animata della mesh.
+  let history=[];
+  let catalog={models:[],machines:[]};
+  const cleanId=id=>String(id||"").replace(/^[^0-9A-Za-z]+/,"").trim();
+  function modelInfo(model){
+    const id=String(model.id||"");
+    const cut=id.indexOf("::");
+    const base=cleanId(cut<0?id:id.slice(0,cut));
+    const hs=model.hyperspace||{};
+    return {id,base,machine:String(hs.node_alias||hs.node_id||"").slice(0,18),tier:String(hs.tier||""),external:model.owned_by==="omniroute"};
+  }
+  function renderCatalog(raw){
+    const seen=new Set(), options=[], machines=new Set(), names=new Set();
+    for(const model of raw){const info=modelInfo(model);if(!info.id||seen.has(info.id))continue;seen.add(info.id);names.add(info.base);if(info.machine)machines.add(info.machine);options.push(info);}
+    catalog={models:[...names],machines:[...machines]};
+    $("model").replaceChildren(...options.map(info=>{const option=document.createElement("option");option.value=info.id;option.textContent=info.machine?`${info.base} · ${info.machine}${info.tier?` · ${info.tier}`:""}`:`${info.base} · ${info.external?"provider esterno":"routing automatico"}`;return option;}));
+    $("send").disabled=!options.length;$("machineCount").textContent=machines.size;$("modelCount").textContent=names.size;
+    $("modelStrip").replaceChildren(...[...names].slice(0,8).map(name=>{const chip=document.createElement("span");chip.className="model-chip";chip.textContent=name;return chip;}));
+    $("modelMeta").textContent=options.length?`${options.length} percorsi · ${names.size} modelli · ${machines.size} macchine`:"Nessun modello disponibile";
+    $("meshFreshness").textContent=`aggiornata alle ${new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;
+    $("meshHealth").className="pill live";$("meshHealth").textContent="mesh raggiungibile";$("meshNote").textContent="Topologia ricavata dal catalogo reale dei nodi.";
+  }
+  async function loadModels(){
+    if(!gatewayUrl)return;$("modelMeta").textContent="Aggiorno il catalogo…";
+    try{const response=await fetch(`${gatewayUrl}/v1/models`);if(!response.ok)throw new Error(`HTTP ${response.status}`);const body=await response.json();renderCatalog(Array.isArray(body.data)?body.data:[]);}
+    catch(error){$("send").disabled=true;$("modelMeta").textContent=`Catalogo non disponibile: ${error.message}`;$("meshHealth").className="pill";$("meshHealth").textContent="mesh non raggiungibile";$("meshNote").textContent=error.message;}
+  }
+  function bubble(role,text){
+    $("emptyChat")?.remove();const box=document.createElement("div");box.className=`msg ${role}`;const who=document.createElement("span");who.className="who";who.textContent=role==="user"?"tu":"mesh";const body=document.createElement("span");body.textContent=text;box.append(who,body);$("chatLog").append(box);$("chatLog").scrollTop=$("chatLog").scrollHeight;return body;
+  }
+  function parseEvents(buffer,onText){
+    const parts=buffer.replace(/\r\n/g,"\n").split("\n\n"),rest=parts.pop()||"";
+    for(const part of parts){const data=part.split("\n").filter(line=>line.startsWith("data:")).map(line=>line.slice(5).trim()).join("");if(!data||data==="[DONE]")continue;const json=JSON.parse(data);if(json.error)throw new Error(String(json.error));const text=json.choices?.[0]?.delta?.content;if(text)onText(text);}
+    return rest;
+  }
+  async function sendMessage(){
+    const text=$("prompt").value.trim(),model=$("model").value;if(!text||!model)return;$("prompt").value="";bubble("user",text);history.push({role:"user",content:text});const target=bubble("assistant","");$("send").disabled=true;$("chatStatus").textContent="la mesh pensa…";
+    try{const response=await fetch(`${gatewayUrl}/v1/chat/completions`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model,messages:history,stream:true})});if(!response.ok)throw new Error(`HTTP ${response.status}`);const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="",full="";while(true){const{value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});buffer=parseEvents(buffer,piece=>{full+=piece;target.textContent=full;$("chatLog").scrollTop=$("chatLog").scrollHeight;});}history.push({role:"assistant",content:full});$("chatStatus").textContent="risposta completata";}
+    catch(error){target.parentElement.classList.add("error");target.textContent=error.message;history.pop();$("chatStatus").textContent="errore";}finally{$("send").disabled=!$("model").options.length;}
+  }
+  $("reloadModels").addEventListener("click",loadModels);$("send").addEventListener("click",sendMessage);
+  $("prompt").addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();sendMessage();}});
+  $("clearChat").addEventListener("click",()=>{history=[];$("chatLog").innerHTML='<div class="empty" id="emptyChat"><i></i><b>La mesh è in ascolto.</b><p>Fai una domanda o scegli un modello specifico.</p></div>';$("chatStatus").textContent="pronta";});
+
+  const canvas=$("meshCanvas"),ctx=canvas.getContext("2d");let tick=0;
+  function drawMesh(now){const density=devicePixelRatio||1,width=canvas.clientWidth,height=canvas.clientHeight;if(canvas.width!==width*density||canvas.height!==height*density){canvas.width=width*density;canvas.height=height*density;}ctx.setTransform(density,0,0,density,0,0);ctx.clearRect(0,0,width,height);const centerX=width/2,centerY=height/2+10,count=Math.max(3,catalog.machines.length||3),nodes=[];ctx.strokeStyle="#263d66";ctx.lineWidth=1;for(let index=0;index<count;index++){const angle=now*.00018+index*Math.PI*2/count,radius=Math.min(width,height)*(.22+(index%2)*.12),x=centerX+Math.cos(angle)*radius,y=centerY+Math.sin(angle)*radius*.58;nodes.push([x,y]);ctx.beginPath();ctx.moveTo(centerX,centerY);ctx.lineTo(x,y);ctx.stroke();}ctx.fillStyle="#57e6d9";ctx.shadowColor="#57e6d9";ctx.shadowBlur=24;ctx.beginPath();ctx.arc(centerX,centerY,7,0,Math.PI*2);ctx.fill();for(let index=0;index<nodes.length;index++){const[x,y]=nodes[index];ctx.fillStyle="#57e6d9";ctx.shadowBlur=16;ctx.beginPath();ctx.arc(x,y,4.5,0,Math.PI*2);ctx.fill();const satellites=Math.max(1,Math.ceil((catalog.models.length||4)/nodes.length));for(let satellite=0;satellite<satellites;satellite++){const angle=now*.00035+satellite*Math.PI*2/satellites+index,radius=17+satellite*5;ctx.fillStyle="#9a7cff";ctx.shadowColor="#9a7cff";ctx.shadowBlur=10;ctx.beginPath();ctx.arc(x+Math.cos(angle)*radius,y+Math.sin(angle)*radius,2.2,0,Math.PI*2);ctx.fill();}}ctx.shadowBlur=0;tick=now;requestAnimationFrame(drawMesh);}requestAnimationFrame(drawMesh);
   if(!gatewayUrl){ state("error","Gateway non configurato"); }
   else if(location.protocol!=="https:"&&location.hostname!=="localhost"){ state("error","Apri la pagina in HTTPS"); }
+  else { loadModels(); setInterval(loadModels,60000); }
   buttons();
 </script>
 </body>

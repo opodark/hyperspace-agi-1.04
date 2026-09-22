@@ -66,6 +66,22 @@ ALLOWED_ROUTES = {
     ("GET",  "/federation/identity"),
     ("POST", "/bottles/publish"),
     ("GET",  "/bottles/list"),
+    # Ingresso pubblico dei browser node. Non espone chat, modelli, dashboard o
+    # task amministrativi: il browser si registra, tira un task web-safe e ne
+    # restituisce l'esito. OPTIONS serve al preflight CORS della pagina HTTPS.
+    ("POST", "/web/register"),
+    ("POST", "/web/poll"),
+    ("POST", "/web/result"),
+    ("OPTIONS", "/web/register"),
+    ("OPTIONS", "/web/poll"),
+    ("OPTIONS", "/web/result"),
+    # Esperienza pubblica della mesh: catalogo e chat OpenAI-compatible.
+    # Restano escluse dashboard, log, task manuali e configurazione. Il rate
+    # limit qui sotto protegge il CP da uso anonimo eccessivo.
+    ("GET", "/v1/models"),
+    ("OPTIONS", "/v1/models"),
+    ("POST", "/v1/chat/completions"),
+    ("OPTIONS", "/v1/chat/completions"),
 }
 
 _EXCLUDED_RESPONSE_HEADERS = {"content-encoding", "content-length", "transfer-encoding", "connection"}
@@ -79,11 +95,17 @@ _EXCLUDED_RESPONSE_HEADERS = {"content-encoding", "content-length", "transfer-en
 _CLIENT_IP_HEADERS = ("X-Hs-Client-Ip", "X-Hs-Client-Ts", "X-Hs-Client-Sig")
 _RESERVED_HEADER_NAMES = {h.lower() for h in _CLIENT_IP_HEADERS} | {"host"}
 
-# Solo le route bottle hanno un rate-limit dedicato qui: sono le uniche
-# pensate per traffico pubblico anonimo. path -> (richieste, secondi).
+# Le route anonime pubbliche hanno un rate-limit dedicato qui. Le bottle hanno
+# anche proof-of-work e limiti nel CP; i web node hanno limiti di registro,
+# payload e coda nel CP. path -> (richieste, secondi).
 _RATE_LIMITS = {
     "/bottles/publish": (int(os.getenv("GATEWAY_BOTTLE_PUBLISH_MAX_PER_HOUR", "20")), 3600),
     "/bottles/list":    (int(os.getenv("GATEWAY_BOTTLE_LIST_MAX_PER_MINUTE", "30")), 60),
+    "/web/register":    (int(os.getenv("GATEWAY_WEB_REGISTER_MAX_PER_MINUTE", "12")), 60),
+    "/web/poll":        (int(os.getenv("GATEWAY_WEB_POLL_MAX_PER_MINUTE", "30")), 60),
+    "/web/result":      (int(os.getenv("GATEWAY_WEB_RESULT_MAX_PER_MINUTE", "30")), 60),
+    "/v1/models":       (int(os.getenv("GATEWAY_MODELS_MAX_PER_MINUTE", "30")), 60),
+    "/v1/chat/completions": (int(os.getenv("GATEWAY_CHAT_MAX_PER_MINUTE", "12")), 60),
 }
 _RATE_MAX_TRACKED_KEYS = int(os.getenv("GATEWAY_BOTTLE_RATE_MAX_IPS", "4096"))
 
@@ -145,7 +167,9 @@ def proxy(path):
         return {"error": "not found"}, 404
 
     ip = _client_ip()
-    if full_path in _RATE_LIMITS and not _rate_check(full_path, ip):
+    # Il preflight non esegue lavoro applicativo e non deve consumare la quota
+    # della chiamata POST che il browser farà subito dopo.
+    if request.method != "OPTIONS" and full_path in _RATE_LIMITS and not _rate_check(full_path, ip):
         return {"error": "troppe richieste, riprova più tardi"}, 429
 
     forward_headers = {

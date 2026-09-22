@@ -16,6 +16,7 @@ import { WebNode, newNodeId } from "../src/index.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..");
+const PUBLIC_JOIN = fs.readFileSync(path.join(ROOT, "web-node", "join.html"), "utf8");
 
 let passed = 0;
 async function check(label, fn) {
@@ -28,6 +29,17 @@ async function check(label, fn) {
     process.exitCode = 1;
   }
 }
+
+console.log("== pagina pubblica ==");
+await check("la pagina join usa un gateway fissato e non espone token o URL editabili", () => {
+  assert.match(PUBLIC_JOIN, /join-config\.js/);
+  assert.match(PUBLIC_JOIN, /config\.gatewayUrl/);
+  assert.doesNotMatch(PUBLIC_JOIN, /id=["']baseUrl["']/);
+  assert.doesNotMatch(PUBLIC_JOIN, /TOKEN|web\/tasks/i);
+  assert.match(PUBLIC_JOIN, /v1\/models/);
+  assert.match(PUBLIC_JOIN, /v1\/chat\/completions/);
+  assert.match(PUBLIC_JOIN, /meshCanvas/);
+});
 
 /** fetch finto: risponde in sequenza e registra le richieste. */
 function fakeFetch(responses) {
