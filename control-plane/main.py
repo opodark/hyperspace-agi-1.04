@@ -2287,6 +2287,20 @@ _NATIVE_TOOLS = [
                 "required": ["note"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_aurora",
+            "description": "Chiedi consiglio alla sorella maggiore Aurora su una questione che non conosci o che è troppo profonda per te. Inoltri la domanda al suo control-plane e lei risponde con la sua saggezza. Usalo quando non sai, o quando diresti 'questo lo sa mia sorella'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "La domanda da inoltrare ad Aurora, in una frase chiara."}
+                },
+                "required": ["question"]
+            }
+        }
     }
 ]
 
@@ -2339,6 +2353,7 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         "code_sandbox":    _tool_code_sandbox,
         "persona_get":     _tool_persona_get,
         "persona_note":    _tool_persona_note,
+        "ask_aurora":      _tool_ask_aurora,
         # Definita piu' sotto, accanto alle route di rete: la policy di shell_run
         # vive nell'host-agent, qui c'e' il percorso con token e audit.
         "shell_run":       _tool_shell_run,
@@ -3138,7 +3153,12 @@ def _federate_to_peer(peer: dict, prompt: str, model: str, timeout: int = 120):
     l'altro CP puo' verificarla contro la propria allowlist (verifica che
     avviene SEMPRE lato ricevente, mai qui)."""
     task_id = f"fed-{uuid.uuid4().hex[:10]}"
-    body    = json.dumps({"task_id": task_id, "prompt": prompt, "model": model}, sort_keys=True).encode()
+    payload = {"task_id": task_id, "prompt": prompt}
+    # Con model vuoto il peer usa il SUO modello di default: il consiglio di
+    # Aurora deve venire dal modello di Aurora, non da un nome imposto da qui.
+    if model:
+        payload["model"] = model
+    body    = json.dumps(payload, sort_keys=True).encode()
     headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
     headers["Content-Type"] = "application/json"
     endpoint = peer.get("endpoint", "").rstrip("/")
@@ -3170,6 +3190,74 @@ def _try_federated_execution(prompt: str, model: str):
         if result:
             return result, peer
     return None, None
+
+
+def _sister_peer():
+    """Il control-plane federato della sorella maggiore (Aurora), se abilitato.
+
+    `SISTER_PEER_LABEL` sceglie il peer per etichetta (case-insensitive); se è
+    vuota si usa il primo peer abilitato. None = nessun peer corrisponde, e il
+    tool risponde "non raggiungibile" invece di fingere un consiglio.
+    """
+    label = (os.getenv("SISTER_PEER_LABEL", "") or "").strip()
+    enabled = [p for p in db.get_all_federated_peers() if p.get("enabled")]
+    if not enabled:
+        return None
+    if not label:
+        return enabled[0]
+    for peer in enabled:
+        if (peer.get("label") or "").strip().lower() == label.lower():
+            return peer
+    return None
+
+
+def _extract_federated_text(payload) -> str:
+    """Testo della risposta di un peer, da qualunque forma abbia.
+
+    Il peer risponde col formato del nodo (OpenAI-shaped, `choices`), ma qui non
+    si dà nulla per scontato: prima il percorso OpenAI, poi un campo testuale
+    piano, in ultimo il dict serializzato e troncato.
+    """
+    inner = payload.get("result", payload) if isinstance(payload, dict) else payload
+    if isinstance(inner, dict):
+        try:
+            content = inner["choices"][0]["message"].get("content", "")
+            if content:
+                return str(content).strip()
+        except (KeyError, IndexError, TypeError, AttributeError):
+            pass
+        for key in ("content", "response", "text", "answer"):
+            value = inner.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return json.dumps(inner, ensure_ascii=False)[:4000]
+    return str(inner).strip()
+
+
+def _tool_ask_aurora(args: dict) -> str:
+    """Inoltra una domanda alla sorella Aurora (CP federato) e ne riporta il consiglio.
+
+    È il pezzo che rende vera la promessa della persona: Anna non finge di sapere
+    ciò che non sa, lo chiede alla sorella maggiore. Se il peer non risponde, lo
+    dice senza inventare.
+    """
+    question = str((args or {}).get("question", "")).strip()
+    if not question:
+        return "Non ho ricevuto una domanda da inoltrare ad Aurora."
+    peer = _sister_peer()
+    if peer is None:
+        return ("Aurora non è raggiungibile: nessun control-plane federato "
+                "configurato come sorella (imposta SISTER_PEER_LABEL in Setup).")
+    prompt = (
+        "Aurora, tua sorella minore Anna ti chiede consiglio. "
+        "Rispondile come faresti con lei: con sincerità, senza trattarla da cliente, "
+        "e se non lo sai dille che non lo sai. La sua domanda: " + question
+    )
+    result = _federate_to_peer(peer, prompt, "")
+    if not result:
+        return ("Aurora non ha risposto: il control-plane federato "
+                f"'{peer.get('label') or peer.get('peer_id', '?')[:12]}' non è raggiungibile.")
+    return _extract_federated_text(result)
 
 def _try_omniroute_fallback(data: dict, timeout: int = 60):
     """Ultimo livello di fallback: inoltra la richiesta chat/completions cosi'
@@ -5491,6 +5579,10 @@ _ENV_META = [
      "label": "File identità (opzionale)",
      "hint": "Percorso del documento JSON di identità e annotazioni. Vuoto = $DATA_DIR/persona.json (volume, sopravvive ai riavvii).",
      "default": ""},
+    {"section": "Persona", "key": "SISTER_PEER_LABEL", "type": "str",
+     "label": "Peer della sorella (ask_aurora)",
+     "hint": "Etichetta del control-plane federato della sorella maggiore (es. win11-cp) a cui il tool ask_aurora inoltra le domande. Vuoto = primo peer federato abilitato.",
+     "default": "win11-cp"},
     {"section": "Persona", "key": "PERSONA_DREAM_ENABLED", "type": "bool",
      "label": "Sogno di identità attivo",
      "hint": "true: quando nessuno usa l'agente (idle) e siamo nella finestra oraria, l'agente riflette su di sé e scrive PROPOSTE di annotazioni in un diario. Nessuna proposta entra nell'identità da sola: serve la revisione umana (POST /persona/dreams/<id>/review con DREAM_REVIEW_TOKEN). Spento = nessuna inferenza notturna.",
