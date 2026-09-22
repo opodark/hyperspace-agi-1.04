@@ -149,16 +149,30 @@ Generare una volta un segreto in un file ignorato da Git. Nel Compose generico
 il control-plane lo legge come `/repo/data/hermes-memory.token`; nel profilo
 Windows lo legge da `/app/data/hermes-memory.token`, cioe' dal path host
 `%HS_DATA_DIR%\hermes-memory.token`. Il launcher deve ricevere lo stesso file.
-Da PowerShell nella root del repository:
+
+**Il comando che lo fa per tutti i posti** (e dice se sono allineati: tre file con
+lo stesso segreto sono tre occasioni di divergere in silenzio):
 
 ```powershell
-[IO.File]::WriteAllText(
-  (Join-Path $PWD 'data\hermes-memory.token'),
-  ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
-)
-.\scripts\start_hermes_memory_bridge.ps1
+python scripts\hermes_token.py --check    # stato: chi ha il token, chi no, se combaciano
+python scripts\hermes_token.py --write --extra-file C:\HyperSpace\data
 ```
 
+`--write` genera un token nuovo (64 esadecimali) e lo scrive in **tutti** i
+percorsi; `--from-file <percorso>` allinea invece il token esistente senza
+ruotarlo. I percorsi sono tre perché i lati che lo leggono sono diversi: il
+launcher del bridge (`<repo>\data\hermes-memory.token`), il control-plane nel
+container (`/app/data/...` = `%HS_DATA_DIR%`), e l'istanza avviata a mano
+(`--extra-file`). Un `--check` risponde alla domanda che conta: *hanno lo stesso
+token?* — un lato con il token sbagliato risponde 401 e sembra un guasto del
+servizio.
+
+**Ruotare il token richiede riavviare il bridge**: il segreto si legge all'avvio,
+quindi un bridge già in esecuzione continua a pretendere quello vecchio.
+
+```powershell
+.\scripts\start_hermes_memory_bridge.ps1
+```
 
 Il launcher usa `127.0.0.1`: su Docker Desktop `host.docker.internal` riesce a
 raggiungerlo, ma la LAN no. Non allargare il bind senza una regola firewall
