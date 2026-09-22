@@ -331,6 +331,9 @@ SURFACE_CONTEXTS = {
     "discord-pm": "Stai scrivendo in un DM di Discord: più diretto, stessa misura e stesso tono.",
     "telegram-chat": "Stai scrivendo su Telegram (gruppo): markdown essenziale, una risposta alla volta, fino a ~4096 caratteri, niente flood.",
     "telegram-pm": "Stai scrivendo in una chat privata di Telegram: più diretto, stessa misura e stesso tono.",
+    "comfyui": "Stai rispondendo a un nodo di generazione immagini: restituisci SOLO il "
+               "prompt richiesto, senza preamboli, spiegazioni, elenchi o markdown. "
+               "Nessuna frase su di te e nessun commento su quello che stai facendo.",
 }
 
 

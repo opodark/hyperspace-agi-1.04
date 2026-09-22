@@ -44,6 +44,21 @@ class SurfaceContextTests(unittest.TestCase):
         self.assertIn("cam4", blocco)
         self.assertIn("(chat)", blocco)
 
+    def test_comfyui_ha_una_superficie_sua(self):
+        """Un nodo di generazione immagini non e' 'openwebui'.
+
+        Il contesto di superficie esiste per questo: la richiesta arriva con
+        `surface=comfyui` e deve ricevere l'istruzione che rende utilizzabile
+        l'uscita (solo il prompt, niente preamboli) — resta separata
+        dall'identita', che non cambia.
+        """
+        self.assertEqual(normalize_surface("comfyui"), "comfyui")
+        blocco = surface_context("comfyui")
+        self.assertIn("SOLO il prompt", blocco)
+        self.assertNotIn("## Contesto del mezzo", build_system_block(default_persona("Aurora")))
+        self.assertEqual(build_system_block(default_persona("Aurora")),
+                         build_system_block(default_persona("Aurora")))
+
     def test_identita_non_contiene_il_contesto_del_mezzo(self):
         identita = build_system_block(default_persona("Aurora"))
         self.assertNotIn("## Contesto del mezzo", identita)
