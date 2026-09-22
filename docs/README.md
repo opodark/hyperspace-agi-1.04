@@ -21,6 +21,7 @@ Architecture and deployment notes for HyperSpace-AGI. Mission, lexicon and phase
 - [persona.md](persona.md) — declared identity of the agent: identity document, live self-model, the verifiable disclosure policy ("I am an AI"), and the human-gated identity dream that proposes self-observations at night.
 - [channel.md](channel.md) — external conversation surfaces (a room's chat and private messages): channel tokens, spam classification, moderation escalation and reply pacing decided by the control plane.
 - [development-tooling-architecture.md](development-tooling-architecture.md) — one HyperSpace development experience backed by isolated offline, browser, dependency-audit and security-lab runtimes.
+- [comfyui.md](comfyui.md) — ComfyUI sul nodo win11 come volto visivo di HyperSpace: i nodi `HyperSpacePrompt`/`HyperSpaceMesh`, il contratto `/v1/chat/completions` con `surface=comfyui` e `X-Hyperspace-Tools: off`, e il ponte "che tira" previsto per la generazione su richiesta.
 - [development-security-tools.md](development-security-tools.md) — current development, debugging and security capabilities, selective ECC integration, and planned specialist workers.
 - [architecture.md](architecture.md) — core layers (authority, control plane, node/worker, registry, memory graph, infra UI).
 - [network-profiles.md](network-profiles.md) — Enterprise Local vs Public Hub deployment profiles.
