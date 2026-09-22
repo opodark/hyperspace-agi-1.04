@@ -140,6 +140,10 @@ KNOWN_CHANNELS: tuple[dict, ...] = (
      "auth": "api_token", "surfaces": ("dm",),
      "hint": "Placeholder: API token.",
      "first_class": False},
+    {"key": "irc", "label": "IRC", "icon": "💬",
+     "auth": "nick_password", "surfaces": ("chat", "pm"),
+     "hint": "Nick + password (SASL/NickServ). Socket TCP; rete e canali dal driver scripts/irc_bot.py.",
+     "first_class": False},
 )
 
 
