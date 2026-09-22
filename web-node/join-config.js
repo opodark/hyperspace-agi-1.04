@@ -2,7 +2,7 @@
 // Copia questo file insieme a join.html e src/ sullo spazio web Aruba.
 // L'endpoint deve essere il gateway pubblico HTTPS, mai il control-plane.
 window.HYPERSPACE_JOIN = Object.freeze({
-  gatewayUrl: "https://mesh.zerozerocomputer.it",
+  gatewayUrl: "https://laptop-t9h8plht.tail453db3.ts.net",
   siteName: "ZeroZeroComputer",
   meshName: "HyperSpace",
 });
