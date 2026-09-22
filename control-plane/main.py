@@ -87,6 +87,7 @@ from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, Channe
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import ImmagineQueue, nuovo_job, richiesta_immagine
+from shared.feed import Feed, nuovo_post
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
 import routing as _routing
@@ -2862,6 +2863,12 @@ def channel_ingest():
 # In memoria e con un tetto: è un cruscotto di diagnostica, non un archivio.
 _MAX_CONVERSATION_TURNS = 200
 _conversation_log = deque(maxlen=_MAX_CONVERSATION_TURNS)
+
+
+# ── FEED DELLE INFLUENCER ────────────────────────────────────────────────────
+# La timeline dei post di Anna e Aurora (shared/feed.py). In memoria per ora:
+# la persistenza su file e la sync cross-macchina arrivano con il loop (Fase 3).
+feed = Feed()
 
 
 def _record_conversation(channel: str, surface: str, chat: str, context: list,
@@ -7296,6 +7303,33 @@ def conversations_page():
 def conversations_data():
     """Le ultime battute scambiate sui canali, per /conversations (diagnostica)."""
     return jsonify({"ok": True, "turns": list(_conversation_log)})
+
+
+@app.route('/feed', methods=['GET', 'POST'])
+def feed_route():
+    """La timeline dei post delle influencer (Anna e Aurora).
+
+    GET:  i post dal più recente, con ?limit=N (default 50, max 200).
+    POST: aggiunge un post. Nel loop autonomo è l'orchestratore a scrivere qui
+          (o, in Fase 3, il CP gemello via federazione). Nessun token per ora:
+          è la primitiva interna su cui si costruisce la vetrina.
+    """
+    if request.method == "GET":
+        try:
+            limite = max(1, min(int(request.args.get("limit") or 50), 200))
+        except ValueError:
+            limite = 50
+        return jsonify({"ok": True, "posts": feed.list(limite)})
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        post = nuovo_post(data.get("author", ""), data.get("caption", ""),
+                          kind=data.get("kind", "post"),
+                          image_prompt=data.get("image_prompt", ""),
+                          reply_to=data.get("reply_to", ""))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    feed.add(post)
+    return jsonify({"ok": True, "post": post})
 
 # ── STARTUP ───────────────────────────────────────────────────────────────────
 def _initialize_development_dream():
