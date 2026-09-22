@@ -84,6 +84,7 @@ from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
+from shared.image_jobs import ImmagineQueue, nuovo_job
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
 import routing as _routing
@@ -928,6 +929,20 @@ channel_pacing = ReplyPacing(
 # Stato vivo del driver e comandi dell'operatore: il driver li ritira al giro
 # successivo (nessuna porta aperta sulla macchina col browser).
 channel_runtime = ChannelRuntime()
+
+# ── JOB IMMAGINE (shared/image_jobs.py) ──────────────────────────────────────
+# Perché una coda e non una chiamata diretta: ComfyUI ascolta su 127.0.0.1 sulla
+# macchina con la scheda, e il control-plane è in un container — **non può
+# chiamarlo**. Il ponte (integrations/comfyui/comfy_bridge.py) TIRA il lavoro,
+# come i driver di canale, e si autentica con lo stesso token: un canale in più
+# in CHANNEL_CLIENTS, non un'eccezione alla regola.
+#
+#     python scripts/channel_token.py comfy --write
+#
+# La coda vive in memoria: un job vecchio sparisce invece di eseguirsi tre ore
+# dopo, e un job preso e mai concluso torna disponibile (il ponte è morto a
+# metà, non il lavoro).
+image_queue = ImmagineQueue()
 CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
 CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
 # Chi è "io" nel dialogo interno a due voci: nome autore dell'operatore
@@ -2403,6 +2418,87 @@ def persona_dream_run():
              status=('success' if report.get("status") == "candidate" else 'warn'))
     return jsonify({"ok": report.get("status") != "failed", "dream": _persona_dream.status(),
                     "report": report})
+
+
+# ── JOB IMMAGINE: il lavoro che il ponte di ComfyUI tira ─────────────────────
+# Stesse regole dei canali, stesso token: chi chiede un'immagine è una superficie
+# esterna come le altre. Chi CHIEDE non aspetta — mette in coda e va avanti; chi
+# ESEGUE (il ponte, sulla macchina con la scheda) tira il job e riferisce.
+#
+#     python scripts/channel_token.py comfy --write    # il token del ponte
+#
+# 204 su /image/jobs significa "niente da fare": è la risposta normale di un
+# ponte in attesa, non un errore.
+
+@app.route('/image/generate', methods=['POST'])
+def image_generate():
+    """Mette in coda un job immagine e torna subito con l'id."""
+    errore = _channel_error()
+    if errore:
+        return errore
+    dati = request.get_json(silent=True) or {}
+    try:
+        job = nuovo_job(dati.get("prompt", ""),
+                        negativo=dati.get("negativo", ""),
+                        larghezza=dati.get("larghezza", 768),
+                        altezza=dati.get("altezza", 768),
+                        passi=dati.get("passi", 25),
+                        seed=dati.get("seed", 0),
+                        richiedente=dati.get("richiedente", ""),
+                        canale=_channel_name(),
+                        modello=dati.get("modello", ""))
+    except (ValueError, TypeError) as e:
+        return jsonify({"ok": False, "error": str(e)[:160]}), 400
+    try:
+        accodato = image_queue.accoda(job)
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 429
+    push_log('channel', 'Job immagine in coda',
+             detail=f"id={accodato['id']} {accodato['larghezza']}x{accodato['altezza']} "
+                    f"passi={accodato['passi']} da={accodato['richiedente'] or '?'}",
+             status='info')
+    return jsonify({"ok": True, "job": accodato}), 201
+
+
+@app.route('/image/jobs')
+def image_jobs():
+    """Il prossimo job per il ponte. Vuoto = 204, che non è un errore."""
+    errore = _channel_error()
+    if errore:
+        return errore
+    job = image_queue.prossimo()
+    if job is None:
+        return ('', 204)
+    return jsonify({"ok": True, "job": job})
+
+
+@app.route('/image/result', methods=['POST'])
+def image_result():
+    """Il ponte riferisce com'è andata: è l'unico modo per saperlo."""
+    errore = _channel_error()
+    if errore:
+        return errore
+    dati = request.get_json(silent=True) or {}
+    chiuso = image_queue.concludi(str(dati.get("id", "")), bool(dati.get("ok")),
+                                  file=dati.get("file", ""), errore=dati.get("errore", ""),
+                                  durata_ms=dati.get("durata_ms", 0))
+    if chiuso is None:
+        return jsonify({"ok": False, "error": "job sconosciuto"}), 404
+    esito = chiuso["esito"]
+    push_log('channel', 'Job immagine concluso',
+             detail=(f"id={chiuso['id']} stato={chiuso['stato']} "
+                     f"{esito.get('file') or esito.get('errore') or ''}")[:200],
+             status=('success' if chiuso["stato"] == "done" else 'warn'))
+    return jsonify({"ok": True, "job": chiuso})
+
+
+@app.route('/image/status')
+def image_status():
+    """Coda, ultimi job e scadenze: serve a "dov'è finita la mia immagine?"."""
+    errore = _channel_error()
+    if errore:
+        return errore
+    return jsonify({"ok": True, **image_queue.stato()})
 
 
 @app.route('/channel/status')
