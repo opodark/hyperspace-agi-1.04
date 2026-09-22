@@ -80,5 +80,11 @@ dal loader come contesto separato. Nessun hook o runtime ECC è incluso.
 
 - **I modelli** (pesi GGUF/Ollama) scaricati dai nodi: ognuno ha la licenza del
   proprio autore. Non sono distribuiti con il progetto: si scaricano a parte.
+  Quello del nodo d'immagine e' `abenzerps/Qwen-Image-2.1-Uncensored-GGUF`
+  (quantizzazioni GGUF di `Qwen/Qwen-Image-2.1`, revisione
+  `1206d38bb47ef93961bfb77bc2c700d43a25860e`) sotto **Qwen Research License**:
+  `integrations/comfyui/install-model.ps1` lo scarica da Hugging Face e confronta
+  l'impronta SHA-256 con `integrations/comfyui/modelli.json` — la verifica e' del
+  *file*, non una dichiarazione di licenza, che resta di chi lo scarica.
 - **Le dipendenze di sviluppo** (vitest, typescript nel web-node; pytest nella
   sandbox): presenti solo negli ambienti di test, non nelle immagini di servizio.

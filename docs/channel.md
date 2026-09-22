@@ -36,6 +36,18 @@ consegnare un'immagine chiesta con `!immagine <idea>`. Il file lo ha il driver (
 dove scrive ComfyUI), la destinazione la decide chi chiede: l'outbox è il punto in
 cui le due cose si incontrano, e il driver la tira come tira le decisioni.
 
+`!immagine` accoda **l'idea come è stata scritta**: nessun filtro di contenuto in
+questa catena (né qui, né nella coda, né nel ponte, né nei pesi `-UC`). Chi può
+chiederla è una decisione di *risorsa* — una scheda, 313-700 s per immagine — non
+di morale, e senza `CHANNEL_OPERATOR` il comando è aperto a chiunque sia in chat.
+Lo stesso vale **a parole** («mandami una foto di X»): le regole sono dichiarate
+in `shared/image_jobs.py` (`richiesta_immagine`) e il nome di quella che ha
+riconosciuto la frase finisce nei log. Lì la guardia è più severa del comando —
+solo l'operatore, e **senza `CHANNEL_OPERATOR` non si accoda niente**
+(fail-closed): una frase male interpretata costa 5-12 minuti di scheda, un
+comando scritto male si vede subito.
+Il quadro completo, con i file dove si legge: [`comfyui.md`](comfyui.md#cosa-filtra-e-cosa-no).
+
 **No long-poll.** The driver asks when it believes the batch is ripe (it is the one measuring the room) and the control plane answers with the decision. A blocking outbox would add concurrency and timeouts for nothing: the reply is one batched sentence, not a job queue.
 
 ## What the classification does — and does not do

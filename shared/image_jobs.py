@@ -14,6 +14,7 @@ mandare a ComfyUI — senza Flask, senza torch e senza rete: si testa da sola.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -74,6 +75,68 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         "preso_ts": 0.0,
         "esito": {},
     }
+
+# ── La richiesta a parole ("mandami una foto di X") ──────────────────────────
+# Perché esiste, visto che il comando `!immagine` funziona: chiedere la sintassi
+# giusta è chiedere di ricordarsi un comando, e in una chat si scrive così.
+#
+# Perché il riconoscimento sta QUI e non nel modello: la scheda è una sola e un
+# falso positivo costa 5-12 minuti di GPU. Quindi regole poche, dichiarate e
+# leggibili — ognuna con un nome che finisce nei log, perché "perché ha
+# disegnato?" deve restare una frase. Chi PUO' chiederla non si decide qui:
+# è `CHANNEL_OPERATOR`, nel control-plane (vedi `_channel_immagine`).
+#
+# Le due regole non si sovrappongono per caso: la prima è "dammi", la seconda
+# "vorrei". Tutto il resto è silenzio, e il silenzio non costa niente.
+_FOTO = (r"(?:foto|fotografia|immagine|ritratto|selfie|disegno|quadro|scatto|"
+         r"scena|illustrazione|paesaggio|poster|vignetta|bozzetto|schizzo|copertina)")
+# Tra il verbo e la cosa chiesta ci stanno solo parole che non cambiano la
+# richiesta. Senza questo elenco, "mandami il numero e poi la foto" passerebbe:
+# un false positive che nessuno vede finché la scheda non è occupata.
+_RIEMPI = (r"(?:\s+(?:una|un|il|lo|la|le|gli|i|dei|delle|degli|dell|altro|altra|"
+           r"un'altra|nuova|nuovo|bella|bello|piccola|piccolo|grande|mia|mio|tua|"
+           r"tuo|di|con|per|che|mi|me|un'|l'|all'|dall'|nell'))*")
+REGOLE_IMMAGINE = (
+    # "puoi mandarmi una foto": potere + infinito. È la forma più comune, e senza
+    # questa regola resta muta (il verbo vero è l'infinito, non "puoi").
+    ("potere-infinito", re.compile(
+        rf"^\s*(?:aurora[\s,]+)?(?:mi\s+)?(?:puoi|potresti|riesci\s+a|sapresti)\s+"
+        rf"(?:mandarmi|mandare|inviarmi|inviare|farmi|fare|generarmi|generare|"
+        rf"crearmi|creare|disegnarmi|disegnare|illustrarmi|illustrare)\b"
+        rf"{_RIEMPI}\s*{_FOTO}\b", re.IGNORECASE)),
+    ("mandare", re.compile(
+        rf"^\s*(?:aurora[\s,]+)?(?:mi\s+|me\s+la\s+)?(?:manda|mandami|mandi|mandate|"
+        rf"mandarmi|mandarmela|invia|inviami|inviate|fammi|fai|fate|genera|"
+        rf"generami|generate|crea|creami|create|disegna|disegnami|disegnate|"
+        rf"illustra|illustrami|abbozza|schizza)\b{_RIEMPI}\s*{_FOTO}\b", re.IGNORECASE)),
+    ("volere", re.compile(
+        rf"^\s*(?:aurora[\s,]+)?(?:vorrei|voglio|mi\s+piacerebbe|mi\s+serve|"
+        rf"mi\s+servirebbe|potrei\s+avere)\b{_RIEMPI}\s*{_FOTO}\b", re.IGNORECASE)),
+)
+
+# Davanti all'idea si toglie solo la sintassi della domanda. Le preposizioni
+# restano: "di te esplicita" e "con un cappello" sono CONTENUTO, e toglierle
+# cambierebbe quello che si chiede di disegnare.
+_SINTASSI = re.compile(r"^\s*(?:che|dove|in\s+cui|:|-|–|,)\s*", re.IGNORECASE)
+
+
+def richiesta_immagine(testo) -> dict | None:
+    """La frase chiede un'immagine? -> ``{"idea": ..., "regola": ...}``, o None.
+
+    ``idea`` vuota significa "ha chiesto un'immagine senza dire quale": chi
+    chiama chiede cosa disegnare — che è diverso da "non ha chiesto niente".
+    """
+    t = " ".join(str(testo or "").split())
+    if not t:
+        return None
+    for nome, regola in REGOLE_IMMAGINE:
+        trovata = regola.search(t)
+        if trovata:
+            idea = _SINTASSI.sub("", t[trovata.end():], count=1).strip()
+            return {"idea": idea[:400], "regola": nome}
+    return None
+
+
 
 
 class ImmagineQueue:
@@ -215,8 +278,18 @@ class ImmagineQueue:
 #     esattamente ciò che lascia spazio al diffusion;
 #   - il negativo sta DENTRO il prompt ("no text, no watermark, no logos"):
 #     Qwen-Image 2.1 segue le istruzioni, e `resolution` segue il lato del latente.
+#
+# I pesi sono i GGUF **non censurati** di Qwen-Image 2.1 (variante `-UC`): gli
+# stessi pesi base senza safety checker, quindi l'immagine dipende solo dal
+# prompt. Q5_K_M è la quantizzazione con cui la run 19e69776 è passata — 4,86 GiB
+# in VRAM a 768×768, 25 passi, text encoder sulla CPU.
+#
+# Il nome del file e la sua impronta SHA-256 non si scrivono qui a memoria: stanno
+# in `integrations/comfyui/modelli.json`, che `install-model.ps1` legge per
+# scaricarli, e `tests/test_comfyui_modelli.py` tiene i due lati allineati:
+# rinominare il file da un lato solo fa fallire un test, non un job in silenzio.
 MODELLO_DEFAULT = {
-    "unet": "qwen-image-2.1-Q5_K_M.gguf",
+    "unet": "qwen-image-2.1-UC-Q5_K_M.gguf",
     "clip": "qwen3vl_8b_int8_convrot.safetensors",
     "clip_type": "qwen_image",
     "clip_device": "cpu",

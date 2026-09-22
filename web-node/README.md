@@ -211,6 +211,14 @@ default e i limiti noti.
 
 This component is intentionally kept small and optional. It is an **addition** to the mesh, not a core dependency.
 
+## Pagina pubblica di ingresso
+
+`join.html` e' la UI ridotta per un dominio pubblico: espone soltanto consenso,
+nome del nodo e stato. L'endpoint non e' modificabile dal visitatore e arriva da
+`join-config.js`; deve puntare al federation gateway HTTPS, mai alla porta del
+control-plane. La procedura Aruba e la topologia sono in
+[`docs/public-web-node.md`](../docs/public-web-node.md).
+
 ## Come si usa: servita dal tailnet
 
 Il modo previsto per usare questa pagina, e l'unico che funziona senza
