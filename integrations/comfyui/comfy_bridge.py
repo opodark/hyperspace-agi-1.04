@@ -78,6 +78,13 @@ def _richiesta(url: str, *, payload=None, timeout: float = 30.0,
         return 0, {"errore": f"non raggiungibile: {errore.reason}"}
     except TimeoutError:
         return 0, {"errore": f"timeout dopo {timeout}s"}
+    except OSError as errore:
+        # Il control-plane che sparisce A METÀ richiesta non passa da URLError: su
+        # Windows arriva qui come WinError 10053 ("connessione interrotta dal
+        # software del computer host"). Senza questo ramo l'eccezione usciva dal
+        # ciclo e **il ponte moriva** — con la coda piena e nessuno che la esegue,
+        # cioè in silenzio. Osservato davvero il 2026-09-22 reconstruendo il CP.
+        return 0, {"errore": f"connessione interrotta: {errore}"}
 
 
 def _verifiche(comfy_url: str, output_dir: str) -> list:

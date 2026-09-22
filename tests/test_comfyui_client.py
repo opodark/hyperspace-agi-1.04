@@ -12,8 +12,10 @@ Nessuna rete e nessun ComfyUI: il trasporto è iniettato, che è il motivo per c
 la logica sta in un modulo a parte.
 """
 import importlib.util
+import inspect
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "integrations" / "comfyui" / "hyperspace_client.py"
@@ -213,6 +215,53 @@ class SuggerimentiTests(unittest.TestCase):
 
     def test_un_errore_sconosciuto_non_inventa_consigli(self):
         self.assertEqual(CL.suggerimento("HTTP 418: sono una teiera"), "")
+
+
+class PonteResilienteTests(unittest.TestCase):
+    """Un control-plane che sparisce non deve uccidere il ponte.
+
+    Osservato il 2026-09-22, reconstruendo il CP: la richiesta si è interrotta a metà
+    e `urllib` ha sollevato WinError 10053, che non passa da URLError. L'eccezione
+    usciva dal ciclo del ponte e il processo moriva **in silenzio**, lasciando la coda
+    piena e nessuno che la eseguisse.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        specifica = importlib.util.spec_from_file_location(
+            "comfy_bridge_sotto_test", ROOT / "integrations" / "comfyui" / "comfy_bridge.py")
+        cls.ponte = importlib.util.module_from_spec(specifica)
+        specifica.loader.exec_module(cls.ponte)
+
+    def _con_urlopen_che_solleva(self, errore):
+        def finto(*_args, **_kwargs):
+            raise errore
+        return mock.patch.object(self.ponte.urllib.request, "urlopen", finto)
+
+    def test_connessione_interrotta_a_meta_richiesta_non_solleva(self):
+        for errore in (ConnectionAbortedError(10053, "connessione interrotta"),
+                       ConnectionResetError(10054, "connessione azzerata"),
+                       ConnectionRefusedError(10061, "connessione rifiutata")):
+            with self.subTest(errore=type(errore).__name__):
+                with self._con_urlopen_che_solleva(errore):
+                    stato, dati = self.ponte._richiesta("http://127.0.0.1:8085/image/jobs")
+                self.assertEqual(stato, 0)
+                self.assertIn("connessione", dati["errore"])
+
+    def test_un_errore_http_resta_un_codice_e_non_un_eccezione(self):
+        def finto(*_args, **_kwargs):
+            raise self.ponte.urllib.error.HTTPError(
+                "http://127.0.0.1:8085/image/jobs", 502, "Bad Gateway", {}, None)
+        with mock.patch.object(self.ponte.urllib.request, "urlopen", finto):
+            stato, dati = self.ponte._richiesta("http://127.0.0.1:8085/image/jobs")
+        self.assertEqual(stato, 502)
+
+    def test_il_ciclo_sopravvive_a_un_cp_irraggiungibile(self):
+        """Il ciclo non deve avere un `return`/`raise` che lo chiuda sugli errori di rete."""
+        corpo = inspect.getsource(self.ponte.main)
+        self.assertIn("lettura dei job fallita", corpo)
+        self.assertNotIn("raise", corpo.split("while True")[1][:1200],
+                         "nel ciclo non si solleva: si logga e si riprova")
 
 
 if __name__ == "__main__":
