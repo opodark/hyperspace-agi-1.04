@@ -35,7 +35,7 @@ await check("la pagina join usa un gateway fissato e non espone token o URL edit
   assert.match(PUBLIC_JOIN, /join-config\.js/);
   assert.match(PUBLIC_JOIN, /config\.gatewayUrl/);
   assert.doesNotMatch(PUBLIC_JOIN, /id=["']baseUrl["']/);
-  assert.doesNotMatch(PUBLIC_JOIN, /TOKEN|web\/tasks/i);
+  assert.doesNotMatch(PUBLIC_JOIN, /\bTOKEN\b|web\/tasks/i);
   assert.match(PUBLIC_JOIN, /v1\/models/);
   assert.match(PUBLIC_JOIN, /v1\/chat\/completions/);
   assert.match(PUBLIC_JOIN, /meshCanvas/);

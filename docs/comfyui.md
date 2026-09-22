@@ -14,6 +14,15 @@ insieme**. Qwen-Image 2.1 in GGUF Q5_K con il suo text encoder da 8B prende quas
 tutta la memoria: la prova fatta in casa gira a 768×768, 25 passi, ed è già al
 limite.
 
+I pesi sono i GGUF **non censurati** (`-UC`) di
+[`abenzerps/Qwen-Image-2.1-Uncensored-GGUF`](https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF)
+— stessi pesi base di Qwen-Image 2.1 senza safety checker, quindi l'immagine
+dipende solo dal prompt — e si installano con
+`.\integrations\comfyui\install-model.ps1`: il manifest (`integrations/comfyui/modelli.json`)
+dice revisione, impronta SHA-256 e destinazione di ogni file, e il file prende il
+nome vero solo quando l'impronta torna. Il *perché* sta in
+[`integrations/comfyui/README.md`](../integrations/comfyui/README.md).
+
 Non è un'ipotesi: il 2026-09-22, generando il ritratto di Aurora (`docs/social.md`),
 ComfyUI è morto con `torch.AcceleratorError: CUDA error: unknown error` nel
 KSampler. I numeri di `nvidia-smi`: 8151 MiB totali, **6170 occupati da Ollama**
@@ -101,6 +110,15 @@ il default di `/image/generate` è esattamente quello.
   chiederlo: l'**operatore** (`CHANNEL_OPERATOR` nel `.env`); senza quella variabile
   il comando è aperto a chiunque sia in chat — una scelta, non un caso, ma da fare
   sapendo che la scheda è una sola.
+- **«Mandami una foto di X», a parole**: la stessa cosa senza sintassi. Il
+  riconoscitore è `richiesta_immagine` in `shared/image_jobs.py`: tre regole con
+  un nome (`mandare`, `potere-infinito`, `volere`) che finisce nei log
+  (`via=…`), e tutto il resto è silenzio — un falso positivo non è un fastidio,
+  è un quarto d'ora di scheda occupata. Qui la guardia è **più severa** che per
+  il comando: vale solo per l'operatore, e **senza `CHANNEL_OPERATOR` la strada
+  resta chiusa** (fail-closed), perché una frase male interpretata non si vede
+  mentre un comando scritto male sì. La risposta non dice mai che la foto è
+  arrivata: dice che è in coda e che arriva — l'immagine la consegna il driver.
 - **La consegna**: `GET /channel/outbox` (il driver tira le immagini pronte) +
   `POST /channel/outbox/ack`. Il file lo ha il driver, la destinazione l'ha decisa
   chi ha chiesto: si incontrano nell'outbox, e il driver manda la foto con
@@ -154,14 +172,54 @@ indovina mai l'intenzione di un client.
 
 ## Verifica (come si sa che funziona)
 
-1. `install.ps1 -Check` → trova `custom_nodes`, dice se è installato e allineato.
-2. L'import dal **python di ComfyUI** (l'interprete vero, con torch): se
+1. `install-model.ps1 -Check` → i pesi ci sono e l'impronta torna? Il lettore GGUF
+   conosce `qwen_image21`? (Non scarica niente: dice cosa farebbe.)
+2. `install.ps1 -Check` → trova `custom_nodes`, dice se è installato e allineato.
+3. L'import dal **python di ComfyUI** (l'interprete vero, con torch): se
    `import hyperspace_nodes` riesce, l'app caricherà i nodi.
-3. Il nodo in un grafo, con `report` collegato: dice quale modello ha scritto il
+4. Il nodo in un grafo, con `report` collegato: dice quale modello ha scritto il
    prompt e da quanti caratteri.
-4. Il controllo che non mente: nei log del control-plane deve comparire **una**
+5. Il controllo che non mente: nei log del control-plane deve comparire **una**
    riga di decisione per l'esecuzione —
    `CP decision: model=… tools=0 think=False` — non due.
+
+## Cosa filtra, e cosa no
+
+Una riga detta male qui diventa un'aspettativa sbagliata, quindi va detta bene:
+**nella catena HyperSpace non c'è nessun filtro di contenuto**, e l'unico punto in
+cui un rifiuto può nascere è il modello di linguaggio — solo quando è *lui* a
+scrivere il prompt.
+
+| Passaggio | Filtra? | Dove si legge |
+|---|---|---|
+| `POST /image/generate` | **No**: il prompt entra nel job verbatim | `control-plane/main.py` (`image_generate`) |
+| `!immagine <idea>` in chat | **No**: l'idea va al job come è stata scritta | `control-plane/main.py` (`_channel_immagine`) |
+| Richiesta **a parole** («mandami una foto di X») | **No**: stessa cosa, con regole dichiarate e nessuna riscrittura | `shared/image_jobs.py` (`richiesta_immagine`) |
+| La coda | Solo forma e tetti: ≤2000 caratteri, lati ≤1536, passi ≤60 | `shared/image_jobs.py` |
+| Il ponte | Niente: non sceglie il prompt e non giudica l'immagine | `integrations/comfyui/comfy_bridge.py` |
+| ComfyUI e i pesi | Nessun safety checker: è la variante **`-UC`** | `integrations/comfyui/modelli.json` |
+| La moderazione del canale | **Non è un filtro di contenuto**: classifica lo spam in arrivo e conta strike | `shared/channel.py` |
+
+Due conseguenze da tenere presenti:
+
+- **Se il prompt lo scrive l'agente** (nodo `HyperSpacePrompt`, o in futuro il tool
+  `image_generate`), il fattore limitante è il **modello di chat** configurato
+  (`CHANNEL_MODEL`, oggi `qwen3.5:4b`): è lui che può rifiutare o edulcorare. Il
+  contesto di superficie `comfyui` (`shared/persona.py`) impone solo il **formato**
+  — soltanto il prompt, nessun preambolo — non il contenuto. Con `POST
+  /image/generate` e `!immagine` quel modello non entra in gioco.
+- **La consegna resta fuori dal repository.** Il driver manda il FILE via Bot API:
+  nessuna riga di codice lo impedisce, ma valgono le regole della piattaforma
+  (Telegram, Discord) sui contenuti adulti. HyperSpace non decide lì, e non lo
+  nasconde: lo dichiara qui.
+
+Chi può chiedere un'immagine è invece una decisione di **risorsa**, non di morale:
+la scheda è una sola e un'immagine costa 313-700 s, quindi `CHANNEL_OPERATOR`
+limita il comando all'operatore — e **senza quella variabile il comando è aperto a
+chiunque sia in chat** (vedi Fase 3). Il comportamento è fissato da
+`tests/test_channel_immagine.py`, che verifica anche che l'idea arrivi *verbatim*
+fino al nodo che condiziona CLIP: un filtro aggiunto domani farebbe fallire un
+test, non cambierebbe il risultato in silenzio.
 
 ## Limiti noti
 

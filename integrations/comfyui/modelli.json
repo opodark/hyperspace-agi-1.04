@@ -1,0 +1,47 @@
+{
+  "$commento": [
+    "Manifest dei pesi del modello d'immagine: una sola fonte per il download",
+    "(install-model.ps1) e per il grafo del control-plane (shared/image_jobs.py).",
+    "Le impronte vengono da SHA256SUMS del repository upstream, verificato il",
+    "2026-09-22 contro l'oggetto LFS di ogni file; 'tests/test_comfyui_modelli.py'",
+    "tiene allineati manifest e workflow, cosi' un file rinominato da un lato solo",
+    "fa fallire un test invece di far fallire un job in silenzio.",
+    "La revisione e' un commit, non 'main': quello che si scarica oggi e' quello che",
+    "si scarichera' domani, e le impronte restano valide."
+  ],
+  "repo": "abenzerps/Qwen-Image-2.1-Uncensored-GGUF",
+  "revisione": "1206d38bb47ef93961bfb77bc2c700d43a25860e",
+  "modello_base": "Qwen/Qwen-Image-2.1",
+  "licenza": "Qwen Research License (license_name: qwen-research)",
+  "nota_licenza": "I pesi NON sono distribuiti con HyperSpace: ognuno ha la licenza del proprio autore e si scarica a parte (THIRD-PARTY-NOTICES.md). La variante '-UC' e' la conversione GGUF dei pesi base senza safety checker: l'uscita dipende solo dal prompt.",
+  "unet": {
+    "$commento": "Il GGUF del diffusion. 'destinazione' e' la cartella che ComfyUI aggiunge come search path per 'diffusion_models' (UnetLoaderGGUF legge da li').",
+    "destinazione": "diffusion_models",
+    "quant_default": "Q5_K_M",
+    "varianti": {
+      "Q4_0": { "file": "qwen-image-2.1-UC-Q4_0.gguf", "sha256": "13f59f20656efc0aa385d03c1fcac1a9dc2ad6e5ccc0ea9bfe1d6ac636f2c5b9", "byte": 4151573280 },
+      "Q4_K_M": { "file": "qwen-image-2.1-UC-Q4_K_M.gguf", "sha256": "e79c8a009f2ecbdb6c70fd663d9aea9ee304a0d91f347e4169a756b8ad141b41", "byte": 4604558112 },
+      "Q5_K_M": { "file": "qwen-image-2.1-UC-Q5_K_M.gguf", "sha256": "af0bf278cf16d204fb31c384dc82fd41dca82d976b15fe9305a60c726fd6f821", "byte": 5221284640 },
+      "Q6_K": { "file": "qwen-image-2.1-UC-Q6_K.gguf", "sha256": "e14bb312109333b3d73b92ad9b9ac8b29b51f2edca1e7b86d1af1981bf1c4ee3", "byte": 5876556576 },
+      "Q8_0": { "file": "qwen-image-2.1-UC-Q8_0.gguf", "sha256": "cde456c72ea3ecebfc1be783300e972711d875e0c5f1bed33d42b66b156affa8", "byte": 7591557920 },
+      "BF16": { "file": "qwen-image-2.1-UC-BF16.gguf", "sha256": "f151c683a8aed4b310777017ebbbe3f2180f1180f7867115171adb7d50b0762a", "byte": 14230272800 }
+    }
+  },
+  "accompagnatori": [
+    {
+      "$commento": "Text encoder 8B in int8: sta in RAM (device: cpu nel grafo), ~9.35 GB. La variante bf16 esiste (17.53 GB) ma su questo nodo non entra in memoria.",
+      "ruolo": "clip",
+      "file": "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+      "destinazione": "text_encoders",
+      "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f",
+      "byte": 9350798360
+    },
+    {
+      "ruolo": "vae",
+      "file": "vae/qwen_image_2.1_vae_bf16.safetensors",
+      "destinazione": "vae",
+      "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+      "byte": 675509688
+    }
+  ]
+}

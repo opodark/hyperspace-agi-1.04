@@ -86,7 +86,7 @@ from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
-from shared.image_jobs import ImmagineQueue, nuovo_job
+from shared.image_jobs import ImmagineQueue, nuovo_job, richiesta_immagine
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
 import routing as _routing
@@ -1122,22 +1122,42 @@ COMANDI_IMMAGINE = ("!immagine", "!immagine:", "!foto", "!image", "!imagine")
 
 
 def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str | None:
-    """`!immagine <idea>`: mette in coda un job e risponde SUBITO.
+    """Un'immagine chiesta dalla stanza: `!immagine <idea>` oppure **a parole**.
 
-    Chi può chiederla: l'operatore, quando `CHANNEL_OPERATOR` è configurato. La
-    coda sulla GPU di casa è una e non si parallelizza: senza questo freno
-    chiunque passi in chat potrebbe occuparla per un quarto d'ora.
+    Due strade con due guardie diverse, e la differenza è voluta:
+
+    - `!immagine` è sintassi esplicita: chi sbaglia il comando se ne accorge. Con
+      `CHANNEL_OPERATOR` configurato filtra chi chiede; senza quella variabile
+      resta aperto a chiunque sia in chat (scelta dichiarata in docs/comfyui.md).
+    - la richiesta **a parole** ("mandami una foto di X") la riconosce
+      `shared/image_jobs.richiesta_immagine`, con regole dichiarate e nominabili
+      (il nome finisce nei log). Qui si è più severi, e si deve: una frase male
+      interpretata costa 5-12 minuti di scheda. Vale SOLO per l'operatore
+      configurato, e senza `CHANNEL_OPERATOR` la strada resta chiusa
+      (fail-closed): in quel caso la frase non è un comando, torna None e la
+      stanza risponde normalmente con le sue parole.
+
+    La risposta non promette mai un'immagine già mandata: dice che è in coda e che
+    arriva. L'immagine la consegna il driver, e solo dopo è vera.
     """
     ultimo = str((context[-1] if context else {}).get("text", "")).strip()
+    autore = str((context[-1] if context else {}).get("author", "")).strip().lower()
     pezzi = ultimo.split(" ", 1)
     comando = pezzi[0].lower().rstrip(":") if pezzi else ""
-    if f"!{comando.lstrip('!')}" not in COMANDI_IMMAGINE:
+    regola = ""
+    if f"!{comando.lstrip('!')}" in COMANDI_IMMAGINE:
+        if CHANNEL_OPERATOR and autore not in CHANNEL_OPERATOR:
+            return ("Le immagini le chiede chi mi ha costruita: non posso mettere in coda "
+                    "una richiesta di chiunque, la scheda è una sola.")
+        idea = pezzi[1].strip() if len(pezzi) > 1 else ""
+    elif CHANNEL_OPERATOR and autore in CHANNEL_OPERATOR:
+        richiesta = richiesta_immagine(ultimo)
+        if richiesta is None:
+            return None          # non è una richiesta d'immagine: parla la stanza
+        idea = richiesta["idea"]
+        regola = richiesta["regola"]
+    else:
         return None
-    autore = str((context[-1] if context else {}).get("author", "")).strip().lower()
-    if CHANNEL_OPERATOR and autore not in CHANNEL_OPERATOR:
-        return ("Le immagini le chiede chi mi ha costruita: non posso mettere in coda "
-                "una richiesta di chiunque, la scheda è una sola.")
-    idea = pezzi[1].strip() if len(pezzi) > 1 else ""
     if not idea:
         return "Dimmi cosa disegnare, così: `!immagine una torre al tramonto`."
     try:
@@ -1148,7 +1168,8 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
     except RuntimeError as e:
         return f"Non posso adesso: {e}."
     push_log('channel', f"{channel}: richiesta immagine",
-             detail=f"id={accodato['id']} da={autore or '?'} idea={idea[:60]}",
+             detail=f"id={accodato['id']} da={autore or '?'} "
+                    f"via={regola or 'comando'} idea={idea[:60]}",
              source=f"channel:{channel}", status='info')
     if not destinazione:
         return ("L'ho messa in coda, ma non so dove mandartela: chiedila dalla chat "
@@ -3069,11 +3090,13 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
                    node_id: str = "", builtin_tools=None) -> dict:
     messages       = list(data.get("messages", []))
     model          = data.get("model", DEFAULT_MODEL)
-    supports_tools = _model_supports_tools(model)
+    tools_disabled = bool(data.get("_hyperspace_tools_off"))
+    backend_data   = {k: v for k, v in data.items() if k != "_hyperspace_tools_off"}
+    supports_tools = _model_supports_tools(model) and not tools_disabled
     push_log('system', f'tool_loop: model={model} tools={supports_tools} signed={sign}', status='info')
 
     if not supports_tools:
-        payload = {**data, "messages": messages, "stream": False}
+        payload = {**backend_data, "messages": messages, "stream": False}
         payload.pop("tools", None)
         try:
             return _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
@@ -3090,7 +3113,7 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
 
     def _retry_without_tools(reason):
         push_log('system', f'tool_loop fallback no-tools: {str(reason)[:120]}', status='warn')
-        plain = {**data, "messages": messages, "stream": False}
+        plain = {**backend_data, "messages": messages, "stream": False}
         plain.pop("tools", None)
         try:
             return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
@@ -3100,7 +3123,7 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
             return {"error": {"message": str(e2), "type": "server_error"}}
 
     for iteration in range(max_iterations):
-        payload = {**data, "messages": messages, "tools": all_tools, "stream": False}
+        payload = {**backend_data, "messages": messages, "tools": all_tools, "stream": False}
         try:
             resp = _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
         except NodeBusyError:
@@ -3473,6 +3496,7 @@ def v1_chat_completions():
     tools_available = []
     client_had_tools = bool(data.get("tools"))
     tools_off = _tools_requested_off(request.headers.get("X-Hyperspace-Tools", ""))
+    data["_hyperspace_tools_off"] = tools_off
     if _model_supports_tools(model):
         client_tools = data.get("tools") or []
         client_names = {t.get("function", {}).get("name") for t in client_tools}
@@ -5789,6 +5813,12 @@ def _apply_env_runtime(meta: dict, cv) -> None:
     """Applica la modifica SUBITO al runtime (globals del processo) e ad
     os.environ. Il file .env viene scritto separatamente da _persist_env."""
     global OLLAMA_URL, DEFAULT_MODEL, INFERENCE_BACKEND
+    # Il modello della stanza vive in un globale letto da `_channel_model()`:
+    # senza questa riga un salvataggio dalla tab Setup finiva nel .env e in
+    # os.environ ma la stanza continuava a usare il modello vecchio fino al
+    # riavvio — l'esatto "salvato ma inerte" che questa funzione esiste per
+    # evitare (trovato il 2026-09-22 proprio cambiando CHANNEL_MODEL).
+    global CHANNEL_MODEL
     global MEMORY_TTL_DAYS, MEMORY_MAX_ENTRIES, SEARXNG_URL
     global ROUTING_MAX_CANDIDATES
     global METRICS_POLL_INTERVAL_S, METRICS_POLL_TIMEOUT_S, METRICS_WINDOW
@@ -5809,6 +5839,9 @@ def _apply_env_runtime(meta: dict, cv) -> None:
     elif key == "OLLAMA_MODEL":
         DEFAULT_MODEL = str(cv)
         advanced_config["ollama"]["defaultModel"] = DEFAULT_MODEL
+    elif key == "CHANNEL_MODEL":
+        # Vuoto = modello di default del control-plane (vedi `_channel_model`).
+        CHANNEL_MODEL = str(cv).strip()
     elif key == "INFERENCE_BACKEND":
         INFERENCE_BACKEND = str(cv)
     elif key == "MEMORY_TTL_DAYS":

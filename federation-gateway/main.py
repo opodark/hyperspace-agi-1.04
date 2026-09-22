@@ -33,6 +33,7 @@
 # verify_client_ip, usata solo dal CP: stessa primitiva, stessa disciplina
 # del resto del progetto — il gateway sa solo firmare, mai validare.
 
+import json
 import os
 import threading
 import time
@@ -43,8 +44,10 @@ import requests
 from shared.network_security import sign_client_ip
 
 app = Flask(__name__)
+app.logger.setLevel("INFO")
 
 CP_URL = os.getenv("CP_URL", "http://control-plane:8085").rstrip("/")
+CHAT_UPSTREAM_TIMEOUT_S = max(130, int(os.getenv("GATEWAY_CHAT_TIMEOUT_S", "600")))
 
 # Whitelist esplicita (metodo, path). Aggiungere qui SOLO endpoint pensati
 # per essere pubblici by design — non aggiungere mai /config/*, /task/*,
@@ -183,6 +186,82 @@ def proxy(path):
         forward_headers["X-Hs-Client-Ts"] = ts
         forward_headers["X-Hs-Client-Sig"] = sign_client_ip(secret, ip, ts)
 
+    # Il CP puo' restare in attesa del nodo per oltre un minuto prima di inviare
+    # gli header. Funnel e alcuni browser interpretano quel silenzio come una
+    # connessione morta. Apriamo subito uno stream SSE con un keepalive; se il
+    # backend restituisce JSON nativo, lo trasformiamo nello stesso contratto.
+    if full_path == "/v1/chat/completions" and request.method == "POST":
+        origin = request.headers.get("Origin", "*") or "*"
+        method = request.method
+        try:
+            public_payload = request.get_json(force=True) or {}
+        except Exception:
+            public_payload = {}
+        # La pagina pubblica deve avere latenza prevedibile: i tool possono
+        # moltiplicare le inferenze anche per domande semplici. Il CP usa il
+        # percorso nativo non-stream, che rispetta think=false e max_tokens;
+        # qui sotto la risposta JSON viene comunque esposta al browser come SSE.
+        public_payload["stream"] = False
+        public_payload["think"] = False
+        public_payload["max_tokens"] = min(256, max(1, int(public_payload.get("max_tokens", 256))))
+        options = public_payload.get("options") if isinstance(public_payload.get("options"), dict) else {}
+        public_payload["options"] = {**options, "num_ctx": min(4096, max(2048, int(options.get("num_ctx", 4096))))}
+        body = json.dumps(public_payload, ensure_ascii=False).encode("utf-8")
+        forward_headers["Content-Type"] = "application/json"
+        forward_headers["X-Hyperspace-Tools"] = "off"
+        query = request.args.to_dict(flat=False)
+
+        def chat_stream():
+            started = time.monotonic()
+            yield b": gateway connected\n\n"
+            try:
+                upstream = requests.request(
+                    method=method,
+                    url=f"{CP_URL}{full_path}",
+                    headers=forward_headers,
+                    data=body,
+                    params=query,
+                    timeout=(10, CHAT_UPSTREAM_TIMEOUT_S),
+                    stream=True,
+                )
+                first_byte_s = time.monotonic() - started
+                app.logger.info("public chat upstream headers status=%s first_byte_s=%.2f",
+                                upstream.status_code, first_byte_s)
+                content_type = upstream.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    payload = upstream.json()
+                    if not upstream.ok or payload.get("error"):
+                        error = payload.get("error") or f"HTTP {upstream.status_code}"
+                        if isinstance(error, dict):
+                            error = error.get("message") or str(error)
+                        yield f"data: {json.dumps({'error': str(error)})}\n\n".encode()
+                        return
+                    choice = ((payload.get("choices") or [{}])[0])
+                    message = choice.get("message") or {}
+                    content = message.get("content", "")
+                    event = {"choices": [{"delta": {"role": "assistant", "content": content},
+                                           "finish_reason": choice.get("finish_reason")} ]}
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+                    app.logger.info("public chat complete format=json total_s=%.2f",
+                                    time.monotonic() - started)
+                    return
+                for chunk in upstream.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+                app.logger.info("public chat complete format=sse total_s=%.2f",
+                                time.monotonic() - started)
+            except Exception as error:
+                app.logger.warning("public chat failed after %.2fs: %s",
+                                   time.monotonic() - started, error)
+                yield f"data: {json.dumps({'error': str(error)})}\n\n".encode()
+
+        return Response(
+            chat_stream(),
+            headers={"Access-Control-Allow-Origin": origin, "Vary": "Origin"},
+            content_type="text/event-stream",
+        )
+
     try:
         upstream = requests.request(
             method=request.method,
@@ -191,7 +270,6 @@ def proxy(path):
             data=request.get_data(),
             params=request.args,
             timeout=130,
-            stream=(full_path == "/v1/chat/completions"),
         )
     except Exception as e:
         return {"error": f"control-plane non raggiungibile: {e}"}, 502
@@ -200,10 +278,8 @@ def proxy(path):
         (k, v) for k, v in upstream.headers.items()
         if k.lower() not in _EXCLUDED_RESPONSE_HEADERS
     ]
-    body = (upstream.iter_content(chunk_size=8192)
-            if full_path == "/v1/chat/completions" else upstream.content)
     return Response(
-        body,
+        upstream.content,
         status=upstream.status_code,
         headers=headers,
         content_type=upstream.headers.get("Content-Type", "application/json"),

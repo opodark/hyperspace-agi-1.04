@@ -27,6 +27,52 @@ con `Remove-Item -Recurse -Force` il rischio è cancellare il sorgente.
 
 Se hai più installazioni di ComfyUI: `-CustomNodes <percorso\custom_nodes>`.
 
+## I pesi (il modello d'immagine)
+
+I nodi HyperSpace scrivono il prompt; **il modello d'immagine** sono i pesi di
+Qwen-Image 2.1, e si installano con lo script che li verifica:
+
+```powershell
+.\integrations\comfyui\install-model.ps1 -Check     # cosa farebbe: non scarica nulla
+.\integrations\comfyui\install-model.ps1            # ~14 GB, una volta sola
+```
+
+Sono i GGUF **non censurati** (variante `-UC`) di
+[`abenzerps/Qwen-Image-2.1-Uncensored-GGUF`](https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF):
+gli stessi pesi base di Qwen-Image 2.1, senza safety checker, quindi l'immagine
+dipende solo dal prompt. Il quadro completo di **cosa filtra la catena e cosa no**
+(nessun anello filtra: l'unico punto dove può nascere un rifiuto è il modello che
+scrive il prompt) è in [`docs/comfyui.md`](../../docs/comfyui.md#cosa-filtra-e-cosa-no).
+`modelli.json`, in questo componente, è il manifest
+(revisione, file, impronte SHA-256, licenza) e dice dove va ogni file:
+
+| Ruolo | File | Destinazione in `models\` | Peso |
+|---|---|---|---|
+| diffusion (GGUF) | `qwen-image-2.1-UC-Q5_K_M.gguf` | `diffusion_models\` | 4,86 GB |
+| text encoder | `qwen3vl_8b_int8_convrot.safetensors` | `text_encoders\` | 8,71 GB |
+| VAE | `qwen_image_2.1_vae_bf16.safetensors` | `vae\` | 0,63 GB |
+
+`-Quant Q4_K_M` (4,29 GB) o `-Quant Q4_0` (3,87 GB) scaricano una quantizzazione
+più piccola: è la scelta di `docs/comfyui.md` — con 8 GB di VRAM devono starci
+insieme il diffusion in scheda e il text encoder in RAM.
+
+Tre cose non ovvie, e il perché:
+
+- **Il file prende il nome vero solo a impronta verificata.** Prima resta
+  `<nome>.parziale`, che ComfyUI non vede: un GGUF troncato non dà un errore, dà
+  un'immagine rumorosa o un OOM a metà campionamento. Un download interrotto si
+  riprende rilanciando lo script (`curl -C -`), non ricomincia da zero.
+- **Il lettore GGUF si controlla prima di scaricare.** Serve il fork
+  [leejet/ComfyUI-GGUF](https://github.com/leejet/ComfyUI-GGUF): il vecchio
+  city96 non conosce l'architettura `qwen_image21` e il grafo fallirebbe con
+  `Unknown model architecture!` *dopo* i 14 GB.
+- **La cartella dei pesi si rileva, non si indovina**: si legge da
+  `settings.json` di ComfyUI Desktop (`modelsDirs`). Con più installazioni si
+  passa `-Modelli <percorso\models>`; se lo script non la trova, lo dice.
+
+ComfyUI legge l'elenco dei file **all'avvio**: dopo l'installazione va riavviato
+(o aggiornato), altrimenti il nome nuovo non compare fra le sue scelte.
+
 ## I due nodi
 
 | Nodo | Ingressi | Uscite | A cosa serve |
@@ -81,13 +127,21 @@ python -m pytest tests\test_comfyui_client.py -q # la logica del client
   torch e senza server acceso.
 - `nodes.py` — i nodi: adattatori sottili, nessun `import torch`.
 - `install.ps1` — la junction (crea, verifica, rimuove).
+- `modelli.json` — il manifest dei pesi: revisione, impronte SHA-256, licenza,
+  destinazione di ogni file. Lo leggono `install-model.ps1` e i test.
+- `install-model.ps1` — scarica e **verifica** i pesi (riprende un download
+  interrotto, non installa un file la cui impronta non torna).
+- `tests/test_comfyui_modelli.py` (nel repo) — tiene il manifest e il grafo di
+  `shared/image_jobs.py` allineati: un file rinominato da un lato solo fa fallire
+  un test, non un job dopo tredici minuti di sampling.
 
 ## Il ponte (Fase 2): il control-plane chiede un'immagine, e ComfyUI la fa
 
 `comfy_bridge.py` tira i job dal control-plane (ComfyUI ascolta su `127.0.0.1` e
 il CP è in un container: **non può chiamarlo**) ed esegue il grafo che ha
-funzionato su questa macchina — Qwen-Image 2.1 GGUF con il text encoder da 8B
-**sulla CPU**, che è ciò che lascia VRAM al diffusion.
+funzionato su questa macchina — Qwen-Image 2.1 GGUF (variante `-UC`, non
+censurata) con il text encoder da 8B **sulla CPU**, che è ciò che lascia VRAM al
+diffusion. I pesi si installano con `install-model.ps1` (sezione precedente).
 
 ```powershell
 python scripts\channel_token.py comfy --write     # una volta: crea il canale del ponte
