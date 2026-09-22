@@ -21,11 +21,11 @@ Da qui la divisione del lavoro, che è anche la tesi del progetto:
 | **Il testo** (scrivere il prompt, capire l'idea) | sulla **rete** HyperSpace | la scheda resta libera per il diffusion; il linguaggio è un lavoro piccolo e parallelizzabile |
 | **L'immagine** (i passi di sampling) | **locale**, in ComfyUI | è la parte che vuole GPU, banda di memoria e il modello grande |
 
-## Le due direzioni, e quale c'è
+## Le due direzioni
 
 ```
-   Fase 1 (fatta)                     Fase 2 (da fare)
-ComfyUI ──/v1/chat/completions──> CP      CP ──?──> ComfyUI
+   Fase 1 (fatta)                     Fase 2 (fatta: il ponte)
+ComfyUI ──/v1/chat/completions──> CP      CP ──/image/jobs──> ponte ──> ComfyUI
    "scrivimi il prompt"                    "genera questa immagine"
 ```
 
@@ -35,20 +35,42 @@ ComfyUI ──/v1/chat/completions──> CP      CP ──?──> ComfyUI
   `CLIPTextEncode`. La richiesta entra dal percorso OpenAI-compatibile del CP.
 - `HyperSpaceMesh`: stato della rete (`vivo`, nodi, ricordi) da `/health`.
 
-**Fase 2 — il control-plane chiede un'immagine.** Non è simmetrica, e il motivo è
-tecnico: ComfyUI ascolta su `127.0.0.1:8188` e il control-plane è in un
-container, quindi **non può chiamarlo**. Le due strade:
+**Fase 2 — il control-plane chiede un'immagine, e il ponte la esegue.** Non è
+simmetrica, e il motivo è tecnico: ComfyUI ascolta su `127.0.0.1:8188` e il
+control-plane è in un container, quindi **non può chiamarlo**. La soluzione è un
+ponte che **tira** il lavoro, come i driver di canale:
 
-1. esporre ComfyUI sulla rete (aprire una porta, e la logica di autorizzazione
-   diventa un problema nuovo);
-2. **un bridge che tira** (`comfy_bridge.py` sul host, come i driver di canale):
-   interroga il CP per i job immagine, esegue il workflow via API di ComfyUI,
-   pubblica l'esito. Nessuna porta in ingresso, stesso token di canale, stessa
-   disciplina di `docs/channel.md`.
+| Endpoint (token di canale) | Chi | Cosa |
+|---|---|---|
+| `POST /image/generate` | chiunque abbia un token | mette in coda un job e torna subito |
+| `GET /image/jobs` | il ponte | ritira il prossimo job (`204` = niente da fare) |
+| `POST /image/result` | il ponte | riferisce esito, file, durata |
+| `GET /image/status` | l'operatore | coda e ultimi job: "dov'è finita la mia immagine?" |
 
-Il repo ha già scelto questa forma tre volte (`web_node`, i canali, il web node
-del browser): **il client tira, il control-plane decide**. La Fase 2 seguirà
-quella, non l'apertura di una porta.
+Il ponte è `integrations/comfyui/comfy_bridge.py` e si autentica con un canale
+`comfy` in `CHANNEL_CLIENTS` (`python scripts/channel_token.py comfy --write`):
+una superficie esterna come le altre, non un'eccezione alla regola.
+
+```powershell
+python integrations\comfyui\comfy_bridge.py --check   # non genera nulla
+python integrations\comfyui\comfy_bridge.py --once    # un job ed esce
+python integrations\comfyui\comfy_bridge.py           # in attesa, in ciclo
+```
+
+**Costo misurato** su questa macchina (RTX 5060 Laptop, Qwen-Image 2.1 Q5_K,
+text encoder su CPU): **1024×1024, 30 passi → 11 minuti e 50 s** (710 s). Un
+job da 768×768/25 passi è la misura ragionevole per una risposta conversazionale;
+il default di `/image/generate` è esattamente quello.
+
+### Fase 3 — da fare
+
+- un tool `image_generate` per Aurora, così la richiesta nasce dalla conversazione
+  ("fammi un'immagine di…") e non da uno script;
+- la consegna dell'immagine nel canale (il driver Telegram la pubblica: è lui che
+  ha il file, non il control-plane);
+- il prompt scritto con la **memoria della stanza**: i canali hanno già un
+  contesto, e l'immagine può nascere da quella conversazione.
+
 
 ## Il contratto con il control-plane
 

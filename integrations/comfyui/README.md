@@ -81,3 +81,36 @@ python -m pytest tests\test_comfyui_client.py -q # la logica del client
   torch e senza server acceso.
 - `nodes.py` — i nodi: adattatori sottili, nessun `import torch`.
 - `install.ps1` — la junction (crea, verifica, rimuove).
+
+## Il ponte (Fase 2): il control-plane chiede un'immagine, e ComfyUI la fa
+
+`comfy_bridge.py` tira i job dal control-plane (ComfyUI ascolta su `127.0.0.1` e
+il CP è in un container: **non può chiamarlo**) ed esegue il grafo che ha
+funzionato su questa macchina — Qwen-Image 2.1 GGUF con il text encoder da 8B
+**sulla CPU**, che è ciò che lascia VRAM al diffusion.
+
+```powershell
+python scripts\channel_token.py comfy --write     # una volta: crea il canale del ponte
+$env:CHANNEL_TOKEN = "<token comfy>"
+
+python integrations\comfyui\comfy_bridge.py --check   # ComfyUI, i pesi e il CP
+python integrations\comfyui\comfy_bridge.py --once    # un job, poi esce
+python integrations\comfyui\comfy_bridge.py           # in attesa, in ciclo
+```
+
+Chi chiede un'immagine mette un job in coda e va avanti — non aspetta il disegno:
+
+```powershell
+# mette in coda (torna subito con l'id del job)
+Invoke-RestMethod -Uri http://127.0.0.1:8085/image/generate -Method Post `
+  -Headers @{"X-Hyperspace-Channel-Token"=$env:CHANNEL_TOKEN} `
+  -ContentType application/json -Body '{"prompt":"un faro nella tempesta, lunga esposizione"}'
+
+# dov'è finita? coda e ultimi job
+Invoke-RestMethod -Uri http://127.0.0.1:8085/image/status `
+  -Headers @{"X-Hyperspace-Channel-Token"=$env:CHANNEL_TOKEN}
+```
+
+**Costo misurato**: 1024×1024, 30 passi = **11 min 50 s** su questa 5060. Il
+default (768×768, 25 passi) è pensato per una risposta conversazionale.
+
