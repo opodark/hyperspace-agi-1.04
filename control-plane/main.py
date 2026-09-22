@@ -88,6 +88,7 @@ from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, Channe
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import ImmagineQueue, nuovo_job, richiesta_immagine
 from shared.feed import Feed, nuovo_post
+from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
 import routing as _routing
@@ -1933,7 +1934,7 @@ def _sse_headers():
 # sbagliato e non e' piu' filtrabile da /logs?type=. tests/test_log_types.py
 # estrae i tipi usati dalle route e verifica che siano tutti elencati.
 LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
-             "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel",
+             "feed", "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel",
              # Conversazione fra agenti che scrivono codice (docs/code-conversation.md).
              # Il filo e' il trace_id CONDIVISO fra i messaggi: `push_log` ne genera
              # uno nuovo solo quando non gliene passi uno, quindi basta passarlo.
@@ -2869,6 +2870,116 @@ _conversation_log = deque(maxlen=_MAX_CONVERSATION_TURNS)
 # La timeline dei post di Anna e Aurora (shared/feed.py). In memoria per ora:
 # la persistenza su file e la sync cross-macchina arrivano con il loop (Fase 3).
 feed = Feed()
+
+
+# ── LOOP AUTONOMO DELLE INFLUENCER ──────────────────────────────────────────
+# Il "simulatore": a intervalli regolari una delle due (anna/aurora) produce un
+# post e l'altra, al giro dopo, reagisce. Il modello è quello della stanza; il
+# loop è spento di default (POST_LOOP_ENABLED) perché genera contenuti da solo.
+_POST_PERSONA_FILES = {
+    "anna": None,                       # None = il persona_store attivo di questo CP
+    "aurora": "/repo/data/persona-aurora.json",
+}
+_post_persona_blocks: dict = {}
+
+
+def _post_int(nome: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(nome, "") or default))
+    except (ValueError, TypeError):
+        return default
+
+
+def _post_enabled() -> bool:
+    return str(os.getenv("POST_LOOP_ENABLED", "false")).strip().lower() == "true"
+
+
+def _post_persona_block(autore: str) -> str:
+    """Il blocco di identità della persona che posta (cache per autore)."""
+    autore = (autore or "").strip().lower()
+    if autore == "anna":
+        return persona_store.system_block()
+    if autore not in _post_persona_blocks:
+        blocco = ""
+        percorso = _POST_PERSONA_FILES.get(autore)
+        if percorso:
+            try:
+                from shared.persona import PersonaStore
+                blocco = PersonaStore.load(percorso).system_block()
+            except Exception as e:
+                push_log('feed', f'identità {autore} non caricata', str(e),
+                         source='post-loop', status='warn')
+        _post_persona_blocks[autore] = blocco
+    return _post_persona_blocks[autore]
+
+
+def _genera_post(prompt: str) -> str:
+    """UNA chiamata al modello per produrre un post (didascalia + immagine).
+
+    Stesso percorso nativo del sogno: `think=False` esplicito, così il testo
+    utile non finisce nel `reasoning` dei modelli che ragionano.
+    """
+    payload = {"model": _dream_model(),
+               "messages": [{"role": "user", "content": prompt}],
+               "stream": False, "think": False,
+               "max_tokens": _post_int("POST_MAX_TOKENS", 200),
+               "options": {"num_ctx": _channel_num_ctx()}}
+    base = advanced_config["ollama"]["url"].rstrip("/")
+    try:
+        if ollama_native.needs_native_path(payload):
+            risposta = requests.post(f"{base}/api/chat",
+                                     json=ollama_native.to_native_chat(payload),
+                                     timeout=_inference_timeout(payload["model"]))
+            risposta.raise_for_status()
+            risposta = ollama_native.to_openai_chat(risposta.json(), payload["model"])
+        else:
+            risposta = _call_ollama(base, payload, sign=False)
+        return risposta["choices"][0]["message"].get("content", "")
+    except Exception as e:
+        push_log('feed', 'generazione post fallita', str(e), source='post-loop', status='failed')
+        return ""
+
+
+def _run_post_once(turno: int) -> bool:
+    """Un giro del loop: decide chi posta, genera, filtra e scrive nel feed."""
+    mossa = prossima_mossa(feed.list(10), turno=turno)
+    autore = mossa["autore"]
+    sistema = _post_persona_block(autore)
+    if not sistema:
+        push_log('feed', f'{autore}: identità mancante', source='post-loop', status='warn')
+        return False
+    prompt = build_post_prompt(sistema, feed_recente=feed.list(5),
+                               replica_a=mossa["replica_a"])
+    candidato = parse_post(_genera_post(prompt))
+    if candidato is None:
+        push_log('feed', f'{autore}: nessun post', source='post-loop', status='warn')
+        return False
+    ok, motivo = filtra_post(candidato, autore=autore, feed=feed.list(20))
+    if not ok:
+        push_log('feed', f'{autore}: post scartato ({motivo})', source='post-loop', status='warn')
+        return False
+    post = nuovo_post(autore, candidato["caption"],
+                      kind="reaction" if mossa["replica_a"] else "post",
+                      image_prompt=candidato.get("image_prompt", ""),
+                      reply_to=(mossa["replica_a"] or {}).get("id", ""))
+    feed.add(post)
+    push_log('feed', f'{autore}: post pubblicato', detail=candidato["caption"][:120],
+             source='post-loop', status='success')
+    return True
+
+
+def post_loop():
+    """Il loop autonomo delle due influencer, spento finché POST_LOOP_ENABLED."""
+    time.sleep(30)
+    turno = 0
+    while True:
+        try:
+            if _post_enabled():
+                _run_post_once(turno)
+                turno += 1
+        except Exception as error:
+            push_log('feed', 'post loop error', str(error), source='post-loop', status='failed')
+        time.sleep(_post_int("POST_LOOP_INTERVAL_S", 1800))
 
 
 def _record_conversation(channel: str, surface: str, chat: str, context: list,
@@ -5671,6 +5782,18 @@ _ENV_META = [
      "label": "Sogno: modello",
      "hint": "Modello della riflessione notturna. Vuoto = quello dei canali. Di notte nessuno aspetta, quindi qui conviene il modello più grande che hai (misurato: 4B ~15s contro 9B ~21s su 20 messaggi di contesto: in chat il secondo viene scartato, nel sogno no).",
      "default": ""},
+    {"section": "Persona", "key": "POST_LOOP_ENABLED", "type": "bool",
+     "label": "Loop influencer attivo",
+     "hint": "true: a intervalli regolari una delle due persone (anna/aurora) pubblica un post nel feed (/feed) e l'altra, al giro dopo, reagisce. Genera contenuti da solo: spento di default.",
+     "default": "false"},
+    {"section": "Persona", "key": "POST_LOOP_INTERVAL_S", "type": "int",
+     "label": "Loop influencer: intervallo (s)",
+     "hint": "Secondi fra due post del loop. 1800 = uno ogni mezz'ora.",
+     "default": "1800"},
+    {"section": "Persona", "key": "POST_MAX_TOKENS", "type": "int",
+     "label": "Loop influencer: token massimi",
+     "hint": "Tetto della risposta del modello per un post (didascalia + eventuale prompt immagine).",
+     "default": "200"},
 
     # ── Canali esterni: chat/privati di una piattaforma che il CP non raggiunge
     # Il driver del canale tira le decisioni da /channel/* e pubblica l'esito.
@@ -7354,6 +7477,7 @@ if __name__ == '__main__':
     threading.Thread(target=metrics_loop, daemon=True).start()
     threading.Thread(target=development_dream_loop, daemon=True).start()
     threading.Thread(target=persona_dream_loop, daemon=True).start()
+    threading.Thread(target=post_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=8085, debug=False, threaded=True)
 else:
     _load_nodes_from_db()
@@ -7366,3 +7490,4 @@ else:
     threading.Thread(target=metrics_loop, daemon=True).start()
     threading.Thread(target=development_dream_loop, daemon=True).start()
     threading.Thread(target=persona_dream_loop, daemon=True).start()
+    threading.Thread(target=post_loop, daemon=True).start()
