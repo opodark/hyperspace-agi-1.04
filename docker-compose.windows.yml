@@ -116,6 +116,13 @@ services:
       MEMORY_TTL_DAYS: "${MEMORY_TTL_DAYS:-7}"
       MEMORY_MAX_ENTRIES: "${MEMORY_MAX_ENTRIES:-200}"
       MEMORY_BACKEND: "${MEMORY_BACKEND:-hermes}"
+      # Memoria locale-prima (shared/memory_sync.py): mirror sempre scritto, coda
+      # delle voci che Hermes non ha ancora accettato, lettura degradata dal mirror.
+      MEMORY_MIRROR: "${MEMORY_MIRROR:-true}"
+      MEMORY_OUTBOX: "${MEMORY_OUTBOX:-true}"
+      MEMORY_READ_FALLBACK: "${MEMORY_READ_FALLBACK:-local}"
+      MEMORY_OUTBOX_FILE: "${MEMORY_OUTBOX_FILE:-}"
+      MEMORY_SYNC_FLUSH_S: "${MEMORY_SYNC_FLUSH_S:-60}"
       HERMES_MEMORY_URL: "${HERMES_MEMORY_URL:-http://host.docker.internal:8098}"
       HERMES_MEMORY_TOKEN: "${HERMES_MEMORY_TOKEN:-}"
       HERMES_MEMORY_TOKEN_FILE: "${HERMES_MEMORY_TOKEN_FILE:-/app/data/hermes-memory.token}"

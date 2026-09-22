@@ -195,10 +195,15 @@ già progettata.
 5. Verifica: `/memory/stats` sulle **due** macchine deve rispondere con lo stesso
    `backend: hermes` e lo stesso numero di `entries`.
 
-**Il costo, da decidere**: con un solo Hermes, se la sua macchina è spenta il CP
-del Mac risponde 503 sulle rotte di memoria — oggi il Mac non dipende da nessuno.
-È il prezzo di "una sola source of truth"; l'alternativa sono due store separati,
-cioè il problema di partenza.
+**Il costo, e cosa è cambiato (2026-09-22)**: con un solo Hermes, se la sua
+macchina è spenta il CP del Mac **non perde più niente**: le scritture vanno nel
+mirror locale e in una coda (`shared/memory_sync.py`), le letture degradano sul
+mirror (dichiarandolo), e quando il peer torna la coda viene riconsegnata a Hermes
+— idempotente, quindi nessun doppione. Resta una differenza da conoscere: la
+**ricerca semantica** richiede Hermes, quindi a peer spento si cerca nel testo
+locale (`degraded: true`), e la memoria riconsegnata arriva con l'ordine della
+coda, non in tempo reale. Vedi `docs/hermes.md` §"Il peer spento non fa perdere
+memoria".
 
 Nota: la memoria `legacy` del Mac è **effimera**. Il file è `/app/memory.json.gz`,
 cioè in `/app`, **fuori** da `/app/data`: non è coperto dal volume di §3 e sparisce

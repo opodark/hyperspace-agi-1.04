@@ -194,6 +194,36 @@ Il launcher usa `127.0.0.1`: su Docker Desktop `host.docker.internal` riesce a
 raggiungerlo, ma la LAN no. Non allargare il bind senza una regola firewall
 precisa. Verifica: `GET /health` con header `Authorization: Bearer <token>`.
 
+### Il peer spento non fa perdere memoria (locale-prima)
+
+`shared/memory_sync.py`, attivo con il backend `hermes`:
+
+| | Cosa succede |
+|---|---|
+| **Scrittura, Hermes raggiungibile** | va a Hermes **e** nel mirror locale (sempre) |
+| **Scrittura, Hermes spento** | torna **ok**: la voce è nel mirror e in coda (`memory-outbox.jsonl`) |
+| **Hermes torna** | la coda viene riconsegnata (`POST /import`), idempotente per id stabile: `duplicate` conta come consegnato |
+| **Lettura, Hermes spento** | legge il **mirror locale** e lo dichiara (`degraded: true`, `source: "mirror"`) |
+| **Lettura riuscita** | le voci lette finiscono nel mirror (unione, mai sovrascrittura): così il file locale racconta cosa la macchina **ricorda**, non solo cosa ha scritto lei |
+| **Ricerca, Hermes spento** | filtro locale sul mirror, marcato `degraded` (`/memory` e `/memory/search`) |
+| **Solo se anche la coda è illeggibile** | la scrittura fallisce (503) — è l'unico caso in cui una voce si perde davvero |
+
+`GET /memory/stats` risponde **sempre** (anche con Hermes spento) e aggiunge
+`outbox` (`pending`, `oldest_seconds`) e `mirror` (voci, file, dimensione): "quanto
+è in attesa e da quando" è la prima domanda quando un peer è spento.
+`POST /memory/sync` forza la riconsegna adesso ("riprova adesso", utile in debug).
+Tutti gli interruttori stanno nella tab Setup, sezione **Memoria locale-prima**
+(`MEMORY_MIRROR`, `MEMORY_OUTBOX`, `MEMORY_READ_FALLBACK`, `MEMORY_OUTBOX_FILE`,
+`MEMORY_SYNC_FLUSH_S`) e valgono da subito.
+
+Il mirror è anche la ragione per cui il rollback resta onesto: è il file
+`MEMORY_FILE` di sempre, quindi `MEMORY_BACKEND=legacy` lo legge, e
+`scripts/memory_migrate.py` vi ritrova gli **stessi id** — rimandare in Hermes una
+voce già arrivata produce un `duplicate`, non un doppione.
+
+Una coda che non si svuota è un peer spento da giorni: a 500 voci in attesa il CP
+scrive un avviso (una volta, non a ogni scrittura).
+
 Una sola fonte di verita' (aggiornato 2026-09-20): il token vive in
 `%HS_DATA_DIR%/hermes-memory.token` (default `data/runtime/data/hermes-memory.token`),
 letto sia dal control-plane (mount `/app/data`) sia dal bridge (via `--token-file`).

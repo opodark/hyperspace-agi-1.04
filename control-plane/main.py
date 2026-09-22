@@ -69,6 +69,7 @@ from shared.code_sandbox import HybridCodeSandboxClient, SandboxUnavailable
 from shared.forge_skills import ECC_BUNDLE_DIR, load_ecc_bundle, attach_skills, source_hash
 from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryClient, HermesMemoryError
+from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
 from shared.web_node import (
     WebNodeError,
     WebNodeRegistry,
@@ -986,6 +987,17 @@ def _channel_num_ctx() -> int:
     return max(1024, min(_channel_int("CHANNEL_NUM_CTX", 8192), 65536))
 
 
+def _reload_memory_sync() -> None:
+    """Ricostruisce mirror e coda dopo un salvataggio in Setup.
+
+    Non è pignoleria: i percorsi e gli interruttori vivono *dentro* MemorySync, non
+    in costanti globali, quindi un valore nuovo senza ricostruzione resterebbe
+    "salvato ma inerte" — il difetto che la tab Setup esiste per non avere.
+    """
+    global memory_sync
+    memory_sync = _build_memory_sync()
+
+
 def _reload_channel_config() -> None:
     """Rilegge token e soglie dopo un salvataggio in Setup."""
     global channel_policy, channel_pacing, CHANNEL_OPERATOR
@@ -1476,7 +1488,9 @@ def _normalize_assistant_message(payload, where: str) -> dict:
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 def _load_memory() -> list:
     if MEMORY_BACKEND == "hermes":
-        return _hermes_memory.entries(MEMORY_MAX_ENTRIES)
+        # Con Hermes spento non si torna vuoti: si legge il mirror locale e la
+        # lettura degradata resta scritta nei log da MemorySync.
+        return memory_sync.read(MEMORY_MAX_ENTRIES)["entries"]
     if MEMORY_BACKEND != "legacy":
         raise RuntimeError(f"unsupported MEMORY_BACKEND: {MEMORY_BACKEND}")
     if not os.path.exists(MEMORY_FILE_GZ):
@@ -1515,7 +1529,9 @@ def _memory_append(entry: dict):
     if "ts" not in entry and "timestamp" in entry:
         entry["ts"] = _ts_to_iso(entry["timestamp"])
     if MEMORY_BACKEND == "hermes":
-        return _hermes_memory.store(entry)
+        # Scrittura locale-prima: il mirror si scrive sempre, e se Hermes non
+        # risponde la voce va in coda invece di andare persa. Torna `deferred`.
+        return memory_sync.write(entry)
     if MEMORY_BACKEND != "legacy":
         raise RuntimeError(f"unsupported MEMORY_BACKEND: {MEMORY_BACKEND}")
     entries = _load_memory()
@@ -1918,6 +1934,17 @@ def push_log(type_, summary, detail="", source="control-plane", target="", statu
     db.insert_log(entry)
     return entry
 
+
+# La memoria locale-prima nasce qui e non con la configurazione: il suo logger è
+# `push_log`, che è definito sopra. Il mirror è il file di memoria di sempre, la coda
+# gli sta accanto — stesso volume, quindi sopravvivono a un rebuild e si possono
+# guardare a occhio.
+def _build_memory_sync() -> MemorySync:
+    return from_env(_hermes_memory, log=push_log, memory_file=MEMORY_FILE_GZ)
+
+
+memory_sync = _build_memory_sync()
+
 # ── OMEGA MEMORY TOOLS ────────────────────────────────────────────────────────
 def _omega_format_memories(entries: list) -> list:
     out = []
@@ -1942,7 +1969,13 @@ def _omega_query(args: dict) -> str:
         try:
             entries = _hermes_memory.query(query, limit, event_type, mode)
         except HermesMemoryError as exc:
-            return f"Hermes memory unavailable: {exc}"
+            # Ricerca degradata: senza Hermes non c'è ricerca semantica, ma il
+            # mirror locale sa ancora cosa è stato detto di recente, e per l'agente
+            # "meno preciso" è meglio di "non ricordo niente".
+            entries = memory_sync.read_local(MEMORY_MAX_ENTRIES)
+            push_log('memory_sync',
+                     f'ricerca memoria in locale (Hermes non risponde): {len(entries)} voci',
+                     detail=str(exc), status='warn')
     else:
         entries = _load_memory()
     results    = []
@@ -5219,6 +5252,31 @@ _ENV_META = [
      "label": "File memoria (legacy)",
      "hint": "Percorso del file gzip quando il backend è \"legacy\". Vuoto = $APP_DIR/memory.json.gz (dentro il container NON è un volume: si perde al rebuild). Per la memoria durevole usa /app/memory/memory.json.gz, che è montato.",
      "default": ""},
+    {
+        "section": "Memoria locale-prima", "key": "MEMORY_MIRROR", "type": "bool",
+        "label": "Mirror locale",
+        "hint": "Scrive ogni voce anche nel file di memoria locale, sempre (non solo quando Hermes è giù), e vi raccoglie anche ciò che si legge da Hermes: è quello che la macchina ricorda, non solo ciò che ha scritto lei. È il file da guardare per dubitare, e quello che legge il rollback \"legacy\".",
+        "default": "true"},
+    {
+        "section": "Memoria locale-prima", "key": "MEMORY_OUTBOX", "type": "bool",
+        "label": "Coda di riconsegna",
+        "hint": "Con Hermes irraggiungibile le voci vanno in coda (memory-outbox.jsonl) invece di perdersi, e vengono riconsegnate al ritorno. Senza coda, una scrittura non arrivata è persa.",
+        "default": "true"},
+    {
+        "section": "Memoria locale-prima", "key": "MEMORY_READ_FALLBACK", "type": "str",
+        "label": "Lettura se Hermes tace",
+        "hint": "\"local\" = legge il mirror locale e lo dichiara (degraded). \"fail\" = risponde 503, per accorgersi subito che il peer è spento invece di leggere una vista locale.",
+        "default": "local"},
+    {
+        "section": "Memoria locale-prima", "key": "MEMORY_OUTBOX_FILE", "type": "str",
+        "label": "File della coda",
+        "hint": "Vuoto = memory-outbox.jsonl accanto al file di memoria (stesso volume: non sparisce al rebuild).",
+        "default": ""},
+    {
+        "section": "Memoria locale-prima", "key": "MEMORY_SYNC_FLUSH_S", "type": "int",
+        "label": "Intervallo di riconsegna (s)",
+        "hint": "Minimo fra due tentativi di riconsegna della coda: non c'è un thread, la coda si svuota alla prima chiamata utile (scrittura, lettura, statistiche).",
+        "default": "60"},
     # Telemetria nodi
     {"section": "Telemetria nodi (/metrics)", "key": "METRICS_POLL_INTERVAL_S", "type": "int",
      "label": "Poll /metrics (s)",
@@ -5485,6 +5543,12 @@ _PERSONA_ENV_KEYS = {m["key"] for m in _ENV_META if m["section"] == _PERSONA_ENV
 # _reload_channel_config().
 _CHANNEL_ENV_SECTION = "Canali esterni"
 _CHANNEL_ENV_KEYS = {m["key"] for m in _ENV_META if m["section"] == _CHANNEL_ENV_SECTION}
+
+# Chiavi della sezione "Memoria locale-prima": cambiarle ricostruisce mirror e coda
+# (i percorsi e gli interruttori vivono dentro MemorySync, non in costanti globali).
+_MEMORY_SYNC_ENV_SECTION = "Memoria locale-prima"
+_MEMORY_SYNC_ENV_KEYS = {m["key"] for m in _ENV_META
+                         if m["section"] == _MEMORY_SYNC_ENV_SECTION}
 
 _ENV_ROUTING_WEIGHT_KEYS = {
     "ROUTING_WEIGHT_VRAM", "ROUTING_WEIGHT_LOAD", "ROUTING_WEIGHT_TIER",
@@ -5776,6 +5840,9 @@ def set_config_env():
     # E per i canali: token e soglie si rileggono, gli strike restano.
     if _CHANNEL_ENV_KEYS & set(applied):
         _reload_channel_config()
+    # E per la memoria locale-prima: mirror, coda e ripiego si ricostruiscono.
+    if _MEMORY_SYNC_ENV_KEYS & set(applied):
+        _reload_memory_sync()
     if errors:
         return jsonify({"ok": False, "error": "; ".join(errors),
                         "applied": list(applied.keys())}), 400
@@ -6155,10 +6222,18 @@ def get_tasks():
 @app.route('/memory')
 def get_memory():
     limit   = int(request.args.get("limit", MEMORY_MAX_ENTRIES))
-    try:
-        entries = (_hermes_memory.entries(limit) if MEMORY_BACKEND == "hermes" else _load_memory())
-    except HermesMemoryError as exc:
-        return jsonify({"error": str(exc), "backend": "hermes"}), 503
+    if MEMORY_BACKEND == "hermes":
+        try:
+            esito = memory_sync.read(limit)
+        except HermesMemoryError as exc:
+            return jsonify({"error": str(exc), "backend": "hermes"}), 503
+        risposta = {"entries": esito["entries"][:limit], "total": len(esito["entries"]),
+                    "backend": "hermes", "source": esito["source"],
+                    "degraded": esito["degraded"]}
+        if esito.get("reason"):
+            risposta["reason"] = esito["reason"]
+        return jsonify(risposta)
+    entries = _load_memory()
     return jsonify({"entries": entries[:limit], "total": len(entries)})
 
 @app.route('/memory/push', methods=['POST'])
@@ -6168,18 +6243,22 @@ def push_memory():
     if not entry or not isinstance(entry, dict):
         return jsonify({"ok": False, "error": "missing entry"}), 400
     try:
-        _memory_append(entry)
+        esito = _memory_append(entry)
     except HermesMemoryError as exc:
         return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
-    return jsonify({"ok": True})
+    if isinstance(esito, dict) and esito.get("ok") is False:
+        # Qui non si è salvato niente da nessuna parte: questo sì è un guasto, e il
+        # chiamante deve saperlo (una voce in coda invece è al sicuro su disco).
+        return jsonify(esito), 503
+    return jsonify(esito if isinstance(esito, dict) else {"ok": True})
 
 @app.route('/memory/stats')
 def memory_stats():
     if MEMORY_BACKEND == "hermes":
-        try:
-            return jsonify(_hermes_memory.stats())
-        except HermesMemoryError as exc:
-            return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
+        # Anche con Hermes giù: la risposta degradata dice cosa c'è in locale e
+        # quanto è in coda, che è l'unica cosa da guardare in quel momento. Un 503
+        # nasconderebbe proprio quello.
+        return jsonify(memory_sync.stats())
     entries    = _load_memory()
     size_bytes = os.path.getsize(MEMORY_FILE_GZ) if os.path.exists(MEMORY_FILE_GZ) else 0
     return jsonify({
@@ -6189,6 +6268,17 @@ def memory_stats():
         "file_size_kb": round(size_bytes/1024, 2),
         "file": MEMORY_FILE_GZ,
     })
+
+@app.route('/memory/sync', methods=['POST'])
+def sync_memory():
+    """Riconsegna a mano la coda a Hermes: "riprova adesso", per il debug."""
+    if MEMORY_BACKEND != "hermes":
+        return jsonify({"ok": False, "backend": MEMORY_BACKEND,
+                        "error": "la riconsegna della coda vale con il backend hermes"}), 409
+    esito = memory_sync.flush(force=True)
+    esito["pending"] = memory_sync.pending()
+    esito["outbox_file"] = str(memory_sync.outbox.path) if memory_sync.outbox else ""
+    return jsonify(esito), (200 if esito.get("ok") else 503)
 
 @app.route('/memory/search', methods=['POST'])
 def search_memory():
@@ -6205,8 +6295,19 @@ def search_memory():
             offset=max(0, int(data.get("offset", 0))),
         )
         return jsonify({"ok": True, "entries": entries, "count": len(entries)})
-    except (HermesMemoryError, ValueError) as exc:
+    except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
+    except HermesMemoryError as exc:
+        # Degradata e dichiarata: la ricerca semantica richiede Hermes, il testo no.
+        # Meglio un risultato locale marcato che un riquadro vuoto.
+        query = str(data.get("query", "")).strip().lower()
+        limite = max(1, int(data.get("limit", 50)))
+        voci = memory_sync.read_local(MEMORY_MAX_ENTRIES)
+        trovate = [voce for voce in voci
+                   if not query or query in str(voce.get("content", "")).lower()]
+        return jsonify({"ok": True, "degraded": True, "source": "mirror",
+                        "reason": str(exc), "entries": trovate[:limite],
+                        "count": len(trovate[:limite])})
 
 @app.route('/memory/lifecycle', methods=['POST'])
 def memory_lifecycle():
@@ -6610,7 +6711,9 @@ def federation_views():
 def _sync_memory_across_nodes():
     if MEMORY_BACKEND == "hermes":
         # Hermes is the single shared store. Replicating its view back into
-        # node-local files would reintroduce dual-write and sync loops.
+        # node-local files would reintroduce dual-write and sync loops. La coda di
+        # `shared/memory_sync.py` non è una replica: va solo *verso* Hermes, e il
+        # mirror locale è una vista del nodo, non quella di un altro.
         return
     active_nodes = [n for n in _node_list() if n.get("status") == "active"]
     if len(active_nodes) < 2:
