@@ -66,6 +66,18 @@ Tre cose non ovvie, e il perché:
   [leejet/ComfyUI-GGUF](https://github.com/leejet/ComfyUI-GGUF): il vecchio
   city96 non conosce l'architettura `qwen_image21` e il grafo fallirebbe con
   `Unknown model architecture!` *dopo* i 14 GB.
+  Va installato **nell'installazione che ComfyUI sta usando davvero**, che non è
+  per forza la prima trovata: il 2026-09-23 i pesi c'erano ma il nodo no, e il
+  grafo non partiva (`UnetLoaderGGUF` assente dall'elenco dei nodi). Si vede da
+  `GET /object_info/UnetLoaderGGUF`: se la risposta è `{}` — è quello che ComfyUI
+  risponde per un nodo che non ha — il fork manca:
+
+  ```powershell
+  $install = "$env:LOCALAPPDATA\Comfy-Desktop\ComfyUI-Installs\<nome>\ComfyUI"
+  git clone --depth 1 https://github.com/leejet/ComfyUI-GGUF "$install\custom_nodes\ComfyUI-GGUF"
+  & "$install\.venv\Scripts\python.exe" -m pip install -r "$install\custom_nodes\ComfyUI-GGUF\requirements.txt"
+  # poi si riavviano i nodi di ComfyUI (ComfyUI-Manager: Restart, o l'app Desktop)
+  ```
 - **La cartella dei pesi si rileva, non si indovina**: si legge da
   `settings.json` di ComfyUI Desktop (`modelsDirs`). Con più installazioni si
   passa `-Modelli <percorso\models>`; se lo script non la trova, lo dice.
@@ -131,9 +143,16 @@ python -m pytest tests\test_comfyui_client.py -q # la logica del client
   destinazione di ogni file. Lo leggono `install-model.ps1` e i test.
 - `install-model.ps1` — scarica e **verifica** i pesi (riprende un download
   interrotto, non installa un file la cui impronta non torna).
+- `webui_gateway.py` — il proxy che Open WebUI attraversa per disegnare: libera la
+  scheda prima del diffusion. Vedi la sezione qui sotto.
+- `start-gateway.ps1` — l'avvio del gateway con le chiavi lette da `.env`
+  (`CHANNEL_MODEL`, `IMAGE_FREE_GPU`): senza, lo scarico non parte e non lo dice.
 - `tests/test_comfyui_modelli.py` (nel repo) — tiene il manifest e il grafo di
   `shared/image_jobs.py` allineati: un file rinominato da un lato solo fa fallire
   un test, non un job dopo tredici minuti di sampling.
+- `tests/test_webui_gateway.py` (nel repo) — il gancio prima di `/prompt`, la lista
+  dei percorsi inoltrabili e le intestazioni: il primo tentativo vero è fallito su
+  un `Authorization: Bearer ` vuoto che httpx rifiuta.
 
 ## Il ponte (Fase 2): il control-plane chiede un'immagine, e ComfyUI la fa
 
@@ -167,4 +186,38 @@ Invoke-RestMethod -Uri http://127.0.0.1:8085/image/status `
 
 **Costo misurato**: 1024×1024, 30 passi = **11 min 50 s** su questa 5060. Il
 default (768×768, 25 passi) è pensato per una risposta conversazionale.
+
+## Il gateway (Fase 3): l'immagine chiesta da Open WebUI
+
+Open WebUI ha un motore `comfyui` che chiama ComfyUI da sé, e quella strada **salta
+la regola del progetto** — "una scheda, un modello": il suo unico gancio
+(`shared/gpu_budget.py`) sta nel control-plane, che la WebUI non attraversa. Con il
+modello del canale in scheda (5259 MB su 8151, misurato il 2026-09-23) il diffusion
+non ci sta, e il risultato non è un errore chiaro: è `CUDA error: unknown error`, e
+ComfyUI che poi non riparte da solo.
+
+`webui_gateway.py` è il proxy che sta in mezzo e fa una cosa sola in più rispetto a
+ComfyUI: su `POST /prompt` chiede prima a Ollama cosa tiene in scheda (`/api/ps`) e
+glielo fa scaricare (`keep_alive: 0`), poi inoltra. `/history`, `/view`,
+`/system_stats`, `/object_info`, `/api/upload/image` e il WebSocket `/ws` passano
+così com'è — il WebSocket serve a Open WebUI per sapere quando l'esecuzione è finita,
+e senza tunnel la generazione non tornerebbe mai.
+
+```powershell
+.\scripts\start-surfaces.ps1 -Gateway                       # con le altre superfici
+python integrations\comfyui\webui_gateway.py --check        # ComfyUI e scheda
+.\integrations\comfyui\start-gateway.ps1                    # chiavi lette da .env
+```
+
+La WebUI si punta qui e non a ComfyUI: `COMFYUI_BASE_URL=http://host.docker.internal:8189`.
+Le variabili (grafo compreso) le scrive `scripts\webui_image_env.py` — `--write` in
+`.env`, `--apply` per mandarle all'istanza accesa (da 0.11 la configurazione delle
+immagini è persistita nel database, quindi `.env` da solo vale solo al primo avvio),
+`--check` per accorgersi se grafo del repo e grafo configurato hanno smesso di
+coincidere.
+
+Misure del 2026-09-23 (512×512, 6 passi): **93,5 s** a freddo, **15,8 s** con il
+modello in cache. Con Ollama che teneva il modello del canale la generazione è
+passata lo stesso — prima lo scarico, poi il diffusion.
+
 

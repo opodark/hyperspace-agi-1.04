@@ -29,7 +29,15 @@ control-plane/connectors/
 
 One catalogue, three consumers — the tools are not re-declared anywhere:
 
-1. **Chat tool loop** — `BUILTIN_TOOLS` is injected into `/v1/chat/completions` for tool-capable models (non-stream and stream paths).
+1. **Chat tool loop** — `BUILTIN_TOOLS` is injected into `/v1/chat/completions` for tool-capable models (non-stream and stream paths). The tools the *caller* offered are forwarded to the model as they are, and the CP executes **only its own** (natives + connectors): a tool that belongs to the client is handed back to it with `finish_reason: tool_calls` — in both paths, including the SSE delta. The rule exists because the alternative was a lie: Open WebUI 0.11 offers its model a native `generate_image` (its own images route → gateway → ComfyUI), the CP answered `Tool 'generate_image' non gestito da nessun connector attivo`, the call died there, and the model told the user it had sent the image (2026-09-23 — no file anywhere). See `tests/test_tool_passthrough.py`.
+
+## Web search (`web_search`): what the results are worth
+
+The native `web_search` tool asks the SearXNG instance (`SEARXNG_URL`) and hands the results to the model, so its **quality is the model's evidence**. Two decisions live in `shared/web_search.py` (pure, tested in `tests/test_web_search.py`) because both were real failures:
+
+- **Language per query.** The tool used to send `language=it-IT` always. Measured on this instance: `best russian nude wallpaper sites 2024` came back as *"best — Dizionario inglese-italiano WordReference"* and `Unbridled Market dark web marketplace` as *"Sovranità e sicurezza alimentare"* — while the same queries with `en-US` returned the relevant pages. The reverse also holds (`chi ha vinto il campionato mondiale di Formula 1 nel 2025` with `en-US` → *"Chi (letter) - Wikipedia"*), so the language is decided per query; short ambiguous queries pass no language at all and let the instance default rule.
+- **Pertinence guard.** When an engine is throttled or behind CAPTCHA (`CAPTCHA (it-it)`, `suspended_time=180` in the SearXNG logs) the instance still answers **HTTP 200 with unrelated content** — *"Chi Magazine"* for an F1 question, *"WhatsApp Web"* for a dark-web marketplace. The tool used to pass that on as the answer, which is how a chat ended up "finding" a photo that does not exist. Now a result set with no significant term in common with the query is refused, the attempt is logged as `non pertinenti`, and the tool says plainly that the engines did not answer — instead of filling the gap.
+
 2. **MCP** — `/mcp` `tools/list` / `tools/call`, with the per-client allowlist of `shared/mcp_auth.py`.
 3. **`POST /tools/execute`** — single-shot execution for external callers, i.e. the Open WebUI bridge in `openwebui-tools/office365_tool.py`. It can execute **every** published tool, so it is not left open: it sits behind the same gate as the network-admin routes (`X-Hyperspace-Network-Token` = `NETWORK_ADMIN_TOKEN`, at least 32 characters). The bridge must be given that token in its `network_token` valve.
 
