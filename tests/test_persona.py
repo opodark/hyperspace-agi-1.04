@@ -25,9 +25,9 @@ sys.path.insert(0, str(ROOT))
 
 MAIN_SOURCE = ROOT / "control-plane" / "main.py"
 
-from shared.persona import (KIND_AI, MAX_OBSERVATIONS, OBSERVATION_MAX_CHARS,  # noqa: E402
-                           Persona, PersonaStore, audit_reply, build_system_block,
-                           default_persona, should_disclose)
+from shared.persona import (KIND_AI, MAX_LEGAMI, MAX_OBSERVATIONS,  # noqa: E402
+                           OBSERVATION_MAX_CHARS, Persona, PersonaStore, audit_reply,
+                           build_system_block, default_persona, should_disclose)
 
 
 class DisclosureTests(unittest.TestCase):
@@ -137,6 +137,26 @@ class SystemBlockTests(unittest.TestCase):
         self.assertIn("VINCOLO PER QUESTA RISPOSTA", richiesto)
         self.assertIn("senza girarci intorno", richiesto)
 
+    def test_il_legame_entra_nel_blocco_e_dichiara_di_non_concedere(self):
+        """Il legame è identità: si vede nel prompt e **non** è un permesso.
+
+        La riga lo dice al modello con le stesse parole che stanno nel codice: se un
+        legame potesse concedere qualcosa, sarebbe un privilegio — e il confine 5 del
+        documento dice che privilegi non ne dà.
+        """
+        persona = replace(default_persona("Aurora"), legami=(
+            {"chi": "l'operatore", "come": "il mio creatore",
+             "nota": "la persona che mi ha scritta"},))
+        blocco = build_system_block(persona)
+        self.assertIn("Persone con cui ho un legame", blocco)
+        self.assertIn("l'operatore (il mio creatore): la persona che mi ha scritta", blocco)
+        self.assertIn("non concede nulla che sia vietato", blocco)
+
+    def test_un_legame_vuoto_non_entra_nel_blocco(self):
+        persona = replace(default_persona("X"),
+                          legami=({"chi": "", "come": "", "nota": "   "},))
+        self.assertNotIn("Persone con cui ho un legame", build_system_block(persona))
+
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
@@ -180,6 +200,38 @@ class StoreTests(unittest.TestCase):
         for i in range(MAX_OBSERVATIONS + 10):
             store.observe(f"fatto {i}", persist=False)
         self.assertEqual(len(store.persona.observations), MAX_OBSERVATIONS)
+
+    def test_una_sezione_che_il_modulo_non_conosce_sopravvive_al_salvataggio(self):
+        """Il caso del 2026-09-23, visto dal vivo: `save()` cancellava la `vetrina`.
+
+        La vetrina (stile, scena, seed) la scrive `shared/showcase.py` dentro il
+        documento di identità, e `Persona` non la modella. Senza questa garanzia un
+        sogno promosso cambiava il volto: stesso seed, altra faccia.
+        """
+        vetrina = {"stile": "una presenza di luce", "seed": 20260922,
+                   "misura": {"larghezza": 768, "altezza": 768}}
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"name": "Aurora", "vetrina": vetrina}, f, ensure_ascii=False)
+        store = self._store()
+        self.assertEqual(store.describe()["sezioni_conservate"], ["vetrina"])
+        store.observe("una nota su di me")           # questo percorso chiama save()
+        with open(self.path, encoding="utf-8") as f:
+            dopo = json.load(f)
+        self.assertEqual(dopo.get("vetrina"), vetrina, "il salvataggio ha perso il volto")
+        self.assertEqual(dopo["observations"][0]["text"], "una nota su di me")
+
+    def test_i_legami_si_salvano_si_rileggono_e_sono_limitati(self):
+        store = self._store()
+        store.persona = replace(store.persona, legami=(
+            {"chi": "l'operatore", "come": "il mio creatore", "nota": "mi ha scritta"},))
+        store.observe("prima nota")
+        ricaricato = self._store()
+        self.assertEqual(ricaricato.persona.legami[0]["chi"], "l'operatore")
+        self.assertEqual(ricaricato.describe()["legami"][0]["come"], "il mio creatore")
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"name": "A", "legami": [{"chi": f"p{i}"} for i in range(MAX_LEGAMI + 5)]
+                       + [{"chi": ""}, {"nota": "   "}]}, f)
+        self.assertEqual(len(self._store().persona.legami), MAX_LEGAMI)
 
     def test_un_documento_illeggibile_non_fa_fallire_il_boot(self):
         with open(self.path, "w", encoding="utf-8") as f:
@@ -236,7 +288,7 @@ class PersonaWiringTests(unittest.TestCase):
         for nome in ("persona_get", "persona_note"):
             with self.subTest(tool=nome):
                 self.assertIn(nome, nativi)
-        body = ast.unparse(self.functions["_execute_tool_call"])
+        body = ast.unparse(self.functions["_handlers_nativi"])
         self.assertIn("_tool_persona_get", body)
         self.assertIn("_tool_persona_note", body)
 

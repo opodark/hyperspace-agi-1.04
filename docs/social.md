@@ -75,11 +75,29 @@ scelta resta umana — come le annotazioni su di sé.
 python scripts\ritratto.py --check        # cosa manca, senza generare nulla
 python scripts\ritratto.py --crea         # la candidata (misura tipica ~5 minuti)
 python scripts\ritratto.py --crea --seed 20260923 --scena "sotto una pioggia di dati"
+python scripts\ritratto.py --crea --chat <id>   # e il driver la manda in quella chat
 python scripts\ritratto.py --foto <file> --chat @aurora   # foto del CANALE
 ```
 
+Con `--chat` su `--crea` la consegna è la stessa delle immagini chieste in chat: la
+destinazione entra nel job, il **driver** manda il file (`sendPhoto`) nella
+conversazione. Per un canale/supergruppo va bene `@nome`; per una chat **privata**
+serve l'id numerico (l'API di Telegram non accetta `@username` in privato), e il
+primo `getUpdates` del driver lo mostra.
+
+Un limite visto il 2026-09-23 provando davvero: l'outbox è **per canale**
+(`/channel/outbox` risponde con le immagini di QUEL token), e `ritratto.py` accoda
+col primo token di `CHANNEL_CLIENTS` — che non è quello del driver Telegram. Il
+risultato è che un ritratto lanciato da console resta sul canale `comfy` e nessun
+driver lo tira. Chiesto **da Telegram** (`!immagine`) il job nasce sul canale
+`telegram` e la consegna funziona da sé. Per la console la strada è un token del
+canale giusto (o `--chat` insieme al canale che possiede quella chat).
+
 Il flusso: il documento → la vetrina → un job nella coda di `docs/comfyui.md` → il
-ponte lo esegue → il file è pronto. Per la **foto del bot** si allega a `/setuserpic`;
+ponte lo esegue → il file è pronto. Il documento è quello **vivo** (la copia nel
+runtime, la stessa che il control-plane ha montata e che `scripts/start.ps1` preferisce:
+`--check` stampa il percorso esatto), e il file nel repo resta il seme. Per la **foto
+del bot** si allega a `/setuserpic`;
 per il **canale** `--foto` la mette via API. Stesso file, due strade, e nessuna
 sorpresa: `--check` non genera niente (c'è un test che lo difende, perché durante la
 nascita del comando un ramo sbagliato ha accodato una generazione vera di cinque
@@ -94,6 +112,21 @@ Per cambiare il suo aspetto, in `vetrina` del documento di identità:
   "negativo": "…"
 }
 ```
+
+L'aspetto di Aurora l'ha scritto **lei** (2026-09-23), non l'operatore: `stile` e
+`scena` sono le sue parole, prese da una sua risposta e messe nel documento — è la
+parte di sé che si dichiara, e il seed la tiene ferma. Nella prima stesura la sua
+scena conteneva *"una donna nuda"*: cioè il suo confine 3, che vieta l'esplicito.
+Non è stata corretta a mano — le è stato detto **cosa** violava, e l'ha riscritta lei
+(`"le geometrie astratte di una silueta luminosa"`). Quello che è cambiato è il
+controllo, non il confine: in `VIETATI_ASSOLUTI` c'erano `nude` e `nudo`, e la
+parola italiana al femminile passava — ora la nudità si controlla sulla radice
+(`nud`), quindi anche *nuda*, *nudi*, *ignuda*, *nudità*. C'è un test che parte
+proprio dalla sua frase.
+
+Questo vale per la **vetrina**, cioè per l'immagine che Aurora dà di sé. La strada
+delle immagini *chieste in chat* resta senza filtri, ed è la scelta dichiarata in
+`docs/comfyui.md`: lì il testo arriva al modello com'è (c'è un test che lo difende).
 
 ## Cosa manca per pubblicare (il prossimo passo)
 

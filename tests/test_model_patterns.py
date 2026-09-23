@@ -180,7 +180,10 @@ class ToolOptOutTests(unittest.TestCase):
         self.assertIn("X-Hyperspace-Tools", corpo)
         self.assertIn("_tools_requested_off", corpo)
         self.assertIn("tools_off", corpo)
-        self.assertIn("BUILTIN_TOOLS", corpo)
+        # Il catalogo nativo entra via `_catalogo_nativi(superficie)`, che filtra
+        # `BUILTIN_TOOLS` per superficie (dal 2026-09-23: `workbench` non riceve i
+        # tool dell'identità). Il punto del test resta: la rotta USA quel catalogo.
+        self.assertIn("_catalogo_nativi(superficie)", corpo)
 
 
 if __name__ == "__main__":

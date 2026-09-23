@@ -123,10 +123,14 @@ class WiringTests(unittest.TestCase):
                         body.index("['choices'][0]['message']['content']"))
 
     def test_streaming_paths_use_the_shared_helper(self):
-        body = ast.unparse(self.functions["v1_chat_completions"])
-        self.assertIn("_assistant_text", body)
-        self.assertNotIn("reasoning_content", body,
+        """Il testo dei due rami dello stream passa da `_chunk_finale`, che usa
+        `_assistant_text`: la garanzia è la stessa, il posto è cambiato il
+        2026-09-23 (i chunk devono poter portare anche i tool del client)."""
+        corpo = ast.unparse(self.functions["v1_chat_completions"])
+        self.assertIn("_chunk_finale", corpo)
+        self.assertNotIn("reasoning_content", corpo,
                          "il campo corretto su Ollama e' `reasoning`: non reintrodurre il nome sbagliato")
+        self.assertIn("_assistant_text", ast.unparse(self.functions["_chunk_finale"]))
 
     def test_non_stream_paths_answer_with_what_they_finalize(self):
         """La risposta nasce dallo stesso oggetto finalizzato, via

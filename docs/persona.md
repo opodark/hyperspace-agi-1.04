@@ -30,6 +30,36 @@ If `PERSONA_ENABLED` is true (default), the block is added to the chat request *
 
 Deliberate invariant: `kind` is `"ai"` and nothing else. `Persona(kind="human")` raises, and a document declaring another kind is normalised to `ai` with the reason in `problems`. An identity that *can* be configured as human would turn the disclosure guarantee into a promise; this way it is a constraint.
 
+## Where the identity is *not* injected: `workbench`
+
+The console (Open WebUI) is also where the operator asks for code, tests and translations. There the identity block is not an identity: it is a cost and a bias. Measured on 2026-09-23 — **1727 characters (~500 tokens) on every request**, and the room persona's tone ("a presence with a recognisable character, not a service") winning over the medium context ("the system console: complete, technical answers"): the model answered *in character* while work was going on, `Aurora:` prefix included.
+
+So exactly one surface declares that it does not want the identity, and the decision is written where it can be tested (`shared/persona.py`):
+
+| | |
+|---|---|
+| `SURFACES_WITHOUT_IDENTITY` | `{"workbench"}` |
+| What is skipped | the identity block **and** the medium context (there would be nothing to append it to) |
+| What is hidden as well | the identity tools (`IDENTITY_TOOLS` = `persona_get`, `persona_note`). Offered anyway, the model just asks who it is and the persona comes back in through the window — measured: `tool_call: persona_get` → *"Sono Aurora, un'IA che tiene compagnia a una cerchia ristretta…"* |
+| Channels | untouched: `_channel_reply` renders the identity itself, always. A room *is* where the agent speaks as Aurora |
+| Default | unchanged: no surface declared → `openwebui` → identity, as before |
+
+The client declares the surface with `surface` in the body or the `X-Hyperspace-Surface` header. Open WebUI does it with a per-connection custom header (Admin → Settings → Connections → the control-plane connection → Headers):
+
+```json
+{ "X-Hyperspace-Surface": "workbench" }
+```
+
+`GET /persona` reports `PERSONA_ENABLED`, which is a different switch (global, on/off for everything); the surface rule is per request and lives in the module.
+
+Verified end-to-end that same day, same question on both paths:
+
+| | console (`workbench`) | control plane, direct (`openwebui`) |
+|---|---|---|
+| identity injected | **no** | yes |
+| `persona_get` called | **no** | — |
+| answer to "chi sei?" | "Sono Qwen3.5, un modello linguistico a grande scala sviluppato da Alibaba Cloud." | "Sono un'intelligenza artificiale progettata per accompagnare la conversazione…" |
+
 ## Verify it
 
 ```
@@ -136,6 +166,50 @@ otherwise one over-long proposal is lost), it writes long bracketed labels
 (`[preferenza|concisione|evitare dettagli su utenti]` → first term wins), and
 with thin material it comments on the *absence* of material (the `parla del
 materiale, non di te` rule). All three would have put noise into the identity.
+
+## A bond is identity, not a permission
+
+`legami` is a declared section of the document: who a person is to the agent, in the
+agent's own words, and what changes in the way it talks to them. It exists because a
+presence with a character has *relationships*, and "everyone is the same to me" is not
+a neutral default — it is a missing fact.
+
+Each entry carries three keys — `chi` (the name the system knows: the handle the driver
+reports for the author), `come` (the place that person has, in the agent's words),
+`nota` (one to three sentences, also the agent's) — is capped (`MAX_LEGAMI = 8`,
+`LEGAME_MAX_CHARS = 300`), and reaches the prompt in `build_system_block()` on **every**
+surface, like the rest of the identity.
+
+The invariant is written into the injected line itself: *"è identità, non un permesso:
+non cambia i miei confini e non concede nulla che sia vietato"*. A bond that could grant
+something would be a privilege, and boundary 5 of Aurora's document says privileges are
+not given. `verifica_vetrina()` does not read `legami` at all, and a test proves it: the
+same forbidden request is refused with or without a bond
+(`tests/test_showcase.py::test_un_legame_non_concede_nulla`, written on 2026-09-23 from
+an explicit request that "the creator" be made an exception).
+
+The text is the agent's: it is asked in persona, its answer is written verbatim, and a
+human promotes it — the same proposal/promotion rule as the dream.
+
+## One identity, one file — and the sections a save must not destroy
+
+Two things were found on 2026-09-23 while checking a portrait, and they had the same
+shape: the document on disk and the identity in use were not the same thing.
+
+1. **`save()` dropped what `Persona` does not model.** `to_dict()` rebuilds the JSON from
+   the dataclass fields, and `vetrina` — the visual identity written by
+   `shared/showcase.py` — is not one of them. The paths that write the document
+   (`persona_note`, the promotion of a dream) therefore erased the look: same seed,
+   different face. `PersonaStore` now loads the unmodelled sections into `sezioni` and
+   writes them back untouched, and `GET /persona` reports them in `sezioni_conservate`.
+2. **There were two documents.** `data/persona-aurora.json` (the repo seed) and
+   `data/runtime/data/persona-aurora.json` (mounted into the control plane as
+   `/app/data`) had drifted apart: one with the `vetrina`, the other with the
+   observations, at different versions. The live one is the runtime file — the same one
+   `scripts/start.ps1` prefers. `scripts/ritratto.py` now lists it first as well, and
+   `divergenze_documenti()` warns during `--check` when two documents disagree on the
+   sections that decide a face or a boundary. Observations and version numbers are
+   *allowed* to differ: the runtime evolves.
 
 ## Known limits
 

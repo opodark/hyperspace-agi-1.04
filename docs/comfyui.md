@@ -54,12 +54,15 @@ Da qui la divisione del lavoro, che è anche la tesi del progetto:
 | **Il testo** (scrivere il prompt, capire l'idea) | sulla **rete** HyperSpace | la scheda resta libera per il diffusion; il linguaggio è un lavoro piccolo e parallelizzabile |
 | **L'immagine** (i passi di sampling) | **locale**, in ComfyUI | è la parte che vuole GPU, banda di memoria e il modello grande |
 
-## Le due direzioni
+## Le due direzioni (e la terza, dal lato WebUI)
 
 ```
    Fase 1 (fatta)                     Fase 2 (fatta: il ponte)
 ComfyUI ──/v1/chat/completions──> CP      CP ──/image/jobs──> ponte ──> ComfyUI
    "scrivimi il prompt"                    "genera questa immagine"
+
+   Fase 3 (fatta: il gateway)              Open WebUI ──/prompt──> gateway ──> ComfyUI
+                                              "generami un'immagine"
 ```
 
 **Fase 1 — ComfyUI chiede al control-plane.** Due nodi:
@@ -128,6 +131,13 @@ Prova reale (2026-09-22): `!immagine una torre sulla scogliera al tramonto` →
 coda → ponte → **313 s** → `output\HyperSpace\bridge_00001_.png` → **inviata in
 chat**. `da_consegnare: 0` dopo l'ack: consegnata una volta sola.
 
+Prova reale con i pesi **non censurati** (`-UC`, quelli che `install-model.ps1`
+installa) e un'idea esplicita scritta in italiano: coda → ponte → **150,8 s** →
+`output\HyperSpace\bridge_00003_.png` (768×768, 25 passi, scheda libera, modello
+già in VRAM). Il testo che è arrivato a ComfyUI è esattamente quello scritto: su
+questo percorso non c'è nessun riscrittore, e i test di
+`tests/test_channel_immagine.py` lo tengono così.
+
 ### Fase 4 — da fare
 
 - il **tool** `image_generate` per le superfici che HANNO i tool (console, web
@@ -183,6 +193,61 @@ indovina mai l'intenzione di un client.
    riga di decisione per l'esecuzione —
    `CP decision: model=… tools=0 think=False` — non due.
 
+## La generazione dentro Open WebUI (il gateway)
+
+Open WebUI 0.11 sa chiamare ComfyUI da sé — motore `comfyui`: `POST /prompt`, il
+WebSocket `/ws` su cui aspetta la fine dell'esecuzione, poi `/history` e `/view` per
+il file. Quella strada però **salta la regola del progetto** "una scheda, un
+modello", perché il suo unico gancio (`shared/gpu_budget.py`) sta nel control-plane,
+che la WebUI non attraversa. Il 2026-09-22 la contesa si è presentata come `CUDA
+error: unknown error` (6170 MiB a Ollama su 8151, 1730 liberi): è esattamente il
+caso per cui il gateway esiste.
+
+```
+            POST /prompt (grafo)                    libera Ollama        pesi
+Open WebUI ─────────────────> gateway :8189 ───────> (keep_alive 0) ───> ComfyUI :8188
+     ▲                            │                                          │
+     └── tutto il resto: /history, /view, /system_stats, /ws (tunnel) ───────┘
+```
+
+`integrations/comfyui/webui_gateway.py` è un proxy locale davanti a ComfyUI: su
+`POST /prompt` chiede **prima** a Ollama cosa tiene in scheda (`/api/ps`) e glielo fa
+scaricare, poi inoltra; tutto il resto passa così com'è, compreso il tunnel
+WebSocket, senza il quale la generazione non finirebbe mai. Non tocca il prompt e non
+giudica il risultato: è un guardiano di memoria, non un filtro. La lista dei percorsi
+inoltrabili è corta di proposito (`prompt`, `history`, `view`, `system_stats`,
+`object_info`, `queue`, `interrupt`, `free`, `api/`).
+
+Le variabili che la WebUI legge **non si scrivono a mano**: sono derivate dal grafo
+che il ponte esegue, con `python scripts/webui_image_env.py --write` (in `.env` e
+`.env.windows`) e `--apply`, che le manda all'API admin della WebUI come farebbe il
+pannello *Images*. Su un'istanza già avviata la configurazione è **persistita nel
+database**: modificare solo `.env` non basta (le variabili valgono al primo avvio),
+quindi si passa da `--apply`; `--check` dice se il grafo del repo e quello che la
+WebUI ha in mano hanno smesso di coincidere.
+
+```powershell
+.\scripts\start-surfaces.ps1 -Gateway             # il gateway, con le altre superfici
+python integrations\comfyui\webui_gateway.py --check
+python scripts\webui_image_env.py --write         # variabili in .env
+python scripts\webui_image_env.py --apply         # le applica alla WebUI accesa
+```
+
+Misure del 2026-09-23 (512×512, 6 passi, rotta `/api/v1/images/generations`): 93,5 s
+con i pesi da caricare, 15,8 s con il modello già in cache. La prova che conta è
+l'altra: con Ollama che teneva `qwen3.5:4b` (5259 MB in scheda, 2224 liberi) la
+generazione è passata lo stesso, **dopo** lo scarico — il log del gateway dice
+`scheda liberata: qwen3.5:4b scaricato dalla memoria`. I default da conversazione
+restano 768×768 e 25 passi (`IMAGE_SIZE`, `IMAGE_STEPS`).
+
+**Chiedere l'immagine in chat.** Open WebUI 0.11 offre al modello un tool nativo
+`generate_image` che chiama questa stessa rotta: chiedendolo in chat, l'immagine
+compare nel messaggio. Perché funzioni, il tool deve tornare **a Open WebUI**, che
+è chi sa eseguirlo: il control-plane esegue solo i tool suoi e restituisce al
+chiamante gli altri (`docs/connectors.md`, `tests/test_tool_passthrough.py`). Fino
+al 2026-09-23 non succedeva: il CP rispondeva «non gestito», la chiamata moriva lì e
+il modello raccontava di aver mandato un file che non esisteva.
+
 ## Cosa filtra, e cosa no
 
 Una riga detta male qui diventa un'aspettativa sbagliata, quindi va detta bene:
@@ -197,6 +262,8 @@ scrivere il prompt.
 | Richiesta **a parole** («mandami una foto di X») | **No**: stessa cosa, con regole dichiarate e nessuna riscrittura | `shared/image_jobs.py` (`richiesta_immagine`) |
 | La coda | Solo forma e tetti: ≤2000 caratteri, lati ≤1536, passi ≤60 | `shared/image_jobs.py` |
 | Il ponte | Niente: non sceglie il prompt e non giudica l'immagine | `integrations/comfyui/comfy_bridge.py` |
+| Il gateway (dalla WebUI) | **No**: non tocca il prompt e non guarda l'immagine; decide solo la memoria della scheda | `integrations/comfyui/webui_gateway.py` |
+| Immagine chiesta dalla **WebUI** | **No**: stesso grafo e stessi pesi `-UC`; cambia solo chi la riceve | `scripts/webui_image_env.py` |
 | ComfyUI e i pesi | Nessun safety checker: è la variante **`-UC`** | `integrations/comfyui/modelli.json` |
 | La moderazione del canale | **Non è un filtro di contenuto**: classifica lo spam in arrivo e conta strike | `shared/channel.py` |
 
@@ -233,6 +300,22 @@ test, non cambierebbe il risultato in silenzio.
 - **La memoria non c'entra**: questi nodi non scrivono nella memoria di Aurora.
   Gli esperimenti visivi non sono fatti su di sé, e il self-model resta pulito
   (stessa disciplina di `docs/dreams.md`).
+- **Dalla WebUI il negativo non c'è.** Open WebUI manda `negative_prompt` solo se
+  l'utente lo scrive, e questo grafo tiene il negativo *dentro* il prompt ("no text,
+  no watermark, no logos"): per questo `COMFYUI_WORKFLOW_NODES` non mappa quel campo
+  — un `null` al posto della stringa che il nodo di Qwen si aspetta farebbe fallire
+  la generazione.
+- **Il diffusion è quello del grafo.** Scegliere un altro "modello" nel pannello
+  *Images* della WebUI non cambia `UnetLoaderGGUF`: `IMAGE_GENERATION_MODEL` dice
+  cosa disegna, non lo sceglie. Per cambiare pesi si cambia il grafo (o
+  `MODELLO_DEFAULT` in `shared/image_jobs.py`, con il manifest).
+- **`resolution` segue la misura con cui è stato costruito il grafo** (`--size`).
+  Alzare `IMAGE_SIZE` dal pannello senza rigenerare le variabili non dà un errore:
+  lascia il text encoder tarato sulla misura vecchia, cioè una qualità diversa.
+- **Pannello e grafo possono divergere.** Da 0.11 la configurazione delle immagini è
+  persistita nel database: se il pannello e il grafo del repo divergono, il sintomo è
+  un'immagine generata con parametri che nessuno ha scelto. `webui_image_env.py
+  --check` serve a questo, e `--apply` a rimetterli d'accordo.
 
 ## Roadmap
 

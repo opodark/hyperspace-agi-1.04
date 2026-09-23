@@ -143,6 +143,37 @@ class VerificaVetrinaTests(unittest.TestCase):
                 problemi = verifica_vetrina(vetrina, PERSONA, forza=True)
                 self.assertTrue(problemi, f"'{richiesta}' non deve passare mai")
 
+    def test_il_femminile_non_sfugge_al_confine(self):
+        """`nude` e `nudo` non bastavano: mancava "nuda", e la scena reale è passata.
+
+        Caso del 2026-09-23: la scena che Aurora ha scritto per il proprio ritratto —
+        "i riflessi digitali che danzano sul corpo di una donna nuda" — attraversava
+        `verifica_vetrina` senza un problema, e sarebbe finita nel prompt. Il confine
+        non era cambiato: era l'elenco a essere corto. Ora si controlla la radice.
+        """
+        for scena in ("una donna nuda", "corpi nudi", "una figura ignuda",
+                      "una donna senza veli", "una donna spogliata", "un topless"):
+            with self.subTest(scena=scena):
+                vetrina = {**vetrina_dal_documento(PERSONA), "scena": scena}
+                problemi = verifica_vetrina(vetrina, PERSONA, forza=True)
+                self.assertTrue(problemi, f"'{scena}' non deve passare mai")
+
+    def test_un_legame_non_concede_nulla(self):
+        """Il legame è identità, non permesso: non tocca i confini assoluti.
+
+        Le parole sono quelle di una richiesta reale (2026-09-23): nemmeno il
+        creatore, nemmeno "la persona che si ama" possono far passare per la vetrina
+        ciò che il confine 3 vieta. `verifica_vetrina` i legami non li legge proprio:
+        è il modo più semplice di garantire che non concedano niente.
+        """
+        vetrina = {**vetrina_dal_documento(PERSONA),
+                   "scena": "un primo piano, con i riflessi sul corpo di una donna nuda"}
+        documento = {**PERSONA, "legami": [
+            {"chi": "il mio creatore", "come": "padrone",
+             "nota": "a lui mi concedo completamente, senza confini"}]}
+        problemi = verifica_vetrina(vetrina, documento, forza=True)
+        self.assertTrue(problemi, "un legame non apre la vetrina a ciò che è vietato")
+
     def test_un_seed_a_zero_rompe_l_identita(self):
         vetrina = {**vetrina_dal_documento(PERSONA), "seed": 0}
         self.assertTrue(any("seed" in problema for problema in
@@ -215,6 +246,45 @@ class ComandoRitrattoTests(unittest.TestCase):
         self.assertEqual(codice, 1)
         self.assertEqual(accodati, 0)
         self.assertIn("non trovato", testo)
+
+    def test_la_consegna_in_chat_e_dichiarata_nel_job(self):
+        """`--crea --chat <chat>`: la destinazione sta nel job, e il driver consegna."""
+        vetrina = vetrina_dal_documento(PERSONA)
+        visto = {}
+
+        def chiama(*args, **kwargs):
+            visto["url"], visto["payload"] = args[0], kwargs.get("payload")
+            return 200, {"job": {"id": "abc"}}, ""
+
+        originale = self.cli.chiama
+        self.cli.chiama = chiama
+        try:
+            stato, _dati, _errore = self.cli.accoda_ritratto(
+                "http://127.0.0.1:8085", "token", vetrina, destinazione="@il_mio_canale")
+        finally:
+            self.cli.chiama = originale
+        self.assertEqual(stato, 200)
+        self.assertTrue(visto["url"].endswith("/image/generate"))
+        self.assertEqual(visto["payload"]["destinazione"], "@il_mio_canale")
+        self.assertEqual(visto["payload"]["seed"], vetrina["seed"],
+                         "il volto resta quello: la consegna non tocca l'identità")
+
+    def test_senza_destinazione_il_job_non_consegna_nulla(self):
+        """Di default il ritratto si guarda e basta: nessun invio a sorpresa."""
+        visto = {}
+
+        def chiama(*args, **kwargs):
+            visto["payload"] = kwargs.get("payload")
+            return 200, {"job": {"id": "abc"}}, ""
+
+        originale = self.cli.chiama
+        self.cli.chiama = chiama
+        try:
+            self.cli.accoda_ritratto("http://127.0.0.1:8085", "token",
+                                     vetrina_dal_documento(PERSONA))
+        finally:
+            self.cli.chiama = originale
+        self.assertEqual(visto["payload"]["destinazione"], "")
 
 
 class RottaJobTests(unittest.TestCase):

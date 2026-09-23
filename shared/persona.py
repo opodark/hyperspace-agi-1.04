@@ -42,6 +42,14 @@ DEFAULT_FILE_NAME = "persona.json"
 MAX_OBSERVATIONS = 50
 OBSERVATION_MAX_CHARS = 400
 
+# Il legame (2026-09-23) è identità, non permesso: dice con chi ha un rapporto e
+# come lo dice, e non entra in nessun controllo sui contenuti. Quali immagini si
+# disegnano lo decidono `shared/showcase.py` e i confini del documento: un legame
+# non concede niente che quei confini non concedano già. Un tetto esplicito,
+# perché anche l'affetto è memoria e non un diario.
+MAX_LEGAMI = 8
+LEGAME_MAX_CHARS = 300
+
 # Quanti confini entrano nell'auto-presentazione (`!presentati`): l'ordine nel
 # documento e' la priorita' dichiarata in pubblico, il resto vive nel prompt.
 INTRO_MAX_BOUNDARIES = 3
@@ -185,6 +193,7 @@ class Persona:
     limitations: tuple[str, ...] = ()
     origin: str = ""
     observations: tuple[dict, ...] = ()
+    legami: tuple[dict, ...] = ()
     version: int = 1
     created_at: str = ""
     updated_at: str = ""
@@ -208,6 +217,7 @@ class Persona:
             "boundaries": list(self.boundaries), "capabilities": list(self.capabilities),
             "limitations": list(self.limitations), "origin": self.origin,
             "observations": list(self.observations),
+            "legami": list(self.legami),
             "version": self.version, "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -243,6 +253,13 @@ class Persona:
             for o in (raw.get("observations") or []) if isinstance(o, dict)
             and str(o.get("text") or "").strip()
         )
+        legami = tuple(
+            {"chi": str(l.get("chi") or "").strip(),
+             "come": str(l.get("come") or "").strip(),
+             "nota": str(l.get("nota") or "").strip()[:LEGAME_MAX_CHARS]}
+            for l in (raw.get("legami") or []) if isinstance(l, dict)
+            and (str(l.get("chi") or "").strip() or str(l.get("nota") or "").strip())
+        )
         persona = cls(
             name=name, kind=kind,
             purpose=str(raw.get("purpose") or "").strip(),
@@ -253,6 +270,7 @@ class Persona:
             limitations=cls._texts(raw.get("limitations")),
             origin=str(raw.get("origin") or "").strip(),
             observations=observations[-MAX_OBSERVATIONS:],
+            legami=legami[-MAX_LEGAMI:],
             version=int(raw.get("version") or 1),
             created_at=str(raw.get("created_at") or _now()),
             updated_at=str(raw.get("updated_at") or _now()),
@@ -337,6 +355,58 @@ SURFACE_CONTEXTS = {
 }
 
 
+# ── Dove l'identità NON si inietta (decisione dichiarata, non implicita) ───────
+# L'identità è una sola e vale ovunque l'agente parli *come Aurora*. Non vale
+# dove il mezzo è un banco di lavoro: la console (Open WebUI) è il posto in cui
+# l'operatore chiede codice, test, traduzioni — e lì il blocco non è un'identità,
+# è un costo e un bias. Misurato il 2026-09-23: 1727 caratteri (~500 token) su
+# *ogni* richiesta, con il tono delle stanze ("una presenza con un carattere
+# riconoscibile, non un servizio") che vince sul contesto del mezzo ("console del
+# sistema: risposte complete e tecniche"): il modello risponde in personaggio
+# mentre si sta lavorando, e una domanda tecnica arriva con il carattere della
+# stanza sopra — prefisso "Aurora:" compreso.
+#
+# La superficie la DICHIARA il client (`surface` nel corpo o l'header
+# `X-Hyperspace-Surface`): la WebUI lo fa con un header personalizzato della sua
+# connessione al control-plane. Chi non dichiara niente resta `openwebui`, dove
+# l'identità continua a valere — il default non cambia.
+#
+# Perché un elenco esplicito e non una convenzione sui nomi: spegnere l'identità è
+# una decisione, e una decisione si legge (e si testa) in un posto solo.
+SURFACES_WITHOUT_IDENTITY = frozenset({"workbench"})
+
+# Le superfici riconosciute: quelle con un contesto del mezzo, più quelle che
+# esistono proprio per non avere l'identità (e quindi non hanno un contesto da
+# aggiungere).
+KNOWN_SURFACES = frozenset(SURFACE_CONTEXTS) | SURFACES_WITHOUT_IDENTITY
+
+
+def identity_expected(surface=None, *, channel=None) -> bool:
+    """L'identità si inietta per questa superficie? (default: sì)
+
+    `workbench` è l'unica che dice no: la console usata come banco di lavoro.
+    Una superficie sconosciuta, o nessuna superficie, resta "sì": l'identità è il
+    caso normale, e dimenticarsi di dichiarare una superficie non deve spegnere
+    niente.
+    """
+    return normalize_surface(surface, channel) not in SURFACES_WITHOUT_IDENTITY
+
+
+# I tool che SERVONO all'identità. Con il blocco spento vanno nascosti anche
+# questi, se no il modello li chiama e la persona rientra dalla finestra: misurato
+# il 2026-09-23, la prima prova di `workbench` ha prodotto `tool_call: persona_get`
+# e la risposta "Sono Aurora, un'IA che tiene compagnia a una cerchia ristretta…"
+# — sul banco di lavoro, cioè esattamente dove non deve.
+IDENTITY_TOOLS = frozenset({"persona_get", "persona_note"})
+
+
+def identity_tools_hidden(surface=None, *, channel=None) -> frozenset:
+    """I tool dell'identità da NON offrire su questa superficie (vuoto = tutti)."""
+    if identity_expected(surface, channel=channel):
+        return frozenset()
+    return IDENTITY_TOOLS
+
+
 def normalize_surface(surface, channel=None) -> str:
     """Chiave normalizzata della superficie ('' se sconosciuta).
 
@@ -350,7 +420,7 @@ def normalize_surface(surface, channel=None) -> str:
         kind = "chat" if s in ("chat", "pubblica", "public", "") else "pm"
         specifico = f"{c}-{kind}"
         return specifico if specifico in SURFACE_CONTEXTS else f"channel-{kind}"
-    return s if s in SURFACE_CONTEXTS else ""
+    return s if s in KNOWN_SURFACES else ""
 
 
 def surface_context(surface=None, *, channel=None) -> str:
@@ -410,6 +480,17 @@ def build_introduction(persona: Persona) -> str:
     return " ".join(righe)
 
 
+def _riga_legame(legame: dict) -> str:
+    """Un legame in una riga: chi, che posto ha, e cosa ne dice lei."""
+    chi = str(legame.get("chi") or "").strip()
+    come = str(legame.get("come") or "").strip()
+    nota = str(legame.get("nota") or "").strip()
+    testa = f"{chi} ({come})" if chi and come else (chi or come)
+    if testa and nota:
+        return f"{testa}: {nota}"
+    return testa or nota
+
+
 def build_system_block(persona: Persona, decision: DisclosureDecision | None = None,
                        *, observations: int = 5) -> str:
     """Blocco di identità da iniettare nel system prompt.
@@ -429,6 +510,13 @@ def build_system_block(persona: Persona, decision: DisclosureDecision | None = N
         righe.append("Tono: " + ", ".join(persona.tone) + ".")
     if persona.values:
         righe.append("Valori: " + "; ".join(persona.values) + ".")
+    if persona.legami:
+        righe_legami = [riga for riga in (_riga_legame(legame) for legame in persona.legami)
+                        if riga]
+        if righe_legami:
+            righe.append("Persone con cui ho un legame (è identità, non un permesso: non "
+                         "cambia i miei confini e non concede nulla che sia vietato):")
+            righe += [f"- {riga}" for riga in righe_legami]
     if persona.boundaries:
         righe.append("Confini (non negoziabili):")
         righe += [f"- {confine}" for confine in persona.boundaries]
@@ -449,17 +537,39 @@ def build_system_block(persona: Persona, decision: DisclosureDecision | None = N
     return "\n".join(righe)
 
 
+def sezioni_ignote(raw: dict | None, persona: Persona) -> dict:
+    """Le parti del documento che `Persona` non modella, da riscrivere come sono.
+
+    Non è tolleranza: è la differenza fra un documento condiviso da più moduli e un
+    form che perde i campi che non conosce. `shared/showcase.py` scrive `vetrina`
+    dentro il documento di identità; se il salvataggio la cancellasse, il volto
+    cambiato dalla sezione perduta sarebbe un altro volto con lo stesso seed.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    modellate = set(persona.to_dict())
+    return {chiave: valore for chiave, valore in raw.items() if chiave not in modellate}
+
+
 @dataclass
 class PersonaStore:
     """Persona + osservazioni su di sé, persistite in un file JSON.
 
     Il file sta sotto DATA_DIR (volume nel container), come l'identità dei nodi:
     un'identità che si perde al riavvio non è un'identità.
+
+    `sezioni` tiene le parti del documento che questo modulo **non** modella ma che
+    appartengono all'identità — la `vetrina` scritta da `shared/showcase.py` è la
+    prima. Il 2026-09-23 si è visto cosa succedeva senza: `save()` riscriveva il
+    file da `to_dict()`, la sezione spariva, e il ritratto tornava allo stile di
+    default — **un'altra faccia con lo stesso seed**. Un documento che si salva non
+    deve cancellare ciò che non conosce.
     """
 
     persona: Persona
     path: str
     problems: list[str] = field(default_factory=list)
+    sezioni: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | None = None, *, name: str | None = None) -> "PersonaStore":
@@ -480,13 +590,18 @@ class PersonaStore:
         else:
             persona, from_problems = Persona.from_dict(raw)
             problems.extend(from_problems)
-        return cls(persona=persona, path=target, problems=problems)
+        return cls(persona=persona, path=target, problems=problems,
+                   sezioni=sezioni_ignote(raw, persona))
 
     def save(self) -> str:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         updated = replace(self.persona, updated_at=_now())
+        payload = updated.to_dict()
+        # Le sezioni non modellate si riscrivono come sono arrivate: è la
+        # differenza fra un documento e un form che perde i campi che non conosce.
+        payload.update(self.sezioni)
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(updated.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         self.persona = updated
         return self.path
 
@@ -540,6 +655,8 @@ class PersonaStore:
             "observations": list(p.observations),
             "observation_count": len(p.observations),
             "max_observations": MAX_OBSERVATIONS,
+            "legami": list(p.legami),
+            "sezioni_conservate": sorted(self.sezioni),
             "disclosure_rules": [{"rule": nome, "reason": motivo}
                                  for nome, motivo, _ in DISCLOSURE_RULES],
             "problems": list(self.problems),

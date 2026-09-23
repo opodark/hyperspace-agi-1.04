@@ -390,12 +390,18 @@ class ControlPlaneToolTests(unittest.TestCase):
         self.assertNotIn("shell_session", ast.unparse(native.value))
 
     def test_the_dispatcher_calls_both(self):
+        """I due tool shell li esegue il dispatcher — e l'elenco di cosa è nostro
+        sta in `_handlers_nativi` (una sola fonte dal 2026-09-23: la stessa che
+        decide il passthrough dei tool del client, vedi test_tool_passthrough.py)."""
         tree = ast.parse(self.source)
+        elenco = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                      and n.name == "_handlers_nativi")
+        deployati = ast.unparse(elenco)
+        self.assertIn("shell_run", deployati)
+        self.assertIn("shell_session", deployati)
         dispatcher = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                           and n.name == "_execute_tool_call")
-        deployed = ast.unparse(dispatcher)
-        self.assertIn("shell_run", deployed)
-        self.assertIn("shell_session", deployed)
+        self.assertIn("_handlers_nativi()", ast.unparse(dispatcher))
 
     def test_disabled_and_unconfigured_are_answered_without_calling_the_host(self):
         for state, expected in (({"enabled": False, "configured": True}, "disabilitato"),

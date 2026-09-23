@@ -269,7 +269,12 @@ def cmd_persona(cli: Cli) -> None:
         return
     print(f"{persona.get('name')} ({persona.get('kind')})  file={persona.get('file')}")
     print(f"attiva={persona.get('enabled')}  versione={persona.get('version')}  "
-          f"annotazioni={persona.get('observation_count')}/{persona.get('max_observations')}")
+          f"annotazioni={persona.get('observation_count')}/{persona.get('max_observations')}"
+          + (f"  sezioni conservate={','.join(persona.get('sezioni_conservate') or [])}"
+             if persona.get("sezioni_conservate") else ""))
+    for legame in persona.get("legami") or []:
+        print(f"  legame    {legame.get('chi')} ({legame.get('come')}): "
+              f"{str(legame.get('nota', ''))[:100]}")
     for voce in persona.get("boundaries") or []:
         print(f"  confine   {str(voce)[:110]}")
     for nota in (persona.get("observations") or [])[-cli.args.number:]:

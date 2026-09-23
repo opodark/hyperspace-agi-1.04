@@ -65,7 +65,7 @@ Escalation is deliberately slow: the **first** strike does not punish anyone, be
 | `CHANNEL_CLIENTS` | — | `cam4=<token>;cb=<token>`; empty = no channel served |
 | `CHANNEL_ENABLED` | `true` | closes every route without deleting the tokens |
 | `CHANNEL_MODEL` | default model | a room replies with one sentence: a small fast model is usually better |
-| `CHANNEL_MAX_TOKENS` | `160` | generation budget (reasoning is off explicitly) |
+| `CHANNEL_MAX_TOKENS` | `160` | generation budget (reasoning is off explicitly). The **length** is decided by the driver's `max_chars`; this is what makes it real: 160 tokens ≈ 540 characters, so a driver asking for 900 got 541 (measured 2026-09-23) |
 | `CHANNEL_MIN_REPLY_INTERVAL_S` | `25` | minimum gap between two generated replies |
 | `CHANNEL_BATCH_MAX_AGE_S` / `CHANNEL_BATCH_MAX_MESSAGES` | `6` / `6` | when a batch counts as ripe |
 | `CHANNEL_REPLY_PROBABILITY` | `1.0` | below 1.0 the CP sometimes stays silent on purpose |
@@ -114,7 +114,7 @@ Four knobs decide what the model sees, and all of them are read **at call time**
 | `CHANNEL_CONTEXT_MESSAGES` | `20` | how many of the last messages go into the prompt |
 | `CHANNEL_CONTEXT_CHARS` | `400` | truncation per message (one wall of text must not eat the prompt) |
 | `CHANNEL_NUM_CTX` | `8192` | the context window asked of Ollama (`num_ctx`) |
-| `CHANNEL_MAX_TOKENS` | `160` | cap on the reply itself (one line, trimmed by `max_chars`) |
+| `CHANNEL_MAX_TOKENS` | `160` | cap on the reply itself, trimmed by `max_chars`. Raise it **together with** the driver's `max_chars`: alone it truncates silently (160 tokens ≈ 540 characters) |
 
 `CHANNEL_NUM_CTX` exists for a concrete reason: without an explicit `num_ctx`,
 Ollama uses its own default (often 4096) and truncates the **beginning** of the

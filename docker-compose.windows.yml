@@ -217,12 +217,37 @@ services:
       ENABLE_OLLAMA_API: "false"
       WEBUI_AUTH: "false"
       WEBUI_NAME: "HyperSpace Control"
+      # La chiave che firma le sessioni del browser. Senza questa variabile
+      # Open WebUI ne genera una a caso dentro il container
+      # (/app/backend/.webui_secret_key): sopravvive a un riavvio, non a una
+      # RICREAZIONE — e ogni aggiornamento dell'immagine ricrea il container,
+      # quindi invalida i token e obbliga a rifare il login. Stesso default di
+      # docker-compose.yml.
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-hyperspace-secret-key-32chars-ok!}
       # Il nodo mesh serve i modelli in sequenza (model_manager, capacita' 1):
       # la generazione automatica del titolo raddoppia le richieste per ogni
       # chat sullo stesso slot, causando "Server disconnected" quando il
       # modello e' lento (es. varianti "abliterated"/reasoning). Disattivata
       # per non competere con la risposta vera.
       ENABLE_TITLE_GENERATION: "false"
+      # ── Immagini: motore ComfyUI, dietro il gateway del repo ─────────────────
+      # I valori veri — il grafo in formato API e la mappa dei campi — li scrive
+      # `python scripts/webui_image_env.py --write`: sono DERIVATI da
+      # shared/image_jobs.py::workflow(), che è il grafo che il ponte esegue
+      # davvero. Qui ci sono solo i default, così un .env senza quelle chiavi non
+      # rompe compose (e la funzione resta spenta).
+      # La base URL è il GATEWAY (integrations/comfyui/webui_gateway.py) e non
+      # ComfyUI: è lì che la scheda si libera prima del diffusion
+      # (shared/gpu_budget.py), ed è la ragione per cui esiste.
+      ENABLE_IMAGE_GENERATION: "${ENABLE_IMAGE_GENERATION:-false}"
+      IMAGE_GENERATION_ENGINE: "${IMAGE_GENERATION_ENGINE:-comfyui}"
+      IMAGE_GENERATION_MODEL: "${IMAGE_GENERATION_MODEL:-qwen-image-2.1-UC-Q5_K_M.gguf}"
+      COMFYUI_BASE_URL: "${COMFYUI_BASE_URL:-http://host.docker.internal:8189}"
+      COMFYUI_API_KEY: "${COMFYUI_API_KEY:-}"
+      COMFYUI_WORKFLOW: "${COMFYUI_WORKFLOW:-}"
+      COMFYUI_WORKFLOW_NODES: "${COMFYUI_WORKFLOW_NODES:-[]}"
+      IMAGE_SIZE: "${IMAGE_SIZE:-768x768}"
+      IMAGE_STEPS: "${IMAGE_STEPS:-25}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

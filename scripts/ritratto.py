@@ -43,12 +43,26 @@ from shared.showcase import (istruzione_botfather, negativo_ritratto,  # noqa: E
                              vetrina_dal_documento)
 
 TOKEN_ENV_DEFAULT = ROOT / "data" / "telegram-bot.env"
+# L'identità viva è quella del runtime: è il file montato nel control-plane
+# (`data/runtime/data` → `/app/data`), quello che il CP legge e riscrive, e la
+# stessa scelta che fa `scripts/start.ps1`. Il file nel repo resta il **seme**: se il
+# runtime non c'è, si parte da lì. L'ordine inverso è ciò che il 2026-09-23 ha
+# prodotto due documenti divergenti — la vetrina scritta da Aurora in uno, le sue
+# osservazioni e i suoi sogni nell'altro (version 3 contro version 4).
 PERSONA_CANDIDATI = (
-    ROOT / "data" / "persona-aurora.json",
     ROOT / "data" / "runtime" / "data" / "persona-aurora.json",
-    ROOT / "data" / "persona.json",
     ROOT / "data" / "runtime" / "data" / "persona.json",
+    ROOT / "data" / "persona-aurora.json",
+    ROOT / "data" / "persona.json",
 )
+
+# Le sezioni su cui due documenti NON possono divergere: quelle che decidono un
+# volto o un confine. Osservazioni e versioni possono essere diverse — il runtime
+# evolve — e non è un problema. Nemmeno i `legami` si confrontano: sono dati di una
+# persona (un handle, delle parole dette a lei), e un documento-seme in un repo
+# pubblico non può portarli: confrontarli produrrebbe un avviso che suona sempre.
+SEZIONI_DI_IDENTITA = ("purpose", "tone", "values", "boundaries", "capabilities",
+                       "limitations", "vetrina")
 
 
 def leggi_env_file(path: Path) -> dict:
@@ -133,8 +147,42 @@ def telegram(api: str, metodo: str, **params) -> tuple[int, dict, str]:
         return risposta.status_code, {}, risposta.text[:160]
 
 
+def divergenze_documenti(percorsi) -> list[str]:
+    """Dove due documenti di identità non dicono la stessa cosa.
+
+    Si confrontano solo le sezioni che decidono un volto o un confine: il runtime
+    evolve (osservazioni, sogni, versioni) e pretendere file identici sarebbe un
+    avviso che suona sempre. Il 2026-09-23 i due documenti erano a versioni diverse,
+    uno con la vetrina e uno senza, e nessuno se ne sarebbe accorto fino a un
+    ritratto con la faccia sbagliata: ecco perché il controllo esiste.
+    """
+    documenti = []
+    for percorso in percorsi:
+        try:
+            testo = Path(percorso).read_text(encoding="utf-8")
+            documenti.append((Path(percorso), json.loads(testo)))
+        except (OSError, ValueError):
+            continue
+    if len(documenti) < 2:
+        return []
+    riferimento_percorso, riferimento = documenti[0]
+    avvisi: list[str] = []
+    for percorso, documento in documenti[1:]:
+        for sezione in SEZIONI_DI_IDENTITA:
+            primo = json.dumps(riferimento.get(sezione), sort_keys=True, ensure_ascii=False)
+            secondo = json.dumps(documento.get(sezione), sort_keys=True, ensure_ascii=False)
+            if primo != secondo:
+                avvisi.append(f"{sezione}: {percorso} diverso da {riferimento_percorso}")
+    return avvisi
+
+
 def accoda_ritratto(base: str, token: str, vetrina: dict, *, scena: str = "",
-                    seed: int | None = None) -> tuple[int, dict]:
+                    seed: int | None = None, destinazione: str = "") -> tuple[int, dict]:
+    """Mette in coda il ritratto. Con `destinazione` il driver lo consegna in chat.
+
+    La consegna non passa dal control-plane: lui decide *dove* (una chat, un id),
+    il file ce l'ha il driver — che è l'unico a poter parlare con Telegram.
+    """
     payload = {
         "prompt": prompt_ritratto(vetrina, scena=scena),
         "negativo": negativo_ritratto(vetrina),
@@ -143,7 +191,7 @@ def accoda_ritratto(base: str, token: str, vetrina: dict, *, scena: str = "",
         "passi": int(vetrina["passi"]),
         "seed": int(vetrina["seed"] if seed is None else seed),
         "richiedente": "ritratto",
-        "destinazione": "",
+        "destinazione": destinazione.strip(),
     }
     return chiama(f"{base}/image/generate", token, metodo="post", payload=payload)
 
@@ -179,7 +227,9 @@ def main(argv=None) -> int:
     parser.add_argument("--check", action="store_true", help="verifica e basta (default)")
     parser.add_argument("--crea", action="store_true", help="genera la candidata")
     parser.add_argument("--foto", default="", help="metti questa immagine come foto di una CHAT (canale)")
-    parser.add_argument("--chat", default="", help="id o @username della chat per --foto")
+    parser.add_argument("--chat", default="",
+                        help="id o @username della chat: con --foto è la chat amministrata, "
+                             "con --crea è dove il driver consegna il ritratto")
     parser.add_argument("--scena", default="", help="scena del ritratto (default: quella dichiarata)")
     parser.add_argument("--seed", type=int, default=None, help="un altro seed = un'altra candidata")
     parser.add_argument("--forza", action="store_true",
@@ -211,6 +261,9 @@ def main(argv=None) -> int:
           f"{vetrina['passi']} passi · stile "
           + ("dal documento" if stile_dichiarato else "default del modulo (dichiaralo "
              "in `vetrina` per cambiarlo)"))
+    altri_documenti = [p for p in PERSONA_CANDIDATI if p != percorso and p.is_file()]
+    for avviso in divergenze_documenti([percorso] + altri_documenti):
+        print(f"ATTENZIONE: due documenti di identità divergono — {avviso}")
     if args.forza:
         print("ATTENZIONE: --forza attivo — la vetrina può contraddire il documento, "
               "e la cosa resta scritta qui e nei log")
@@ -250,7 +303,8 @@ def main(argv=None) -> int:
         return 1
     print("")
     print("accodo il ritratto (identità stabile: stesso prompt, stesso seed)...")
-    stato, dati = accoda_ritratto(base, token, vetrina, scena=args.scena, seed=args.seed)
+    stato, dati = accoda_ritratto(base, token, vetrina, scena=args.scena, seed=args.seed,
+                                  destinazione=args.chat)
     if stato != 201 or not dati.get("ok"):
         print(f"accodamento fallito (HTTP {stato}): {dati.get('error') or dati.get('errore')}")
         return 1
@@ -259,6 +313,8 @@ def main(argv=None) -> int:
         print(f"  {dati['scheda']}")
     print(f"job {job['id']}: {job['larghezza']}x{job['altezza']} passi={job['passi']} "
           f"seed={job['seed']}")
+    if args.chat:
+        print(f"consegna: il driver manderà il file in {args.chat} appena è pronto")
     print(f"il ponte lo esegue (misura tipica ~5 minuti): aspetto fino a {int(args.attesa)}s")
     finale = aspetta_job(base, token, job["id"], attesa_s=args.attesa)
     esito = finale.get("esito") or {}

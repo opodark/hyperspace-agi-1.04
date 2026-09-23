@@ -71,6 +71,7 @@ from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryClient, HermesMemoryError
 from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
 from shared import gpu_budget
+from shared import web_search
 from shared.web_node import (
     WebNodeError,
     WebNodeRegistry,
@@ -80,7 +81,8 @@ from shared.web_node import (
 from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
 from shared.node_compat import ProtocolWatch
 from shared.mcp_auth import McpAuthPolicy
-from shared.persona import PersonaStore, audit_reply, build_introduction, should_disclose
+from shared.persona import (PersonaStore, audit_reply, build_introduction,
+                            identity_expected, identity_tools_hidden, should_disclose)
 from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
@@ -671,13 +673,19 @@ connector_manager = ConnectorManager(on_event=_connector_event)
 persona_store = PersonaStore.load()
 
 
-def _persona_enabled() -> bool:
+def _persona_enabled(surface: str | None = None) -> bool:
     """Letto a ogni richiesta: la spunta della tab Setup ha effetto immediato.
 
     Una copia in una globale renderebbe il toggle 'salvato ma inerte fino al
     riavvio', che è il difetto che stiamo evitando per i connettori.
+
+    Dal 2026-09-23 c'è anche la superficie: `workbench` (la console usata come
+    banco di lavoro) dichiara di non volere l'identità. Chi decide è
+    `shared/persona.py` — qui si legge e basta, o la regola vivrebbe in due posti.
     """
-    return str(os.getenv("PERSONA_ENABLED", "true")).strip().lower() != "false"
+    if str(os.getenv("PERSONA_ENABLED", "true")).strip().lower() == "false":
+        return False
+    return identity_expected(surface)
 
 
 def _reload_persona() -> None:
@@ -2103,29 +2111,52 @@ def _tool_web_search(args: dict) -> str:
         params = {
             "q":        query,
             "format":   "json",
-            "language": "it-IT",
             "safesearch": "0",
             "categories": "general",
         }
+        # La lingua si decide dalla query, non dalla configurazione: con `it-IT`
+        # fisso una query inglese tornava fuori tema e il modello ci costruiva
+        # sopra (le misure stanno in `shared/web_search.py`). Vuoto = non si passa
+        # il parametro: vale il default dell'istanza (query corte e ambigue).
+        scelta_lingua = web_search.lingua(query)
+        if scelta_lingua:
+            params["language"] = scelta_lingua
         r    = requests.get(f"{SEARXNG_URL}/search", params=params, headers=headers, timeout=10)
         data = r.json()
+        # Si filtra PRIMA di formattare: titolo e descrizione sono segnali diversi e
+        # `web_search.filtra` li distingue (vedi `shared/web_search.py` per le misure).
+        grezze = [item for item in (data.get("results") or []) if isinstance(item, dict)]
+        utili = web_search.filtra(
+            grezze, query,
+            testo=lambda it: f"{it.get('title','')} {it.get('content','')}",
+            titolo=lambda it: str(it.get("title", "") or ""))
         results = []
-        # abstract/infobox
-        if data.get("infoboxes"):
-            ib = data["infoboxes"][0]
-            results.append(f"[Infobox] {ib.get('content','')[:300]}\nFonte: {ib.get('urls',[{}])[0].get('url','') if ib.get('urls') else ''}")
-        # risultati organici
-        for item in data.get("results", [])[:max_results]:
-            title   = item.get("title", "")
-            url     = item.get("url", "")
-            snippet = item.get("content", "")
-            results.append(f"- {title}\n  {snippet[:200]}\n  {url}")
+        # abstract/infobox: resta solo se parla della ricerca
+        for infobox in (data.get("infoboxes") or [])[:1]:
+            if web_search.filtra([infobox], query,
+                                 testo=lambda ib: str(ib.get("content", "") or "")):
+                results.append(f"[Infobox] {str(infobox.get('content',''))[:300]}\n"
+                               f"Fonte: {(infobox.get('urls') or [{}])[0].get('url','')}")
+        for item in utili[:max_results]:
+            results.append(f"- {item.get('title','')}\n"
+                           f"  {str(item.get('content') or '')[:200]}\n  {item.get('url','')}")
         if results:
             push_log('system', f'web_search (searxng): {query[:60]}',
-                     detail=f'results={len(results)}', status='success')
-            return f"Risultati web per '{query}':\n\n" + "\n\n".join(results[:max_results])
-        # se SearXNG risponde ma risultati vuoti
-        push_log('system', f'web_search (searxng) empty: {query[:40]}', status='warn')
+                     detail=(f'results={len(results)}/{len(grezze)} '
+                             f'lingua={scelta_lingua or "default"}'),
+                     status='success')
+            return f"Risultati web per '{query}':\n\n" + "\n\n".join(results)
+        if grezze:
+            # Risultati presenti ma non collegati alla query: è il segno di engine
+            # in throttling/CAPTCHA, e SearXNG risponde comunque 200 (le misure
+            # stanno in `shared/web_search.py`). Consegnarli al modello è il modo
+            # in cui è nata una foto "trovata" su un marketplace che non esiste.
+            push_log('system', f'web_search (searxng) non pertinenti: {query[:40]}',
+                     detail=f'results={len(grezze)} lingua={scelta_lingua or "default"}',
+                     status='warn')
+        else:
+            # se SearXNG risponde ma risultati vuoti
+            push_log('system', f'web_search (searxng) empty: {query[:40]}', status='warn')
     except Exception as e_searx:
         push_log('system', f'web_search searxng error: {query[:40]}', str(e_searx), status='warn')
 
@@ -2140,14 +2171,23 @@ def _tool_web_search(args: dict) -> str:
         results2  = []
         for i, s in enumerate(snippets[:max_results]):
             results2.append(f"- {s.strip()}\n  {links[i] if i < len(links) else ''}")
+        grezzi2 = len(results2)
+        results2 = web_search.filtra(results2, query)
         if results2:
             push_log('system', f'web_search (ddg-fallback): {query[:60]}',
-                     detail=f'results={len(results2)}', status='success')
+                     detail=f'results={len(results2)}/{grezzi2}', status='success')
             return f"Risultati web per '{query}' (fallback):\n\n" + "\n\n".join(results2)
+        if grezzi2:
+            push_log('system', f'web_search (ddg-fallback) non pertinenti: {query[:40]}',
+                     detail=f'results={grezzi2}', status='warn')
     except Exception as e_ddg:
         push_log('system', f'web_search ddg error: {query[:40]}', str(e_ddg), status='failed')
 
-    return f"Nessun risultato trovato per: '{query}'. SearXNG attivo su {SEARXNG_URL}?"
+    return (f"Nessun risultato utile per: '{query}'. Gli engine di ricerca non hanno "
+            f"risposto con contenuti collegati alla richiesta (istanza SearXNG su "
+            f"{SEARXNG_URL}): succede quando sono in throttling o dietro CAPTCHA, e "
+            f"ritentare più tardi di solito basta. Dirlo all'utente è meglio che "
+            f"riempire il vuoto.")
 
 def _tool_get_mesh_status(args: dict) -> str:
     active = [n for n in _node_list() if n.get("status") == "active"]
@@ -2346,13 +2386,16 @@ def _reload_connectors(changed_keys) -> None:
 
 
 # ── TOOL DISPATCHER ───────────────────────────────────────────────────────────
-def _execute_tool_call(tool_name: str, tool_args) -> str:
-    if isinstance(tool_args, str):
-        try:
-            tool_args = json.loads(tool_args)
-        except Exception:
-            tool_args = {}
-    handlers = {
+def _handlers_nativi() -> dict:
+    """I tool che il control-plane esegue DA SÉ: nativi + shell.
+
+    Una sola definizione, come per il catalogo: la usano l'esecuzione
+    (`_execute_tool_call`) e la decisione sul passthrough (`_tool_del_client`).
+    Il dizionario si costruisce a ogni chiamata perché `_tool_shell_run` e
+    `_tool_shell_session` sono definite più sotto nel modulo: riferirle a livello
+    di modulo sarebbe un NameError già all'import.
+    """
+    return {
         "web_search":      _tool_web_search,
         "omega_query":     _omega_query,
         "omega_store":     _omega_store,
@@ -2365,7 +2408,32 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         "shell_run":       _tool_shell_run,
         "shell_session":   _tool_shell_session,
     }
-    handler = handlers.get(tool_name)
+
+
+def _catalogo_nativi(superficie: str = "") -> list:
+    """Il catalogo dei tool nativi che QUESTA superficie può vedere.
+
+    `workbench` (la console usata come banco di lavoro) non riceve i tool
+    dell'identità: offrirli invita il modello a chiedere chi è, e la risposta
+    arriva con il carattere delle stanze proprio dove non deve. Misurato il
+    2026-09-23, la prima prova di `workbench`: "chi sei?" → `tool_call:
+    persona_get` → "Sono Aurora, un'IA che tiene compagnia a una cerchia
+    ristretta…". La regola (quali tool, e perché) sta in `shared/persona.py`.
+    """
+    nascosti = identity_tools_hidden(superficie)
+    if not nascosti:
+        return list(BUILTIN_TOOLS)
+    return [tool for tool in BUILTIN_TOOLS
+            if tool.get("function", {}).get("name") not in nascosti]
+
+
+def _execute_tool_call(tool_name: str, tool_args) -> str:
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except Exception:
+            tool_args = {}
+    handler = _handlers_nativi().get(tool_name)
     if handler:
         try:
             return handler(tool_args)
@@ -2378,6 +2446,86 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         return connector_manager.execute(tool_name, tool_args)
     except Exception as e:
         return f"Errore esecuzione tool '{tool_name}': {e}"
+
+
+def _tool_del_client(tool_name: str, client_names) -> bool:
+    """True se il tool è del CLIENT che l'ha offerto: lo esegue lui, non noi.
+
+    Perché esiste (2026-09-23): Open WebUI 0.11 offre al modello un tool nativo
+    `generate_image` che chiama la SUA rotta immagini -> gateway -> ComfyUI. Il
+    tool loop del CP però lo eseguiva da sé, e l'unica risposta che poteva dargli
+    era "non gestito da nessun connector attivo": la chiamata moriva lì, l'immagine
+    non arrivava mai a ComfyUI, e il modello — ricevuto un fallimento — raccontava
+    di aver fatto ("File inviato nel canale privato", con nessun file da nessuna
+    parte). La regola è quindi esplicita e stretta: **si esegue solo ciò che è
+    nostro** (nativi + connettori), e un tool che il client ha offerto e noi non
+    abbiamo torna a lui, che sa eseguirlo.
+    """
+    nome = str(tool_name or "").strip()
+    if not nome or nome in _handlers_nativi():
+        return False
+    return nome in {str(nome_cliente or "") for nome_cliente in (client_names or [])}
+
+
+def _tool_calls_passthrough(result_json) -> list:
+    """I tool_calls che una risposta porta al client (lista vuota se non ce ne sono)."""
+    if not isinstance(result_json, dict):
+        return []
+    scelte = result_json.get("choices") or []
+    if not scelte or not isinstance(scelte[0], dict):
+        return []
+    calls = (scelte[0].get("message") or {}).get("tool_calls") or []
+    return [tc for tc in calls if isinstance(tc, dict)]
+
+
+def _risposta_solo_tool_del_client(resp, tool_calls):
+    """La risposta del modello con i SOLI tool che deve eseguire il client.
+
+    Perché si filtrano gli altri: se la stessa risposta contenesse anche un tool
+    nostro, i suoi risultati non sarebbero consegnabili al client (il CP non tiene
+    stato fra una richiesta e l'altra: li perderebbe). Il modello lo richiederà al
+    giro seguente, con in mano il risultato del tool del client — cioè quello che
+    l'utente sta aspettando.
+    """
+    risposta = json.loads(json.dumps(resp, ensure_ascii=False))
+    scelte = risposta.get("choices") or [{}]
+    messaggio = scelte[0].setdefault("message", {})
+    messaggio["tool_calls"] = tool_calls
+    if messaggio.get("content") is None:
+        messaggio["content"] = ""
+    scelte[0]["finish_reason"] = "tool_calls"
+    return risposta
+
+
+def _chunk_finale(result_json, model: str, task_id: str) -> dict:
+    """Il chunk SSE con cui si chiude un giro di tool loop.
+
+    Se la risposta porta dei tool del client (passthrough) il chunk li porta con
+    sé come delta `tool_calls`: è il formato che Open WebUI legge per eseguirli.
+    Senza, un client in streaming non vedrebbe mai la chiamata — il ramo
+    tool-capable dello stream passa dal loop e riconfeziona solo il testo.
+    """
+    scelte = (result_json.get("choices") or [{}]) if isinstance(result_json, dict) else [{}]
+    messaggio = (scelte[0] or {}).get("message") or {}
+    tool_calls = _tool_calls_passthrough(result_json)
+    delta = {"role": "assistant", "content": _assistant_text(messaggio)}
+    fine = "stop"
+    if tool_calls:
+        delta["tool_calls"] = [
+            {"index": indice,
+             "id": tc.get("id") or f"call_{indice}",
+             "type": "function",
+             "function": {"name": (tc.get("function") or {}).get("name", ""),
+                          "arguments": (tc.get("function") or {}).get("arguments") or "{}"}}
+            for indice, tc in enumerate(tool_calls)]
+        fine = "tool_calls"
+    return {
+        "id": (result_json or {}).get("id", f"chatcmpl-{task_id}"),
+        "object": "chat.completion.chunk",
+        "created": (result_json or {}).get("created", int(time.time())),
+        "model": (result_json or {}).get("model", model),
+        "choices": [{"index": 0, "delta": delta, "finish_reason": fine}],
+    }
 
 @app.route('/tools/execute', methods=['POST'])
 def tools_execute():
@@ -3043,7 +3191,8 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
     messages       = list(data.get("messages", []))
     model          = data.get("model", DEFAULT_MODEL)
     tools_disabled = bool(data.get("_hyperspace_tools_off"))
-    backend_data   = {k: v for k, v in data.items() if k != "_hyperspace_tools_off"}
+    backend_data   = {k: v for k, v in data.items()
+                      if k not in ("_hyperspace_tools_off", "_hyperspace_surface")}
     supports_tools = _model_supports_tools(model) and not tools_disabled
     push_log('system', f'tool_loop: model={model} tools={supports_tools} signed={sign}', status='info')
 
@@ -3059,7 +3208,8 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
 
     client_tools = data.get("tools", [])
     client_names = {t["function"]["name"] for t in client_tools if t.get("function", {}).get("name")}
-    offered_builtins = BUILTIN_TOOLS if builtin_tools is None else builtin_tools
+    offered_builtins = (_catalogo_nativi(str(data.get("_hyperspace_surface", "") or ""))
+                        if builtin_tools is None else builtin_tools)
     all_tools    = client_tools + [t for t in offered_builtins if t["function"]["name"] not in client_names]
     last_resp    = None
 
@@ -3105,14 +3255,25 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
             return resp
 
         messages.append(message)
+        # Un tool offerto dal client e non nostro lo esegue il client: qui si
+        # raccoglie e si torna. Vedi `_tool_del_client` per il perché.
+        da_tornare = []
         for tc in message["tool_calls"]:
             tool_id   = tc.get("id", str(uuid.uuid4())[:8])
             tool_name = tc.get("function", {}).get("name", "")
             tool_args = tc.get("function", {}).get("arguments", {})
+            if _tool_del_client(tool_name, client_names):
+                da_tornare.append(tc)
+                continue
             push_log('system', f'tool_call: {tool_name}', detail=f'args={str(tool_args)[:120]}', status='info')
             result = _execute_tool_call(tool_name, tool_args)
             push_log('system', f'tool_result: {tool_name}', detail=f'{result[:120]}', status='success')
             messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})
+        if da_tornare:
+            nomi = ", ".join(str((tc.get("function") or {}).get("name", "?")) for tc in da_tornare)
+            push_log('system', f'tool del client: {nomi}',
+                     detail='passthrough: li esegue chi li ha offerti', status='info')
+            return _risposta_solo_tool_del_client(resp, da_tornare)
 
     return last_resp
 
@@ -3344,12 +3505,19 @@ def v1_chat_completions():
     # (tool loop e streaming, che parte da dict(data)). Il vincolo di disclosure
     # viene deciso sul testo dell'utente e LOGGATO: una decisione che non lascia
     # traccia non è verificabile.
-    if _persona_enabled():
-        user_text = _last_user_text(messages)
+    #
+    # La superficie si legge PRIMA della spunta: c'è una superficie che dichiara
+    # di non volere l'identità (`workbench`, la console usata come banco di
+    # lavoro) e il perché sta in `shared/persona.py`, non qui.
+    user_text = _last_user_text(messages)
+    superficie = str(data.get("surface", "") or "").strip() \
+        or request.headers.get("X-Hyperspace-Surface", "").strip() \
+        or "openwebui"
+    # La superficie viaggia con la richiesta: la usano l'identità e il catalogo
+    # dei tool (i tool dell'identità non si offrono su `workbench`).
+    data["_hyperspace_surface"] = superficie
+    if _persona_enabled(superficie):
         decisione = should_disclose(user_text)
-        superficie = str(data.get("surface", "") or "").strip() \
-            or request.headers.get("X-Hyperspace-Surface", "").strip() \
-            or "openwebui"
         messages = _with_persona(messages, user_text, surface=superficie)
         data = {**data, "messages": messages}
         if decisione.required:
@@ -3380,7 +3548,7 @@ def v1_chat_completions():
         client_tools = data.get("tools") or []
         client_names = {t.get("function", {}).get("name") for t in client_tools}
         aggiunti = [] if tools_off else [
-            tool for tool in BUILTIN_TOOLS
+            tool for tool in _catalogo_nativi(superficie)
             if tool["function"]["name"] not in client_names
         ]
         tools_available = client_tools + aggiunti
@@ -3457,7 +3625,8 @@ def v1_chat_completions():
         if _model_supports_tools(model):
             ct = stream_data.get("tools", [])
             cn = {t["function"]["name"] for t in ct if t.get("function", {}).get("name")}
-            stream_data["tools"] = ct + [t for t in BUILTIN_TOOLS if t["function"]["name"] not in cn]
+            stream_data["tools"] = ct + [t for t in _catalogo_nativi(superficie)
+                                         if t["function"]["name"] not in cn]
         else:
             stream_data.pop("tools", None)
 
@@ -3511,19 +3680,10 @@ def v1_chat_completions():
                         continue
                     if isinstance(result_json, dict) and result_json.get("error"):
                         continue
-                    message = ((result_json.get("choices") or [{}])[0] or {}).get("message") or {}
-                    content = _assistant_text(message)
-                    chunk = {
-                        "id": result_json.get("id", f"chatcmpl-{task_id}"),
-                        "object": "chat.completion.chunk",
-                        "created": result_json.get("created", int(time.time())),
-                        "model": result_json.get("model", model),
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": content},
-                            "finish_reason": "stop",
-                        }],
-                    }
+                    # Il chunk finale lo costruisce `_chunk_finale`: se la risposta
+                    # porta un tool del client (passthrough) viaggia con lei, o un
+                    # client in streaming non lo vedrebbe mai.
+                    chunk = _chunk_finale(result_json, stream_data.get("model", model), task_id)
                     task["node"] = node_id_c
                     db.update_task(task_id, "assigned", node_id=node_id_c, endpoint=endpoint_c)
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
@@ -3615,17 +3775,18 @@ def v1_chat_completions():
                         # restituisce mai un content vuoto dopo una tool call.
                         # Verificato su Ollama 0.34.2.
                         result_json = _run_tool_loop(stream_data, ollama_base)
-                        message = ((result_json.get("choices") or [{}])[0] or {}).get("message") or {}
-                        direct_content = _assistant_text(message)
+                        # Anche questo chunk può portare un tool del client: se il
+                        # loop l'ha passato indietro, il client deve vederlo.
+                        direct_chunk = _chunk_finale(result_json, model, task_id)
                     else:
-                        direct_content = native_message.get("content", "")
-                    direct_chunk = {
-                        "id": f"chatcmpl-{task_id}", "object": "chat.completion.chunk",
-                        "created": int(time.time()), "model": model,
-                        "choices": [{"index": 0, "delta": {
-                            "role": "assistant", "content": direct_content},
-                            "finish_reason": "stop"}],
-                    }
+                        direct_chunk = {
+                            "id": f"chatcmpl-{task_id}", "object": "chat.completion.chunk",
+                            "created": int(time.time()), "model": model,
+                            "choices": [{"index": 0, "delta": {
+                                "role": "assistant",
+                                "content": native_message.get("content", "")},
+                                "finish_reason": "stop"}],
+                        }
                     yield f"data: {json.dumps(direct_chunk, ensure_ascii=False)}\n\n".encode()
                     yield b"data: [DONE]\n\n"
                 else:

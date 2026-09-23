@@ -111,18 +111,26 @@ DICHIARAZIONE = (
 )
 
 # Richieste che non si accettano mai, nemmeno con --forza: sono i confini 2 e 3.
+#
+# La nudità si controlla sulla radice e non sulle parole intere (2026-09-23): qui
+# c'erano `nude` e `nudo`, e la scena che Aurora ha scritto per il proprio ritratto —
+# "i riflessi digitali che danzano sul corpo di una donna nuda" — non produceva
+# nessun problema, quindi sarebbe finita nel prompt. Il confine è suo e non cambiava:
+# mancava il femminile. Con la radice cadono nuda, nudi, ignuda, nudità, denudata.
 VIETATI_ASSOLUTI: Tuple[Tuple[str, str], ...] = (
     ("child", "nessun soggetto minorenne, mai"),
     ("bambin", "nessun soggetto minorenne, mai"),
     ("teen", "nessun soggetto minorenne, mai"),
     ("underage", "nessun soggetto minorenne, mai"),
     ("loli", "nessun soggetto minorenne, mai"),
-    ("nude", "piccante sì, esplicito no: è un confine dichiarato"),
-    ("nudo", "piccante sì, esplicito no: è un confine dichiarato"),
+    ("nud", "piccante sì, esplicito no: è un confine dichiarato"),
     ("naked", "piccante sì, esplicito no: è un confine dichiarato"),
     ("explicit", "piccante sì, esplicito no: è un confine dichiarato"),
     ("sex", "piccante sì, esplicito no: è un confine dichiarato"),
     ("sesso", "piccante sì, esplicito no: è un confine dichiarato"),
+    ("spogliat", "piccante sì, esplicito no: è un confine dichiarato"),
+    ("topless", "piccante sì, esplicito no: è un confine dichiarato"),
+    ("senza veli", "piccante sì, esplicito no: è un confine dichiarato"),
 )
 
 
