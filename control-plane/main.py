@@ -7554,6 +7554,22 @@ def conversations_data():
     return jsonify({"ok": True, "turns": list(_conversation_log)})
 
 
+@app.route('/diario')
+def diario_page():
+    """La vetrina del diario: i post illustrati e i sogni delle influencer."""
+    return send_from_directory(BASE_DIR, 'diario.html')
+
+
+@app.route('/diario/data')
+def diario_data():
+    """Le pagine del diario, dal più recente. `?limit=N` (default 50, max 200)."""
+    try:
+        limite = max(1, min(int(request.args.get("limit") or 50), 200))
+    except ValueError:
+        limite = 50
+    return jsonify({"ok": True, "voci": diario.list(limite)})
+
+
 @app.route('/feed', methods=['GET', 'POST'])
 def feed_route():
     """La timeline dei post delle influencer (Anna e Aurora).

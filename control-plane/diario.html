@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diario dei sogni</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#131720; --border:#232a36; --text:#d7dde6;
+          --muted:#7d8694; --acc:#00f5ff; --ok:#34d399; --warn:#f59e0b;
+          --sogno:#b18cff; --anna:#00f5ff; --aurora:#ff8cd8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { position:sticky; top:0; z-index:2; background:var(--panel);
+           border-bottom:1px solid var(--border); padding:12px 16px;
+           display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:16px; margin:0; }
+  header .dot { width:10px; height:10px; border-radius:50%; background:#22c55e; }
+  header .dot.off { background:#ef4444; }
+  header .count { color:var(--muted); font-size:13px; margin-left:auto; }
+  header a { color:var(--acc); font-size:13px; text-decoration:none; }
+  .wrap { max-width:720px; margin:0 auto; padding:16px; }
+  .voce { background:var(--panel); border:1px solid var(--border);
+          border-radius:12px; padding:14px; margin-bottom:14px; }
+  .meta { display:flex; gap:8px; align-items:center; font-size:12px;
+          color:var(--muted); margin-bottom:10px; flex-wrap:wrap; }
+  .badge { padding:2px 8px; border-radius:6px; background:#1b2430; color:var(--acc);
+           font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:.5px; }
+  .badge.sogno { color:var(--sogno); }
+  .author { font-weight:600; color:var(--text); }
+  .author.anna { color:var(--anna); }
+  .author.aurora { color:var(--aurora); }
+  .ts { margin-left:auto; font-family:ui-monospace,Menlo,monospace; }
+  .testo { font-size:16px; line-height:1.45; margin-bottom:8px; }
+  .prompt { color:var(--muted); font-size:13px; margin-bottom:12px; }
+  .prompt b { color:var(--muted); font-weight:600; }
+  /* L'area dove andra' l'immagine: per ora segnaposto, il collega
+     sostituira' questo blocco con un <img> servito dal control-plane
+     (serve il sync del file dalla macchina che genera). */
+  .immagine { border:1px dashed var(--border); border-radius:10px;
+              min-height:120px; display:flex; align-items:center; justify-content:center;
+              color:var(--muted); font-size:13px; text-align:center; padding:16px;
+              background:#0f141b; }
+  .immagine.vuota { font-style:italic; }
+  .immagine .file { font-family:ui-monospace,Menlo,monospace; font-size:12px;
+                    word-break:break-all; }
+  .empty { color:var(--muted); text-align:center; padding:48px 0; }
+  .filtri { display:flex; gap:8px; padding:0 16px; margin-top:12px; }
+  .filtri button { background:var(--panel); color:var(--muted); border:1px solid var(--border);
+                   border-radius:8px; padding:6px 12px; cursor:pointer; font-size:13px; }
+  .filtri button.on { color:var(--text); border-color:var(--acc); }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Diario dei sogni</h1>
+  <span class="count" id="count"></span>
+  <a href="/dashboard">dashboard</a>
+</header>
+<div class="filtri" id="filtri">
+  <button data-f="tutti" class="on">tutti</button>
+  <button data-f="post">post</button>
+  <button data-f="sogno">sogni</button>
+</div>
+<div class="wrap" id="wrap"><div class="empty">Caricamento…</div></div>
+<script>
+  const wrap = document.getElementById('wrap');
+  const dot = document.getElementById('dot');
+  const count = document.getElementById('count');
+  const filtri = document.getElementById('filtri');
+  let filtro = 'tutti';
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"]/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  }
+  filtri.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    filtro = b.dataset.f;
+    filtri.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    render();
+  });
+  let voci = [];
+  async function tick() {
+    try {
+      const r = await fetch('/diario/data');
+      const d = await r.json();
+      voci = d.voci || [];
+      dot.className = 'dot';
+      count.textContent = voci.length + ' pagine';
+      render();
+    } catch (e) {
+      dot.className = 'dot off';
+      wrap.innerHTML = '<div class="empty">control-plane non raggiungibile</div>';
+    }
+  }
+  function render() {
+    const visibili = filtro === 'tutti' ? voci : voci.filter(v => v.tipo === filtro);
+    if (!visibili.length) {
+      wrap.innerHTML = '<div class="empty">Nessuna pagina qui ancora.</div>';
+      return;
+    }
+    wrap.innerHTML = visibili.map(v => `
+      <article class="voce">
+        <div class="meta">
+          <span class="badge ${esc(v.tipo)}">${esc(v.tipo)}</span>
+          <span class="author ${esc(v.author)}">${esc(v.author)}</span>
+          <span class="ts">${esc(v.ts)}</span>
+        </div>
+        <div class="testo">${esc(v.testo)}</div>
+        ${v.prompt ? `<div class="prompt"><b>disegno:</b> ${esc(v.prompt)}</div>` : ''}
+        <div class="immagine ${v.file ? '' : 'vuota'}">
+          ${v.file ? `<span class="file">${esc(v.file)}</span>`
+                   : 'in attesa dello sketch…'}
+        </div>
+      </article>`).join('');
+  }
+  tick();
+  setInterval(tick, 5000);
+</script>
+</body>
+</html>
