@@ -89,6 +89,9 @@ from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import ImmagineQueue, nuovo_job, richiesta_immagine
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
+from shared.sketch import job_sketch, puo_generare
+from shared.diario import Diario, file_da_job, voce
+from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
 import routing as _routing
@@ -2631,11 +2634,16 @@ def image_generate():
 
 @app.route('/image/jobs')
 def image_jobs():
-    """Il prossimo job per il ponte. Vuoto = 204, che non è un errore."""
+    """Il prossimo job per il ponte. Vuoto = 204, che non è un errore.
+
+    `?famiglia=` limita ai job di quel modello: un ponte SDXL-Turbo (il Mac)
+    chiede `?famiglia=sdxl-turbo` e non prende i job Qwen-Image della win11.
+    """
     errore = _channel_error()
     if errore:
         return errore
-    job = image_queue.prossimo()
+    famiglia = (request.args.get("famiglia") or "").strip()
+    job = image_queue.prossimo(capace_di=famiglia or None)
     if job is None:
         return ('', 204)
     return jsonify({"ok": True, "job": job})
@@ -2654,6 +2662,13 @@ def image_result():
     if chiuso is None:
         return jsonify({"ok": False, "error": "job sconosciuto"}), 404
     esito = chiuso["esito"]
+    fatto = file_da_job(chiuso)
+    if fatto:
+        voce_id, percorso = fatto
+        if diario.aggiorna_file(voce_id, percorso):
+            diario.save(DIARIO_FILE)
+            push_log('feed', f'sketch nel diario', detail=f'voce={voce_id} file={percorso}',
+                     source='post-loop', status='success')
     push_log('channel', 'Job immagine concluso',
              detail=(f"id={chiuso['id']} stato={chiuso['stato']} "
                      f"{esito.get('file') or esito.get('errore') or ''}")[:200],
@@ -2871,6 +2886,13 @@ _conversation_log = deque(maxlen=_MAX_CONVERSATION_TURNS)
 # la persistenza su file e la sync cross-macchina arrivano con il loop (Fase 3).
 feed = Feed()
 
+# Il diario delle illustrazioni: post e sogni delle influencer, con il file dello
+# sketch quando il Mac l'ha disegnato. Sta su disco (a differenza della coda, che
+# è memoria viva): la superficie di osservazione legge questo.
+DIARIO_FILE = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(
+    BASE_DIR, "..", "data", "diario.json")
+diario = Diario.load(DIARIO_FILE)
+
 
 # ── LOOP AUTONOMO DELLE INFLUENCER ──────────────────────────────────────────
 # Il "simulatore": a intervalli regolari una delle due (anna/aurora) produce un
@@ -2881,6 +2903,19 @@ _POST_PERSONA_FILES = {
     "aurora": "/repo/data/persona-aurora.json",
 }
 _post_persona_blocks: dict = {}
+
+# Gli sketch accodati oggi, per autore: il tetto giornaliero si azzera quando
+# cambia il giorno (chiave "_data"). Tenuto in memoria, come la coda immagini.
+_sketch_generati: dict = {}
+
+
+def _sketch_conteggi() -> dict:
+    """Il conteggio degli sketch di oggi, azzerato al cambio di giorno."""
+    oggi = datetime.now(timezone.utc).date().isoformat()
+    if _sketch_generati.get("_data") != oggi:
+        _sketch_generati.clear()
+        _sketch_generati["_data"] = oggi
+    return _sketch_generati
 
 
 def _post_int(nome: str, default: int) -> int:
@@ -2963,9 +2998,41 @@ def _run_post_once(turno: int) -> bool:
                       image_prompt=candidato.get("image_prompt", ""),
                       reply_to=(mossa["replica_a"] or {}).get("id", ""))
     feed.add(post)
+    if _accoda_sketch(autore, candidato.get("image_prompt", ""), post["id"]):
+        diario.add(voce(id=post["id"], author=autore, tipo="post",
+                        testo=candidato["caption"],
+                        prompt=candidato.get("image_prompt", "")))
+        diario.save(DIARIO_FILE)
     push_log('feed', f'{autore}: post pubblicato', detail=candidato["caption"][:120],
              source='post-loop', status='success')
     return True
+
+
+def _accoda_sketch(autore: str, idea: str, voce_id: str) -> dict | None:
+    """Se c'è un'idea d'immagine, accoda uno sketch leggero per il Mac.
+
+    Ritorna il job accodato (o None): chi chiama decide se scrivere la voce del
+    diario. Il tetto giornaliero evita di riempire la coda (una influencer ne
+    carica 4-5 al giorno); la coda piena non è un errore: si salta e resta nei log.
+    """
+    idea = " ".join(str(idea or "").split())
+    if not idea:
+        return None
+    conteggi = _sketch_conteggi()
+    if not puo_generare(conteggi, autore=autore,
+                        tetto=_post_int("FEED_SKETCH_PER_DAY", 4)):
+        return None
+    try:
+        accodato = image_queue.accoda(job_sketch(idea, autore=autore, post_id=voce_id))
+    except RuntimeError as e:
+        push_log('feed', f'{autore}: sketch non accodato', detail=str(e),
+                 source='post-loop', status='warn')
+        return None
+    conteggi[autore] = conteggi.get(autore, 0) + 1
+    push_log('feed', f'{autore}: sketch in coda',
+             detail=f"id={accodato['id']} {accodato['larghezza']}x{accodato['altezza']}",
+             source='post-loop', status='info')
+    return accodato
 
 
 def post_loop():
@@ -2980,6 +3047,53 @@ def post_loop():
         except Exception as error:
             push_log('feed', 'post loop error', str(error), source='post-loop', status='failed')
         time.sleep(_post_int("POST_LOOP_INTERVAL_S", 1800))
+
+
+def _dream_loop_enabled() -> bool:
+    return str(os.getenv("DREAM_LOOP_ENABLED", "false")).strip().lower() == "true"
+
+
+def _sogna_una_volta(turno: int) -> bool:
+    """Un sogno notturno di una delle due: scena onirica + sketch nel diario."""
+    autore = ("anna", "aurora")[turno % 2]
+    sistema = _post_persona_block(autore)
+    if not sistema:
+        push_log('feed', f'{autore}: identità mancante (sogno)', source='dream-loop',
+                 status='warn')
+        return False
+    candidato = parse_dream(_genera_post(build_dream_prompt(sistema,
+                                                            feed_recente=feed.list(5))))
+    if candidato is None:
+        push_log('feed', f'{autore}: nessun sogno', source='dream-loop', status='warn')
+        return False
+    ok, motivo = filtra_dream(candidato, autore=autore, diario=diario.list(20))
+    if not ok:
+        push_log('feed', f'{autore}: sogno scartato ({motivo})', source='dream-loop',
+                 status='warn')
+        return False
+    voce_id = "sogno-" + uuid.uuid4().hex[:8]
+    diario.add(voce(id=voce_id, author=autore, tipo="sogno",
+                    testo=candidato["scena"], prompt=candidato.get("disegno", "")))
+    diario.save(DIARIO_FILE)
+    _accoda_sketch(autore, candidato.get("disegno", ""), voce_id)
+    push_log('feed', f'{autore}: sogno scritto', detail=candidato["scena"][:120],
+             source='dream-loop', status='success')
+    return True
+
+
+def dream_loop():
+    """Il sogno notturno delle influencer, spento finché DREAM_LOOP_ENABLED."""
+    time.sleep(45)
+    turno = 0
+    while True:
+        try:
+            if _dream_loop_enabled():
+                _sogna_una_volta(turno)
+                turno += 1
+        except Exception as error:
+            push_log('feed', 'dream loop error', str(error), source='dream-loop',
+                     status='failed')
+        time.sleep(_post_int("DREAM_LOOP_INTERVAL_S", 1800))
 
 
 def _record_conversation(channel: str, surface: str, chat: str, context: list,
@@ -5794,6 +5908,18 @@ _ENV_META = [
      "label": "Loop influencer: token massimi",
      "hint": "Tetto della risposta del modello per un post (didascalia + eventuale prompt immagine).",
      "default": "200"},
+    {"section": "Persona", "key": "FEED_SKETCH_PER_DAY", "type": "int",
+     "label": "Sketch al giorno per persona",
+     "hint": "Quanti sketch (job immagine leggero per il Mac) il loop accoda al massimo per persona in un giorno. Lo sketch accompagna il post quando ha un'idea d'immagine.",
+     "default": "4"},
+    {"section": "Persona", "key": "DREAM_LOOP_ENABLED", "type": "bool",
+     "label": "Sogno notturno attivo",
+     "hint": "true: a intervalli le due influencer sognano (una scena + uno sketch) e lo scrivono nel diario. Genera contenuti da solo: spento di default.",
+     "default": "false"},
+    {"section": "Persona", "key": "DREAM_LOOP_INTERVAL_S", "type": "int",
+     "label": "Sogno notturno: intervallo (s)",
+     "hint": "Secondi fra due sogni. 1800 = uno ogni mezz'ora.",
+     "default": "1800"},
 
     # ── Canali esterni: chat/privati di una piattaforma che il CP non raggiunge
     # Il driver del canale tira le decisioni da /channel/* e pubblica l'esito.
@@ -7478,6 +7604,7 @@ if __name__ == '__main__':
     threading.Thread(target=development_dream_loop, daemon=True).start()
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()
+    threading.Thread(target=dream_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=8085, debug=False, threaded=True)
 else:
     _load_nodes_from_db()
@@ -7491,3 +7618,4 @@ else:
     threading.Thread(target=development_dream_loop, daemon=True).start()
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()
+    threading.Thread(target=dream_loop, daemon=True).start()

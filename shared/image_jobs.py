@@ -40,11 +40,20 @@ DEFAULT_CLAIM_TTL_S = 1800.0
 LIMITE_LATO = 1536
 LIMITE_PASSI = 60
 
+# Le famiglie di modello che la coda distingue. Un job dichiara la sua famiglia:
+# il ponte che esegue UNA sola famiglia (il Mac con SDXL-Turbo) prende solo i job
+# di quella, e il grafo cambia di conseguenza. La famiglia di default resta
+# Qwen-Image 2.1, quella che gira sulla scheda di win11.
+FAMIGLIA_DEFAULT = "qwen-image-2.1"
+FAMIGLIA_SDXL = "sdxl-turbo"
+FAMIGLIE = (FAMIGLIA_DEFAULT, FAMIGLIA_SDXL)
+
 
 def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
               altezza: int = 768, passi: int = 25, seed: int = 0,
               richiedente: str = "", canale: str = "", modello: str = "",
-              destinazione: str = "", adesso: float | None = None) -> dict:
+              destinazione: str = "", famiglia: str = "",
+              adesso: float | None = None) -> dict:
     """Costruisce un job valido. Solleva ValueError se il prompt è vuoto.
 
     I numeri si limitano invece di essere rifiutati: chi chiede 4096 px ha chiesto
@@ -53,10 +62,17 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
     `destinazione` è DOVE va consegnata l'immagine finita (l'id della chat): il
     control-plane non sa parlare con Telegram, sa solo che quel file è per quella
     conversazione. È il driver a consegnarla, perché è lui che ha il file.
+
+    `famiglia` dice quale modello eseguirà il job (default Qwen-Image 2.1;
+    `sdxl-turbo` per i job leggeri del Mac). Una famiglia sconosciuta cade sul
+    default invece di essere rifiutata.
     """
     testo = " ".join(str(prompt or "").split())
     if not testo:
         raise ValueError("prompt vuoto: un job immagine senza prompt non esiste")
+    famiglia = str(famiglia or "").strip().lower()
+    if famiglia not in FAMIGLIE:
+        famiglia = FAMIGLIA_DEFAULT
     return {
         "id": uuid.uuid4().hex[:12],
         "prompt": testo[:2000],
@@ -68,6 +84,7 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         "richiedente": str(richiedente or "")[:64],
         "canale": str(canale or "")[:32],
         "modello": str(modello or "")[:120],
+        "famiglia": famiglia,
         "destinazione": str(destinazione or "")[:64],
         "consegnato": False,
         "stato": "pending",
@@ -168,11 +185,18 @@ class ImmagineQueue:
             self._job[job["id"]] = dict(job)
             return dict(self._job[job["id"]])
 
-    def prossimo(self) -> dict | None:
-        """Il job più vecchio da eseguire, marcato `running` (claim)."""
+    def prossimo(self, capace_di: str | None = None) -> dict | None:
+        """Il job più vecchio da eseguire, marcato `running` (claim).
+
+        `capace_di` limita ai job di una famiglia di modello: un ponte che sa
+        eseguire solo SDXL-Turbo (il Mac) non deve prendere un job Qwen-Image.
+        """
         with self._lock:
             self._pota_locked()
             candidati = [j for j in self._job.values() if j["stato"] == "pending"]
+            if capace_di:
+                candidati = [j for j in candidati
+                             if j.get("famiglia", FAMIGLIA_DEFAULT) == capace_di]
             candidati.sort(key=lambda j: j["creato_ts"])
             if not candidati:
                 return None
@@ -299,14 +323,27 @@ MODELLO_DEFAULT = {
     "scheduler": "simple",
 }
 
+# La ricetta SDXL-Turbo: un checkpoint UNICO (CheckpointLoaderSimple porta con sé
+# UNet, CLIP e VAE), cfg 1.0 e pochi passi. È il modello leggero del Mac: per gli
+# sketch non serve il GGUF di Qwen né il text encoder da 8B.
+MODELLO_SDXL = {
+    "ckpt": "sd_xl_turbo_1.0_fp16.safetensors",
+    "cfg": 1.0,
+    "sampler": "euler",
+    "scheduler": "normal",
+}
+
 
 def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSpace",
              risoluzione: int | None = None) -> dict:
-    """Il grafo in formato API per un job. Gli id sono fissi, i valori no.
+    """Il grafo ComfyUI per un job, scelto dalla sua famiglia di modello.
 
     `modello` sovrascrive i file (un'altra macchina avrà altri nomi) e il job può
-    indicare un `modello` suo: il resto è la ricetta che ha funzionato.
+    indicare un `modello` suo. La famiglia decide QUALE grafo: Qwen-Image 2.1
+    (GGUF + text encoder su CPU, default) oppure SDXL-Turbo (per il Mac).
     """
+    if (job or {}).get("famiglia") == FAMIGLIA_SDXL:
+        return workflow_sdxl(job, modello=modello, prefisso=prefisso)
     scelte = {**MODELLO_DEFAULT, **(modello or {})}
     if str(job.get("modello") or "").strip():
         scelte["unet"] = str(job["modello"]).strip()
@@ -334,6 +371,42 @@ def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSp
                            "scheduler": scelte["scheduler"], "denoise": 1.0}},
         "457": {"class_type": "VAEDecode",
                 "inputs": {"samples": ["458", 0], "vae": ["454", 0]}},
+        "470": {"class_type": "SaveImage",
+                "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso)}},
+    }
+
+
+def workflow_sdxl(job: dict, *, modello: dict | None = None,
+                  prefisso: str = "HyperSpace") -> dict:
+    """Il grafo SDXL-Turbo: checkpoint unico, cfg 1.0, pochi passi.
+
+    A differenza di Qwen, SDXL usa il negativo (non le istruzioni dentro il
+    prompt) e un `CLIPTextEncode` per lato. Gli id dei nodi sono gli stessi del
+    grafo Qwen, così `immagini_da_history` e il ponte non cambiano.
+    """
+    scelte = {**MODELLO_SDXL, **(modello or {})}
+    if str(job.get("modello") or "").strip():
+        scelte["ckpt"] = str(job["modello"]).strip()
+    return {
+        "451": {"class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": scelte["ckpt"]}},
+        "452": {"class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["451", 1], "text": job["prompt"]}},
+        "453": {"class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["451", 1],
+                           "text": str(job.get("negativo") or "")}},
+        "456": {"class_type": "EmptyLatentImage",
+                "inputs": {"width": int(job["larghezza"]),
+                           "height": int(job["altezza"]), "batch_size": 1}},
+        "458": {"class_type": "KSampler",
+                "inputs": {"model": ["451", 0], "positive": ["452", 0],
+                           "negative": ["453", 0], "latent_image": ["456", 0],
+                           "seed": int(job["seed"]), "steps": int(job["passi"]),
+                           "cfg": float(scelte["cfg"]),
+                           "sampler_name": scelte["sampler"],
+                           "scheduler": scelte["scheduler"], "denoise": 1.0}},
+        "457": {"class_type": "VAEDecode",
+                "inputs": {"samples": ["458", 0], "vae": ["451", 2]}},
         "470": {"class_type": "SaveImage",
                 "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso)}},
     }

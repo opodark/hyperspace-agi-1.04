@@ -225,6 +225,67 @@ class GrafoTests(unittest.TestCase):
         self.assertEqual(grafo["470"]["inputs"]["images"], ["457", 0])
 
 
+class FamigliaTests(unittest.TestCase):
+    def test_una_famiglia_sconosciuta_cade_sul_default(self):
+        job = nuovo_job("x", famiglia="non-esiste")
+        self.assertEqual(job["famiglia"], "qwen-image-2.1")
+
+    def test_il_job_dichiara_la_sua_famiglia(self):
+        job = nuovo_job("x", famiglia="sdxl-turbo")
+        self.assertEqual(job["famiglia"], "sdxl-turbo")
+
+
+class GrafoSdxlTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.job = nuovo_job("un bozzetto", famiglia="sdxl-turbo",
+                            negativo="no photo", larghezza=512, altezza=512,
+                            passi=2, seed=7)
+
+    def test_sceglie_il_grafo_sdxl(self):
+        grafo = workflow(self.job)
+        self.assertEqual(grafo["451"]["class_type"], "CheckpointLoaderSimple")
+
+    def test_cfg_e_passi_da_turbo(self):
+        grafo = workflow(self.job)
+        self.assertEqual(grafo["458"]["inputs"]["cfg"], 1.0)
+        self.assertEqual(grafo["458"]["inputs"]["steps"], 2)
+
+    def test_il_negativo_arriva_al_clip_negativo(self):
+        grafo = workflow(self.job)
+        self.assertEqual(grafo["453"]["inputs"]["text"], "no photo")
+
+    def test_il_default_resta_qwen(self):
+        grafo = workflow(nuovo_job("x"))
+        self.assertEqual(grafo["451"]["class_type"], "UnetLoaderGGUF")
+
+
+class AffinitaTests(unittest.TestCase):
+    def setUp(self):
+        self.orologio = OrologioFinto()
+        self.coda = ImmagineQueue(clock=self.orologio, max_jobs=4, ttl_s=60.0,
+                                  claim_ttl_s=30.0)
+
+    def test_un_ponte_prendi_solo_i_job_della_sua_famiglia(self):
+        qwen = self.coda.accoda(nuovo_job("foto", adesso=self.orologio()))
+        self.orologio.avanza(1)
+        sdxl = self.coda.accoda(nuovo_job("sketch", famiglia="sdxl-turbo",
+                                          adesso=self.orologio()))
+        self.assertEqual(self.coda.prossimo(capace_di="sdxl-turbo")["id"], sdxl["id"])
+        self.assertEqual(self.coda.prossimo(capace_di="qwen-image-2.1")["id"], qwen["id"])
+
+    def test_senza_job_della_famiglia_non_esce_niente(self):
+        self.coda.accoda(nuovo_job("foto", adesso=self.orologio()))
+        self.assertIsNone(self.coda.prossimo(capace_di="sdxl-turbo"))
+
+    def test_senza_famiglia_esce_il_piu_vecchio(self):
+        primo = self.coda.accoda(nuovo_job("a", adesso=self.orologio()))
+        self.orologio.avanza(1)
+        self.coda.accoda(nuovo_job("b", famiglia="sdxl-turbo",
+                                   adesso=self.orologio()))
+        self.assertEqual(self.coda.prossimo()["id"], primo["id"])
+
+
 class HistoryTests(unittest.TestCase):
     def test_i_file_si_leggono_anche_dalle_sottocartelle(self):
         run = {"outputs": {"470": {"images": [

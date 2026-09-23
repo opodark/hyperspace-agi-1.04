@@ -8,7 +8,8 @@ dei driver di canale: **il client tira**. Il ponte non decide niente — non sce
 il prompt, non giudica l'immagine, non parla nel canale: prende un job, esegue il
 grafo, riferisce. Chi decide è il control-plane, e resta lì.
 
-Questo file vive solo sulla macchina con la scheda (win11), come i nodi.
+Questo file vive sulla macchina che esegue ComfyUI: win11 (Qwen-Image) o il Mac
+(SDXL-Turbo per gli sketch). BRIDGE_MODEL dice quale famiglia esegue.
 
 Config (variabili d'ambiente):
   CHANNEL_URL     base del control-plane (default http://127.0.0.1:8085)
@@ -16,6 +17,8 @@ Config (variabili d'ambiente):
   COMFY_URL       API di ComfyUI (default http://127.0.0.1:8188)
   COMFY_OUTPUT_DIR  cartella output di ComfyUI (per tradurre il nome del file in
                   un percorso reale; se manca, si riporta solo il nome relativo)
+  BRIDGE_MODEL    famiglia di modello che questo ponte sa eseguire
+                  (es. sdxl-turbo per il Mac); vuoto = qualunque job
   BRIDGE_POLL_S   intervallo fra due giri a vuoto (default 5 s)
   BRIDGE_TIMEOUT_S  tetto di attesa di UNA generazione (default 900 s)
 
@@ -33,6 +36,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -195,6 +199,9 @@ def main(argv=None) -> int:
     parser.add_argument("--comfy", default=os.getenv("COMFY_URL", COMFY_DEFAULT))
     parser.add_argument("--output",
                         default=os.getenv("COMFY_OUTPUT_DIR") or str(OUTPUT_DESKTOP))
+    parser.add_argument("--model", default=os.getenv("BRIDGE_MODEL", ""),
+                        help="famiglia di modello che questo ponte sa eseguire "
+                             "(es. sdxl-turbo per il Mac); vuoto = qualunque job")
     parser.add_argument("--poll", type=float, default=float(os.getenv("BRIDGE_POLL_S", "5")))
     parser.add_argument("--timeout", type=float,
                         default=float(os.getenv("BRIDGE_TIMEOUT_S", "900")))
@@ -241,7 +248,9 @@ def main(argv=None) -> int:
             return 1
 
     while True:
-        stato, dati = _richiesta(f"{base}/image/jobs", timeout=20, headers=intestazioni)
+        query = f"?famiglia={urllib.parse.quote(args.model)}" if args.model else ""
+        stato, dati = _richiesta(f"{base}/image/jobs{query}", timeout=20,
+                                 headers=intestazioni)
         job = (dati or {}).get("job") if stato == 200 else None
         if stato not in (200, 204):
             log(f"lettura dei job fallita: HTTP {stato} {dati.get('errore', '')}")
