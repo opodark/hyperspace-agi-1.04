@@ -90,7 +90,7 @@ from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
-from shared.image_jobs import ImmagineQueue, nuovo_job, richiesta_immagine
+from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job, richiesta_immagine
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
 from shared.sketch import job_sketch, puo_generare
@@ -1162,19 +1162,30 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
             return ("Le immagini le chiede chi mi ha costruita: non posso mettere in coda "
                     "una richiesta di chiunque, la scheda è una sola.")
         idea = pezzi[1].strip() if len(pezzi) > 1 else ""
-    elif CHANNEL_OPERATOR and autore in CHANNEL_OPERATOR:
+    else:
+        if CHANNEL_OPERATOR and autore not in CHANNEL_OPERATOR:
+            return None          # non-operatore: silenzio, parla la stanza
+        # Richiesta a parole ("fammi un disegno di X"): senza CHANNEL_OPERATOR
+        # resta aperta come il comando esplicito. Una frase non riconosciuta
+        # torna None: parla la stanza.
         richiesta = richiesta_immagine(ultimo)
         if richiesta is None:
-            return None          # non è una richiesta d'immagine: parla la stanza
+            return None
         idea = richiesta["idea"]
         regola = richiesta["regola"]
-    else:
-        return None
     if not idea:
         return "Dimmi cosa disegnare, così: `!immagine una torre al tramonto`."
     try:
-        accodato = image_queue.accoda(nuovo_job(idea, richiedente=autore, canale=channel,
-                                                destinazione=destinazione))
+        # Sui canali sociali Anna fa SOLO sketch (SDXL-Turbo sul Mac): idea
+        # verbatim e negative prompt vuoto (niente filtri di contenuto). Il
+        # fotorealistico resta al canale utente via webUI (docs/comfyui.md).
+        accodato = image_queue.accoda(nuovo_job(
+            idea,
+            negativo="",
+            larghezza=512, altezza=512, passi=2,
+            richiedente=autore, canale=channel,
+            famiglia=FAMIGLIA_SDXL,
+            destinazione=destinazione))
     except ValueError:
         return "Un'immagine senza descrizione non esiste: scrivi cosa disegnare."
     except RuntimeError as e:

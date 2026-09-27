@@ -113,12 +113,13 @@ il default di `/image/generate` è esattamente quello.
 - **«Mandami una foto di X», a parole**: la stessa cosa senza sintassi. Il
   riconoscitore è `richiesta_immagine` in `shared/image_jobs.py`: tre regole con
   un nome (`mandare`, `potere-infinito`, `volere`) che finisce nei log
-  (`via=…`), e tutto il resto è silenzio — un falso positivo non è un fastidio,
-  è un quarto d'ora di scheda occupata. Qui la guardia è **più severa** che per
-  il comando: vale solo per l'operatore, e **senza `CHANNEL_OPERATOR` la strada
-  resta chiusa** (fail-closed), perché una frase male interpretata non si vede
-  mentre un comando scritto male sì. La risposta non dice mai che la foto è
-  arrivata: dice che è in coda e che arriva — l'immagine la consegna il driver.
+  (`via=…`), e tutto il resto è silenzio. La guardia è la stessa del comando:
+  **senza `CHANNEL_OPERATOR` la strada è aperta** a chiunque in chat; con la
+  variabile configurata vale solo per l'operatore. Sui canali sociali il job va
+  in coda come **sketch** (`sdxl-turbo`, il Mac), non come fotorealistico: il
+  Qwen-Image fotorealistico resta al canale utente via webUI. La risposta non
+  dice mai che la foto è arrivata: dice che è in coda e che arriva — l'immagine
+  la consegna il driver.
 - **La consegna**: `GET /channel/outbox` (il driver tira le immagini pronte) +
   `POST /channel/outbox/ack`. Il file lo ha il driver, la destinazione l'ha decisa
   chi ha chiesto: si incontrano nell'outbox, e il driver manda la foto con

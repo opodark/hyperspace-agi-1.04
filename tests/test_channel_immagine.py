@@ -32,7 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from shared.image_jobs import nuovo_job, richiesta_immagine, workflow  # noqa: E402
+from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job, richiesta_immagine, workflow  # noqa: E402
 
 SOURCE = ROOT / "control-plane" / "main.py"
 COSTANTI = {"COMANDI_IMMAGINE"}
@@ -66,6 +66,7 @@ def _load(operator=(), coda=None):
         "image_queue": coda if coda is not None else CodaFinta(),
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
+        "FAMIGLIA_SDXL": FAMIGLIA_SDXL,
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
@@ -119,8 +120,10 @@ class ComandoTests(unittest.TestCase):
                                    channel="telegram", destinazione="1")
         job = scope["image_queue"].job[0]
         grafo = workflow(job)
-        self.assertEqual(grafo["452"]["inputs"]["prompt"], idea)
-        self.assertEqual(grafo["452"]["inputs"]["negative_prompt"], job["negativo"])
+        # SDXL-Turbo: il positivo e' un CLIPTextEncode (nodo 452, campo "text"),
+        # il negativo un nodo separato (453). Il Qwen usava 452 con "prompt".
+        self.assertEqual(grafo["452"]["inputs"]["text"], idea)
+        self.assertEqual(grafo["453"]["inputs"]["text"], job["negativo"])
 
     def test_le_spazi_bianchi_si_normalizzano_e_il_resto_resta(self):
         scope = _load()
@@ -273,13 +276,16 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
             channel="telegram", destinazione="1"))
         self.assertEqual(scope["image_queue"].job, [])
 
-    def test_senza_operatore_configurato_la_strada_a_parole_e_chiusa(self):
-        """Fail-closed, al contrario del comando: una frase male letta costa 12 minuti."""
+    def test_senza_operatore_configurato_la_strada_a_parole_e_aperta(self):
+        """Senza CHANNEL_OPERATOR la richiesta a parole è aperta come il comando."""
         scope = _load(operator=())
-        self.assertIsNone(scope["_channel_immagine"](
+        risposta = scope["_channel_immagine"](
             _contesto("mandami una foto di te", autore="chiunque"),
-            channel="telegram", destinazione="1"))
-        self.assertEqual(scope["image_queue"].job, [])
+            channel="telegram", destinazione="1")
+        self.assertEqual(len(scope["image_queue"].job), 1)
+        self.assertEqual(scope["image_queue"].job[0]["famiglia"], FAMIGLIA_SDXL)
+        self.assertEqual(scope["image_queue"].job[0]["prompt"], "di te")
+        self.assertIn("appena è pronta", risposta)
 
     def test_la_risposta_non_dice_che_la_foto_e_gia_mandata(self):
         """L'immagine la consegna il driver: prima di allora non è vera."""
