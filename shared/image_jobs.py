@@ -106,13 +106,25 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
 # Le due regole non si sovrappongono per caso: la prima è "dammi", la seconda
 # "vorrei". Tutto il resto è silenzio, e il silenzio non costa niente.
 _FOTO = (r"(?:foto|fotografia|immagine|ritratto|selfie|disegno|quadro|scatto|"
-         r"scena|illustrazione|paesaggio|poster|vignetta|bozzetto|schizzo|copertina)")
+         r"scena|illustrazione|paesaggio|poster|vignetta|bozzetto|schizzo|copertina|"
+         r"close-up|primo piano|dettaglio|macro|figura intera|mezzo busto)")
 # Tra il verbo e la cosa chiesta ci stanno solo parole che non cambiano la
 # richiesta. Senza questo elenco, "mandami il numero e poi la foto" passerebbe:
 # un false positive che nessuno vede finché la scheda non è occupata.
-_RIEMPI = (r"(?:\s+(?:una|un|il|lo|la|le|gli|i|dei|delle|degli|dell|altro|altra|"
-           r"un'altra|nuova|nuovo|bella|bello|piccola|piccolo|grande|mia|mio|tua|"
-           r"tuo|di|con|per|che|mi|me|un'|l'|all'|dall'|nell'))*")
+_RIEMPI_W = (r"(?:una|un|il|lo|la|le|gli|i|dei|delle|degli|dell|altro|altra|"
+             r"un'altra|nuova|nuovo|bella|bello|piccola|piccolo|grande|mia|mio|tua|"
+             r"tuo|di|con|per|che|mi|me|un'|l'|all'|dall'|nell')")
+# Lo stile fra verbo e soggetto ("disegnami con tecnica a carboncino un
+# close-up"): si lascia passare, ma solo i MATERIALI entrano nel prompt (lo
+# stile è richiesta, non riempitivo da scartare).
+_STILE_W = (r"(?:tecnica|stile|tratto|a|in|ad|al|alla|matita|carboncino|inchiostro|"
+            r"acquerello|acquerelli|pastello|pastelli|olio|acrilico|grafite|penna|"
+            r"biro|gesso|sanguigna|tempera|gouache|puntinismo)")
+_STILE_KEEP = frozenset({"matita", "carboncino", "inchiostro", "acquerello",
+                         "acquerelli", "pastello", "pastelli", "olio", "acrilico",
+                         "grafite", "penna", "biro", "gesso", "sanguigna", "tempera",
+                         "gouache", "puntinismo"})
+_MEZZO = rf"(?P<mezzo>(?:\s+(?:{_RIEMPI_W}|{_STILE_W}))*)"
 REGOLE_IMMAGINE = (
     # "puoi mandarmi una foto": potere + infinito. È la forma più comune, e senza
     # questa regola resta muta (il verbo vero è l'infinito, non "puoi").
@@ -120,15 +132,15 @@ REGOLE_IMMAGINE = (
         rf"^\s*(?:aurora[\s,]+)?(?:mi\s+)?(?:puoi|potresti|riesci\s+a|sapresti)\s+"
         rf"(?:mandarmi|mandare|inviarmi|inviare|farmi|fare|generarmi|generare|"
         rf"crearmi|creare|disegnarmi|disegnare|illustrarmi|illustrare)\b"
-        rf"{_RIEMPI}\s*{_FOTO}\b", re.IGNORECASE)),
+        rf"{_MEZZO}\s*{_FOTO}\b", re.IGNORECASE)),
     ("mandare", re.compile(
         rf"^\s*(?:aurora[\s,]+)?(?:mi\s+|me\s+la\s+)?(?:manda|mandami|mandi|mandate|"
         rf"mandarmi|mandarmela|invia|inviami|inviate|fammi|fai|fate|genera|"
         rf"generami|generate|crea|creami|create|disegna|disegnami|disegnate|"
-        rf"illustra|illustrami|abbozza|schizza)\b{_RIEMPI}\s*{_FOTO}\b", re.IGNORECASE)),
+        rf"illustra|illustrami|abbozza|schizza)\b{_MEZZO}\s*{_FOTO}\b", re.IGNORECASE)),
     ("volere", re.compile(
         rf"^\s*(?:aurora[\s,]+)?(?:vorrei|voglio|mi\s+piacerebbe|mi\s+serve|"
-        rf"mi\s+servirebbe|potrei\s+avere)\b{_RIEMPI}\s*{_FOTO}\b", re.IGNORECASE)),
+        rf"mi\s+servirebbe|potrei\s+avere)\b{_MEZZO}\s*{_FOTO}\b", re.IGNORECASE)),
 )
 
 # Davanti all'idea si toglie solo la sintassi della domanda. Le preposizioni
@@ -149,7 +161,10 @@ def richiesta_immagine(testo) -> dict | None:
     for nome, regola in REGOLE_IMMAGINE:
         trovata = regola.search(t)
         if trovata:
-            idea = _SINTASSI.sub("", t[trovata.end():], count=1).strip()
+            mezzo = (trovata.groupdict().get("mezzo") or "").strip()
+            stile = " ".join(w for w in mezzo.split() if w.lower() in _STILE_KEEP)
+            dopo = _SINTASSI.sub("", t[trovata.end():], count=1).strip()
+            idea = " ".join(p for p in (stile, dopo) if p).strip()
             return {"idea": idea[:400], "regola": nome}
     return None
 

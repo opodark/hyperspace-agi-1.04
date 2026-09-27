@@ -225,6 +225,17 @@ class RichiestaAParoleTests(unittest.TestCase):
             with self.subTest(frase=frase):
                 self.assertEqual(richiesta_immagine(frase)["idea"], idea)
 
+    def test_lo_stile_fra_verbo_e_soggetto_resta_nel_prompt(self):
+        """'a carboncino' è richiesta, non riempitivo: va nel prompt, non scartata."""
+        for frase, idea in (
+                ("disegnami con tecnica a carboncino un close-up di un lupo",
+                 "carboncino di un lupo"),
+                ("disegnami a matita un ritratto di un vecchio",
+                 "matita di un vecchio"),
+                ("fammi un close-up di un lupo", "di un lupo")):
+            with self.subTest(frase=frase):
+                self.assertEqual(richiesta_immagine(frase)["idea"], idea)
+
     def test_la_regola_che_riconosce_la_frase_ha_un_nome(self):
         """Nei log si legge `via=...`: "perché ha disegnato?" deve restare una frase."""
         for frase, regola in (("mandami una foto", "mandare"),
