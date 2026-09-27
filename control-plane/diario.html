@@ -44,6 +44,7 @@
   .immagine.vuota { font-style:italic; }
   .immagine .file { font-family:ui-monospace,Menlo,monospace; font-size:12px;
                     word-break:break-all; }
+  .immagine img { max-width:100%; max-height:340px; border-radius:8px; }
   .empty { color:var(--muted); text-align:center; padding:48px 0; }
   .filtri { display:flex; gap:8px; padding:0 16px; margin-top:12px; }
   .filtri button { background:var(--panel); color:var(--muted); border:1px solid var(--border);
@@ -59,9 +60,13 @@
   <a href="/dashboard">dashboard</a>
 </header>
 <div class="filtri" id="filtri">
-  <button data-f="tutti" class="on">tutti</button>
-  <button data-f="post">post</button>
-  <button data-f="sogno">sogni</button>
+  <button data-tipo="tutti" class="on">tutti</button>
+  <button data-tipo="post">post</button>
+  <button data-tipo="sogno">sogni</button>
+  <span style="flex:1"></span>
+  <button data-autore="tutti" class="on">tutti</button>
+  <button data-autore="anna">anna</button>
+  <button data-autore="aurora">aurora</button>
 </div>
 <div class="wrap" id="wrap"><div class="empty">Caricamento…</div></div>
 <script>
@@ -69,7 +74,8 @@
   const dot = document.getElementById('dot');
   const count = document.getElementById('count');
   const filtri = document.getElementById('filtri');
-  let filtro = 'tutti';
+  let tipo = 'tutti';
+  let autore = 'tutti';
   function esc(s) {
     return String(s ?? '').replace(/[&<>"]/g, c =>
       ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -77,8 +83,13 @@
   filtri.addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
-    filtro = b.dataset.f;
-    filtri.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    if (b.dataset.tipo !== undefined) {
+      tipo = b.dataset.tipo;
+      filtri.querySelectorAll('button[data-tipo]').forEach(x => x.classList.toggle('on', x === b));
+    } else if (b.dataset.autore !== undefined) {
+      autore = b.dataset.autore;
+      filtri.querySelectorAll('button[data-autore]').forEach(x => x.classList.toggle('on', x === b));
+    }
     render();
   });
   let voci = [];
@@ -95,8 +106,16 @@
       wrap.innerHTML = '<div class="empty">control-plane non raggiungibile</div>';
     }
   }
+  function immagine(v) {
+    if (!v.file) return '<div class="immagine vuota">in attesa dello sketch…</div>';
+    const src = '/diario/immagini/' + encodeURIComponent(v.file);
+    return `<div class="immagine"><img src="${src}" alt="sketch" loading="lazy"
+        onerror="this.outerHTML='<span class=file>file non ancora disponibile</span>'"></div>`;
+  }
   function render() {
-    const visibili = filtro === 'tutti' ? voci : voci.filter(v => v.tipo === filtro);
+    const visibili = voci.filter(v =>
+      (tipo === 'tutti' || v.tipo === tipo) &&
+      (autore === 'tutti' || v.author === autore));
     if (!visibili.length) {
       wrap.innerHTML = '<div class="empty">Nessuna pagina qui ancora.</div>';
       return;
@@ -110,10 +129,7 @@
         </div>
         <div class="testo">${esc(v.testo)}</div>
         ${v.prompt ? `<div class="prompt"><b>disegno:</b> ${esc(v.prompt)}</div>` : ''}
-        <div class="immagine ${v.file ? '' : 'vuota'}">
-          ${v.file ? `<span class="file">${esc(v.file)}</span>`
-                   : 'in attesa dello sketch…'}
-        </div>
+        ${immagine(v)}
       </article>`).join('');
   }
   tick();

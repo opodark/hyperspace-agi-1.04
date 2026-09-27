@@ -7679,6 +7679,21 @@ def diario_data():
     return jsonify({"ok": True, "voci": diario.list(limite)})
 
 
+@app.route('/diario/immagini/<path:nome>')
+def diario_immagine(nome):
+    """Lo sketch disegnato dal Mac, dal volume delle immagini del diario.
+
+    Il `file` di una voce del diario e' relativo alla cartella output di ComfyUI
+    (es. `HyperSpace/bridge_00001_.png`). Qui si serve dalla cartella che il
+    control-plane vede (volume condiviso o copia): `DIARIO_IMMAGINI_DIR`,
+    default `data/diario-immagini`. Se la cartella non esiste o il file manca,
+    Flask risponde 404 e la UI mostra il segnaposto.
+    """
+    base = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
+        BASE_DIR, "..", "data", "diario-immagini")
+    return send_from_directory(base, nome)
+
+
 @app.route('/feed', methods=['GET', 'POST'])
 def feed_route():
     """La timeline dei post delle influencer (Anna e Aurora).
