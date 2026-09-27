@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job, richiesta_immagine, workflow  # noqa: E402
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI  # noqa: E402
+from shared.prompt_immagine import richiesta_immagine_smart  # noqa: E402
 
 SOURCE = ROOT / "control-plane" / "main.py"
 COSTANTI = {"COMANDI_IMMAGINE"}
@@ -70,6 +71,7 @@ def _load(operator=(), coda=None):
         "FAMIGLIA_SDXL": FAMIGLIA_SDXL,
         "SKETCH_LATO": SKETCH_LATO,
         "SKETCH_PASSI": SKETCH_PASSI,
+        "richiesta_immagine_smart": richiesta_immagine_smart,
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)

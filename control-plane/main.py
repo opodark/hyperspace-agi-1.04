@@ -90,7 +90,8 @@ from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
-from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job, richiesta_immagine
+from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job
+from shared.prompt_immagine import chiama_ollama, configura_modello, richiesta_immagine_smart
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, puo_generare
@@ -1168,7 +1169,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
         # Richiesta a parole ("fammi un disegno di X"): senza CHANNEL_OPERATOR
         # resta aperta come il comando esplicito. Una frase non riconosciuta
         # torna None: parla la stanza.
-        richiesta = richiesta_immagine(ultimo)
+        richiesta = richiesta_immagine_smart(ultimo)
         if richiesta is None:
             return None
         idea = richiesta["idea"]
@@ -2945,7 +2946,7 @@ feed = Feed()
 # sketch quando il Mac l'ha disegnato. Sta su disco (a differenza della coda, che
 # è memoria viva): la superficie di osservazione legge questo.
 DIARIO_FILE = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(
-    BASE_DIR, "..", "data", "diario.json")
+    BASE_DIR, "data", "diario.json")
 diario = Diario.load(DIARIO_FILE)
 
 
@@ -7755,6 +7756,10 @@ if __name__ == '__main__':
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()
     threading.Thread(target=dream_loop, daemon=True).start()
+    # Il modello piccolo (qwen3:4b) per le richieste d'immagine che la regex non
+    # capisce. Si configura all'avvio del server, non all'import: così i test che
+    # importano main.py non tirano in mezzo Ollama.
+    configura_modello(chiama_ollama)
     app.run(host='0.0.0.0', port=8085, debug=False, threaded=True)
 else:
     _load_nodes_from_db()
