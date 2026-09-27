@@ -29,6 +29,8 @@ jobs:
         run: pip install flask flask-cors requests cryptography httpx pytest bandit==1.8.6 ruff==0.14.10
       - name: Suite Python
         run: PYTHONPATH=. python -m unittest discover -s tests -p 'test_*.py'
+      - name: Sintassi Bash
+        run: git ls-files -z '*.sh' | xargs -0 -n 1 bash -n
 
   web-node:
     runs-on: ubuntu-latest
@@ -43,3 +45,5 @@ jobs:
       - name: Check del web node
         working-directory: web-node
         run: npm test
+      - name: Dashboard
+        run: node --test tests/*.test.cjs

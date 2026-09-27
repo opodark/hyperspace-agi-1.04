@@ -244,6 +244,13 @@ await check("senza consenso esplicito il nodo non parte", () => {
                 /consenso/);
 });
 
+await check("WebNode accetta baseUrls (lista) e non si lamenta di baseUrl", async () => {
+  const { impl } = fakeFetch([{ body: { ok: true, task: null } }]);
+  const node = new WebNode({ baseUrls: ["http://cp1:8085", "http://cp2:8085"],
+                             nodeId: "web-t", consent: true, fetchImpl: impl });
+  assert.equal(await node.tick(), null);
+});
+
 await check("tick() esegue il task e pubblica il risultato", async () => {
   const task = { task_id: "t1", type: "summarize", payload: { text: "uno. due. tre." },
                  constraints: { timeout_ms: 5000, max_tokens: 128 } };
@@ -285,6 +292,29 @@ await check("un task non supportato viene pubblicato come fallito", async () => 
 
 await check("newNodeId produce id distinti", () => {
   assert.notEqual(newNodeId(), newNodeId());
+});
+
+console.log("== fallback multi-endpoint ==");
+await check("fallback: se il primo CP e' irraggiungibile si prova il secondo", async () => {
+  const { impl, calls } = fakeFetch([
+    { throw: "connection refused" },     // cp1: rete giu'
+    { body: { ok: true, task: null } },  // cp2: risponde
+  ]);
+  const transport = new WebNodeTransport({ baseUrls: ["http://cp1:8085", "http://cp2:8085"], fetchImpl: impl });
+  const esito = await transport.poll({ nodeId: "n1", timeoutS: 0 });
+  assert.equal(esito.ok, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, "http://cp1:8085/web/poll");
+  assert.equal(calls[1].url, "http://cp2:8085/web/poll");
+});
+
+await check("fallback: un HTTP errore dal primo CP non prova il secondo", async () => {
+  const { impl, calls } = fakeFetch([
+    { ok: false, status: 503, body: { error: "web node spenti" } },
+  ]);
+  const transport = new WebNodeTransport({ baseUrls: ["http://cp1:8085", "http://cp2:8085"], fetchImpl: impl });
+  await assert.rejects(() => transport.poll({ nodeId: "n1", timeoutS: 0 }), (e) => e.status === 503);
+  assert.equal(calls.length, 1);
 });
 
 console.log();

@@ -116,6 +116,7 @@ services:
       MEMORY_TTL_DAYS: "${MEMORY_TTL_DAYS:-7}"
       MEMORY_MAX_ENTRIES: "${MEMORY_MAX_ENTRIES:-200}"
       MEMORY_BACKEND: "${MEMORY_BACKEND:-hermes}"
+      MEMORY_FILE: "${MEMORY_FILE:-/app/data/memory.json.gz}"
       # Memoria locale-prima (shared/memory_sync.py): mirror sempre scritto, coda
       # delle voci che Hermes non ha ancora accettato, lettura degradata dal mirror.
       MEMORY_MIRROR: "${MEMORY_MIRROR:-true}"

@@ -35,8 +35,12 @@ class HermesMemoryClient:
                 except OSError:
                     self.token = ""
         self.timeout = timeout
+        self._unavailable_until = 0.0
+        self._last_transport_error = ""
 
     def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
+        if time.monotonic() < self._unavailable_until:
+            raise HermesMemoryError(self._last_transport_error)
         headers = dict(kwargs.pop("headers", {}) or {})
         timeout = float(kwargs.pop("timeout", self.timeout))
         if self.token:
@@ -47,9 +51,13 @@ class HermesMemoryClient:
                 try:
                     response = requests.request(
                         method, f"{self.base_url}{path}", headers=headers,
-                        timeout=timeout, **kwargs,
+                        timeout=(min(self.timeout, timeout), timeout), **kwargs,
                     )
                     break
+                except requests.Timeout:
+                    # A connect timeout is also a ConnectionError: do not
+                    # multiply a dead peer's full timeout by three attempts.
+                    raise
                 except requests.ConnectionError:
                     if attempt == 2:
                         raise
@@ -57,8 +65,13 @@ class HermesMemoryClient:
             assert response is not None
             response.raise_for_status()
             body = response.json()
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            self._last_transport_error = f"Hermes memory bridge request failed: {exc}"
+            self._unavailable_until = time.monotonic() + 15.0
+            raise HermesMemoryError(self._last_transport_error) from exc
         except (requests.RequestException, ValueError) as exc:
             raise HermesMemoryError(f"Hermes memory bridge request failed: {exc}") from exc
+        self._unavailable_until = 0.0
         if not isinstance(body, dict) or body.get("ok") is False:
             raise HermesMemoryError(str(body.get("error", "invalid Hermes bridge response")))
         return body

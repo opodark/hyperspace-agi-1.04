@@ -15,6 +15,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HermesMemoryClientTests(TestCase):
+    @mock.patch("shared.hermes_memory.time.monotonic")
+    @mock.patch("shared.hermes_memory.requests.request")
+    def test_unreachable_peer_is_skipped_briefly_then_recovers(self, request, clock):
+        clock.return_value = 100.0
+        request.side_effect = requests.ConnectTimeout("offline")
+        client = HermesMemoryClient("http://bridge", "token")
+        for _ in range(2):
+            with self.assertRaises(HermesMemoryError):
+                client.stats()
+        self.assertEqual(request.call_count, 1)
+        clock.return_value = 116.0
+        request.side_effect = None
+        request.return_value.json.return_value = {"ok": True, "entries": 2}
+        self.assertEqual(client.stats()["entries"], 2)
+        self.assertEqual(request.call_count, 2)
+
+    @mock.patch("shared.hermes_memory.requests.request")
+    def test_connect_timeout_is_not_retried(self, request):
+        request.side_effect = requests.ConnectTimeout("peer unavailable")
+        with self.assertRaises(HermesMemoryError):
+            HermesMemoryClient("http://bridge", "token").stats()
+        self.assertEqual(request.call_count, 1)
+
     @mock.patch("shared.hermes_memory.requests.request")
     def test_client_sends_bearer_token_and_stores_entry(self, request):
         response = mock.Mock()

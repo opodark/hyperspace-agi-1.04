@@ -48,6 +48,10 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import sys
+import faulthandler
+
+# Preserve native crash stacks (e.g. SIGBUS) in container logs.
+faulthandler.enable()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(BASE_DIR, ".."))
@@ -561,6 +565,8 @@ def _use_native_chat_fallback(model_name: str) -> bool:
     _model_supports_tools(): cosi' "qwen3:8b", "qwen3-16k" e i futuri
     distillati "qwen3.8-..." restano coperti senza toccare il codice."""
     override = _NATIVE_CHAT_FALLBACK_OVERRIDE.strip()
+    if override.lower() in {"off", "false", "none"}:
+        return False
     if override == "*":
         return True
     # Un override di soli spazi, o con solo virgole, produce una lista vuota:
@@ -1331,6 +1337,14 @@ def _track_foreground_activity():
     }:
         _last_foreground_activity = time.time()
 
+
+@app.before_request
+def _protect_configuration():
+    if request.method != "OPTIONS" and request.path in {
+        "/config/advanced", "/config/env", "/config/secret/rotate",
+    }:
+        return _network_admin_error()
+
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def _normalize_endpoint(ep: str) -> str:
     ep = ep.strip().rstrip("/")
@@ -1830,28 +1844,52 @@ def _select_node_for_request(active: list, pinned_node_id: str = None, model: st
     return _select_best_node(active, model=model)
 
 # ── MODELLI ───────────────────────────────────────────────────────────────────
+def parse_inference_urls(value: str, fallback: str) -> list:
+    """Endpoint di inferenza diretta come lista.
+
+    `value` (DIRECT_INFERENCE_URLS) è separato da virgole; se vuoto, ricade su
+    `fallback` (OLLAMA_URL). Pura: nessun accesso a stato globale, testabile
+    senza Flask (vedi tests/test_inference_fallback.py).
+    """
+    urls = [u.strip().rstrip("/") for u in str(value or "").split(",") if u.strip()]
+    fallback = str(fallback or "").strip().rstrip("/")
+    return urls or ([fallback] if fallback else [])
+
+
+def _inference_urls() -> list:
+    """Gli endpoint diretti attuali: DIRECT_INFERENCE_URLS oppure OLLAMA_URL."""
+    return parse_inference_urls(os.getenv("DIRECT_INFERENCE_URLS", ""), OLLAMA_URL)
+
+
 def _fetch_models():
-    url = advanced_config["ollama"]["url"].rstrip("/")
     errors = []
-    try:
-        r = requests.get(f"{url}/api/tags", timeout=4)
-        if r.status_code == 200:
-            data = r.json()
-            if "models" in data:
-                return {"ok": True, "backend": "ollama", "url": url,
-                        "models": [m["name"] for m in data["models"] if m.get("name")]}
-    except Exception as e:
-        errors.append(f"ollama-style: {e}")
-    try:
-        r = requests.get(f"{url}/v1/models", timeout=4)
-        if r.status_code == 200:
-            data = r.json()
-            if "data" in data:
-                return {"ok": True, "backend": "lmstudio", "url": url,
-                        "models": [m["id"] for m in data["data"] if m.get("id")]}
-    except Exception as e:
-        errors.append(f"lmstudio-style: {e}")
-    return {"ok": False, "url": url, "backend": INFERENCE_BACKEND, "models": [], "errors": errors}
+    found = []
+    backend = INFERENCE_BACKEND
+    for url in _inference_urls():
+        try:
+            r = requests.get(f"{url}/api/tags", timeout=4)
+            if r.status_code == 200:
+                data = r.json()
+                if "models" in data:
+                    found.extend(m["name"] for m in data["models"] if m.get("name"))
+                    backend = "ollama"
+                    continue
+        except Exception as e:
+            errors.append(f"ollama-style {url}: {e}")
+        try:
+            r = requests.get(f"{url}/v1/models", timeout=4)
+            if r.status_code == 200:
+                data = r.json()
+                if "data" in data:
+                    found.extend(m["id"] for m in data["data"] if m.get("id"))
+                    backend = "lmstudio"
+        except Exception as e:
+            errors.append(f"lmstudio-style {url}: {e}")
+    if found:
+        return {"ok": True, "backend": backend, "url": _inference_urls()[0],
+                "models": sorted(set(found))}
+    return {"ok": False, "url": _inference_urls()[0] if _inference_urls() else "",
+            "backend": backend, "models": [], "errors": errors}
 
 _MODELS_CACHE = {"ts": 0.0, "data": None}
 _MODELS_CACHE_TTL = 15  # secondi — Open WebUI ripolla spesso /v1/models
@@ -1909,6 +1947,9 @@ def _aggregate_mesh_models(force: bool = False) -> dict:
                 "tier":       node.get("tier", "leaf"),
             })
 
+    # Direct inference remains available without a callable mesh worker.
+    # Do not fabricate a pinnable node for these models.
+    bare_models.update(_fetch_models().get("models", []))
     result = {"bare": sorted(bare_models), "per_node": per_node}
     _MODELS_CACHE.update(ts=now, data=result)
     return result
@@ -3277,7 +3318,31 @@ def sandbox_status():
     return jsonify(status), response_code
 
 # ── TOOL CALLING LOOP ─────────────────────────────────────────────────────────
-def _call_ollama(ollama_base: str, payload: dict, sign: bool = False, node_id: str = "") -> dict:
+def _call_ollama(ollama_base, payload: dict, sign: bool = False, node_id: str = "") -> dict:
+    """Inoltra a /v1/chat/completions con FALLBACK sugli endpoint diretti.
+
+    `ollama_base` può essere una stringa (un solo endpoint, es. un nodo) o una
+    LISTA (endpoint diretti da provare in ordine). Il fallback scatta SOLO su
+    errore di rete (connessione/timeout): se un endpoint risponde (anche con un
+    HTTP di errore o un body non-JSON) l'errore si propaga e non si prova un
+    altro endpoint. Con una lista il fallback è per il caso diretto (sign=False):
+    un nodo specifico non va confuso con un altro.
+    """
+    bases = [ollama_base] if isinstance(ollama_base, str) else list(ollama_base or [])
+    last_network_error = None
+    for base in bases:
+        try:
+            return _call_ollama_one(base, payload, sign=sign, node_id=node_id)
+        except requests.RequestException as e:
+            last_network_error = e
+            continue
+    if last_network_error is not None:
+        raise last_network_error
+    return {"error": {"message": "nessun endpoint di inferenza diretto disponibile",
+                      "type": "server_error"}}
+
+
+def _call_ollama_one(ollama_base: str, payload: dict, sign: bool = False, node_id: str = "") -> dict:
     """Chiama /v1/chat/completions. Se sign=True (target = un nodo della
     mesh), firma la richiesta con l'identita' ECDSA del CP — il nodo ora
     richiede questa firma su questo path (vedi node/main.py SIGNED_PATHS).
@@ -3317,6 +3382,30 @@ def _call_ollama(ollama_base: str, payload: dict, sign: bool = False, node_id: s
     # fallback): è qui che l'audit di disclosure vede il testo dell'agente.
     _audit_persona_reply(parsed)
     return parsed
+
+def _stream_direct(urls, stream_data, model):
+    """Streaming diretto con fallback: prova gli URL in ordine; su errore di
+    rete passa al successivo. Una risposta HTTP (anche di errore) viene
+    restituita com'è (niente fallback: l'endpoint ha risposto)."""
+    last_error = None
+    for base in (urls if isinstance(urls, (list, tuple)) else [urls]):
+        try:
+            return requests.post(f"{base}/v1/chat/completions", json=stream_data,
+                                 stream=True, timeout=_inference_timeout(model))
+        except requests.RequestException as e:
+            last_error = e
+            continue
+    if last_error is not None:
+        raise last_error
+    raise ValueError("nessun endpoint di inferenza diretto disponibile")
+
+
+def _native_direct_enabled(model):
+    # Mixed endpoint lists use the common OpenAI protocol, not Ollama /api/chat.
+    return (INFERENCE_BACKEND.strip().lower() == "ollama"
+            and len(_inference_urls()) == 1
+            and _use_native_chat_fallback(model))
+
 
 def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: bool = False,
                    node_id: str = "", builtin_tools=None) -> dict:
@@ -3835,7 +3924,7 @@ def v1_chat_completions():
                     push_log('inter_node_message', f'stream {task_id} done',
                              source='omniroute', target='webui', status='success')
                 except Exception as e:
-                    yield f'data: {{"error": "{e}"}}\n\n'.encode()
+                    yield ('data: ' + json.dumps({'error': str(e)}, ensure_ascii=False) + '\n\n').encode()
                     task["status"] = "failed"
                     db.update_task(task_id, "failed", error=str(e))
                 return
@@ -3925,7 +4014,7 @@ def v1_chat_completions():
                     push_log('inter_node_message', f'stream {task_id} done',
                              source=node_id_c[:12], target='webui', status='success')
                 except Exception as e:
-                    yield f'data: {{"error": "{e}"}}\n\n'.encode()
+                    yield ('data: ' + json.dumps({'error': str(e)}, ensure_ascii=False) + '\n\n').encode()
                     task["status"] = "failed"
                     db.update_task(task_id, "failed", error=str(e))
                 served = True
@@ -3938,7 +4027,7 @@ def v1_chat_completions():
             task["node"] = "ollama-direct"
             db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
             try:
-                if _use_native_chat_fallback(model):
+                if _native_direct_enabled(model):
                     # Fallback nativo (/api/chat) per i modelli reasoning
                     # (elenco in _NATIVE_CHAT_FALLBACK_PATTERNS, estendibile via
                     # env), usato SOLO quando non c'e' nessun nodo mesh
@@ -3951,8 +4040,9 @@ def v1_chat_completions():
                               "stream": False, "think": bool(stream_data.get("think", False))}
                     if stream_data.get("tools"):
                         native["tools"] = stream_data["tools"]
-                    native_resp = requests.post(f"{ollama_base}/api/chat", json=native,
+                    native_resp = requests.post(f"{_inference_urls()[0]}/api/chat", json=native,
                                                 timeout=_inference_timeout(model))
+                    native_resp.raise_for_status()
                     native_message = (native_resp.json().get("message") or {})
                     if native_message.get("tool_calls"):
                         # Il modello vuole chiamare un tool. Il percorso nativo
@@ -3967,7 +4057,7 @@ def v1_chat_completions():
                         # autenticare). Cosi' anche questo fallback non
                         # restituisce mai un content vuoto dopo una tool call.
                         # Verificato su Ollama 0.34.2.
-                        result_json = _run_tool_loop(stream_data, ollama_base)
+                        result_json = _run_tool_loop(stream_data, _inference_urls())
                         message = ((result_json.get("choices") or [{}])[0] or {}).get("message") or {}
                         direct_content = _assistant_text(message)
                     else:
@@ -3982,9 +4072,9 @@ def v1_chat_completions():
                     yield f"data: {json.dumps(direct_chunk, ensure_ascii=False)}\n\n".encode()
                     yield b"data: [DONE]\n\n"
                 else:
-                    req = requests.post(f"{ollama_base}/v1/chat/completions", json=stream_data,
-                                        stream=True, timeout=_inference_timeout(model))
+                    req = _stream_direct(_inference_urls(), stream_data, model)
                     with req as resp:
+                        resp.raise_for_status()
                         for chunk in resp.iter_content(chunk_size=None):
                             if chunk:
                                 yield chunk
@@ -3994,7 +4084,7 @@ def v1_chat_completions():
                 push_log('inter_node_message', f'stream {task_id} done',
                          source='ollama-direct', target='webui', status='success')
             except Exception as e:
-                yield f'data: {{"error": "{e}"}}\n\n'.encode()
+                yield ('data: ' + json.dumps({'error': str(e)}, ensure_ascii=False) + '\n\n').encode()
                 task["status"] = "failed"
                 db.update_task(task_id, "failed", error=str(e))
 
@@ -4045,9 +4135,21 @@ def v1_chat_completions():
         _finalize_task(task, task_id, node_id, model, prompt, result_json)
         return _respond_result(result_json)
 
-    # Nessun nodo locale disponibile: prova la federazione prima di ricadere
-    # su Ollama diretto. Un CP federato viene trattato come un "super-nodo":
-    # non sappiamo (né ci interessa) quale nodo useranno per eseguirlo.
+    # Local-first even while workers are still registering after startup.
+    # A remote fallback must not delay an available local model by a minute.
+    if not deadline.allows():
+        return _deadline_exceeded(task, task_id, deadline)
+    task["node"] = "ollama-direct"
+    db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
+    try:
+        direct_result = _run_tool_loop(data, _inference_urls(), sign=False)
+    except Exception as e:
+        direct_result = {"error": {"message": str(e), "type": "server_error"}}
+    if not _is_error_payload(direct_result):
+        _finalize_task(task, task_id, "ollama-direct", model, prompt, direct_result)
+        return _respond_result(direct_result)
+
+    # Local inference failed: federation may still serve the request.
     if not deadline.allows():
         return _deadline_exceeded(task, task_id, deadline)
     fed_result, fed_peer = _try_federated_execution(prompt, model)
@@ -4059,8 +4161,7 @@ def v1_chat_completions():
                  status='success')
         return _respond_result(inner_result)
 
-    # Mesh e federazione hanno fallito entrambe: prova OmniRoute (provider
-    # esterni free-tier) prima dell'ultimo fallback locale su Ollama diretto.
+    # Mesh, direct inference and federation failed: try the external provider.
     if not deadline.allows():
         return _deadline_exceeded(task, task_id, deadline)
     omni_result = _try_omniroute_fallback(data)
@@ -4069,20 +4170,8 @@ def v1_chat_completions():
         push_log('inter_node_message', f'task {task_id} -> omniroute (fallback esterno)', status='success')
         return _respond_result(omni_result)
 
-    task["node"] = "ollama-direct"
-    db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
-    if not deadline.allows():
-        return _deadline_exceeded(task, task_id, deadline)
-    try:
-        result_json = _run_tool_loop(data, ollama_base, sign=False)
-        _finalize_task(task, task_id, "ollama-direct", model, prompt, result_json)
-        return _respond_result(result_json)
-    except Exception as e:
-        task["status"] = "failed"
-        task["error"]  = str(e)
-        db.update_task(task_id, "failed", error=str(e))
-        push_log('inter_node_message', f'task {task_id} FAILED', str(e), source='ollama', status='failed')
-        return jsonify({"error": {"message": str(e), "type": "server_error"}}), 500
+    _finalize_task(task, task_id, "ollama-direct", model, prompt, direct_result)
+    return _respond_result(direct_result)
 
 def _finalize_task(task, task_id, node_id, model, prompt, result_json):
     if _is_error_payload(result_json):
@@ -4137,7 +4226,9 @@ def _health_memory_count() -> int:
     with _health_memory_lock:
         now = time.time()
         if now - _health_memory_cache["ts"] >= 10:
-            _health_memory_cache.update(ts=now, count=len(_load_memory()))
+            entries = (memory_sync.read_local(MEMORY_MAX_ENTRIES)
+                       if MEMORY_BACKEND == "hermes" else _load_memory())
+            _health_memory_cache.update(ts=now, count=len(entries))
     return int(_health_memory_cache["count"])
 
 
@@ -4147,6 +4238,8 @@ def omega_health():
     return jsonify({
         "status": "ok", "engine": "hyperspace-agi", "version": "1.05.0",
         "memories": _health_memory_count(), "nodes_active": nodes_active,
+        "memory_source": "mirror" if MEMORY_BACKEND == "hermes" else "legacy",
+        "memory_pending": memory_sync.pending() if MEMORY_BACKEND == "hermes" else 0,
         "ttl_days": MEMORY_TTL_DAYS,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
@@ -4757,13 +4850,23 @@ def mesh_announce():
             should_update = False
         elif existing_ep.startswith("https://") and not ep.startswith("https://") and not ep.startswith("browser://"):
             should_update = False
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if should_update:
-        info = {**data, "endpoint": ep, "status": "active",
-                "last_seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        info = {**data, "endpoint": ep, "status": "active", "last_seen": now,
                 "is_web_node": ep.startswith("browser://")}
         _nodes_by_id[nid] = info
         _known_endpoints.add(ep)
         db.upsert_node(info)
+    else:
+        # Endpoint invariato, ma il nodo sta annunciando (heartbeat): rinfresca
+        # comunque last_seen e riporta lo stato ad "active". Senza questo, dopo
+        # un reboot del CP (_load_nodes_from_db marca tutti i nodi "unreachable"),
+        # un nodo che ri-annuncia lo STESSO endpoint resterebbe "unreachable"
+        # per sempre e sparirebbe da /v1/models.
+        existing["status"] = "active"
+        existing["last_seen"] = now
+        _nodes_by_id[nid] = existing
+        db.upsert_node(existing)
     push_log('mesh_event', f'Node announced: {nid[:12]}',
              f'endpoint={ep} accepted={should_update}', source=nid[:12], status='success')
     return jsonify({"ok": True, "registered": ep, "accepted": should_update})
@@ -4962,7 +5065,7 @@ def node_pull_model(endpoint):
                     if line: yield f"{line.decode()}\n\n"
             yield 'data: {"status":"done"}\n\n'
         except Exception as e:
-            yield f'data: {{"error": "{e}"}}\n\n'
+            yield ('data: ' + json.dumps({'error': str(e)}, ensure_ascii=False) + '\n\n')
     return Response(stream_with_context(generate()), headers=_sse_headers())
 
 @app.route('/hb/status')
@@ -5572,7 +5675,7 @@ def set_advanced_config():
             _known_endpoints.add(_normalize_endpoint(ep))
     if 'serverUrl' in auth: advanced_config['_authority']['serverUrl'] = auth['serverUrl']
     if 'enabled'   in auth: advanced_config['_authority']['enabled']   = bool(auth['enabled'])
-    push_log('system', 'Config updated', json.dumps(data, default=str))
+    push_log('system', 'Config updated', json.dumps({"sections": sorted(data)}))
     return jsonify({"ok": True})
 
 @app.route('/config/secret/rotate', methods=['POST'])

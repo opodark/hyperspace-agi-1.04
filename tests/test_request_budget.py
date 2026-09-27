@@ -204,7 +204,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn("_inference_timeout(", self.module)
 
     def test_call_ollama_uses_the_model_aware_timeout(self):
-        body = ast.unparse(self.functions["_call_ollama"])
+        body = ast.unparse(self.functions["_call_ollama_one"])
         self.assertEqual(body.count("_inference_timeout("), 2, "entrambi i rami, firmato e non")
 
     def test_node_and_proxy_timeouts_are_above_the_cp(self):

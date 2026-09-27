@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-timestamp(){ date +%Y%m%dT%H%M%S }
+timestamp(){ date +%Y%m%dT%H%M%S; }
 
 run_sql_local(){
   local sql="$1"

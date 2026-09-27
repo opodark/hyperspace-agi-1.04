@@ -22,7 +22,7 @@ export function newNodeId() {
 }
 
 export class WebNode {
-  constructor({ baseUrl, nodeId, label = "", consent = false, runtime = null,
+  constructor({ baseUrl, baseUrls, nodeId, label = "", consent = false, runtime = null,
                 fetchImpl, env = globalThis, pollTimeoutS = 25, maxBackoffMs = 30000,
                 onState = null } = {}) {
     if (!consent) {
@@ -31,7 +31,7 @@ export class WebNode {
     this.nodeId = String(nodeId || newNodeId());
     this.capabilities = detectCapabilities(env, { runtime });
     this.environment = describeEnvironment(env);
-    this.transport = new WebNodeTransport({ baseUrl, fetchImpl });
+    this.transport = new WebNodeTransport({ baseUrl, baseUrls, fetchImpl });
     this.registration = registrationPayload({
       nodeId: this.nodeId,
       capabilities: this.capabilities,

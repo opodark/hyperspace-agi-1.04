@@ -115,9 +115,14 @@ export async function* readChunks(response) {
 }
 
 export class ChatClient {
-  constructor({ baseUrl, model, fetchImpl = globalThis.fetch, timeoutMs = 180000 } = {}) {
+  constructor({ baseUrl, baseUrls, model, fetchImpl = globalThis.fetch, timeoutMs = 180000 } = {}) {
     if (typeof fetchImpl !== "function") throw new ChatError("fetch non disponibile");
-    this.baseUrl = normalizeBaseUrl(baseUrl);
+    // baseUrls (lista) ha la precedenza su baseUrl (singolo): il fallback prova
+    // gli URL in ordine e passa al successivo solo su errore di rete/timeout.
+    const list = Array.isArray(baseUrls) && baseUrls.length ? baseUrls : (baseUrl ? [baseUrl] : []);
+    const raw = list.map((u) => String(u || "").trim()).filter(Boolean);
+    if (!raw.length) throw new ChatError("baseUrl mancante");
+    this.baseUrls = raw.map(normalizeBaseUrl);
     this.model = String(model || "").trim();
     // Stesso motivo di transport.js: senza il bind, `this.fetch(...)` in un
     // browser fa fallire il brand check di fetch con "Illegal invocation".
@@ -133,9 +138,23 @@ export class ChatClient {
    *  vedi src/models.js. L'id si manda al CP come arriva, emoji compresa.
    */
   async listModels() {
+    let lastError = null;
+    for (const base of this.baseUrls) {
+      try {
+        return await this._listModelsOne(base);
+      } catch (error) {
+        lastError = error;
+        // status > 0 = il CP ha risposto: nessun fallback.
+        if (error instanceof ChatError && error.status > 0) throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  async _listModelsOne(base) {
     let response;
     try {
-      response = await this.fetch(`${this.baseUrl}/models`);
+      response = await this.fetch(`${base}/models`);
     } catch (error) {
       throw new ChatError(`rete non raggiungibile: ${error.message || error}`);
     }
@@ -148,11 +167,25 @@ export class ChatClient {
    *  `onDelta(pezzo, testoCompleto)` viene chiamato a ogni pezzo per il vivo. */
   async send(messages, { onDelta } = {}) {
     if (!this.model) throw new ChatError("nessun modello selezionato");
+    let lastError = null;
+    for (const base of this.baseUrls) {
+      try {
+        return await this._sendOne(base, messages, { onDelta });
+      } catch (error) {
+        lastError = error;
+        // status > 0 = il CP ha risposto: nessun fallback.
+        if (error instanceof ChatError && error.status > 0) throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  async _sendOne(base, messages, { onDelta } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let response;
     try {
-      response = await this.fetch(`${this.baseUrl}/chat/completions`, {
+      response = await this.fetch(`${base}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: this.model, messages, stream: true }),
@@ -182,6 +215,9 @@ export class ChatClient {
         }
       }
       return { text, chunks };            // stream chiuso senza [DONE]
+    } catch (error) {
+      // Never replay a request after headers: it may already have run tools.
+      throw new ChatError(error.message || String(error), { status: response.status || 200 });
     } finally {
       clearTimeout(timer);
     }

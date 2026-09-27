@@ -31,6 +31,11 @@ def _blocco(testo, servizio):
 
 
 class ComposePersistenceTests(unittest.TestCase):
+    def test_control_plane_memory_defaults_to_persistent_directory(self):
+        for filename, services in SERVIZI_CON_DATI.items():
+            block = _blocco((ROOT / filename).read_text(), services[0])
+            self.assertIn('MEMORY_FILE: "${MEMORY_FILE:-/app/data/memory.json.gz}"', block)
+
     def test_chi_ha_stato_monta_app_data(self):
         for filename, servizi in SERVIZI_CON_DATI.items():
             testo = (ROOT / filename).read_text(encoding="utf-8")

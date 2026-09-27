@@ -254,7 +254,7 @@ class PersonaWiringTests(unittest.TestCase):
 
     def test_ogni_risposta_non_stream_viene_auditata(self):
         self.assertIn("_audit_persona_reply",
-                      ast.unparse(self.functions["_call_ollama"]))
+                      ast.unparse(self.functions["_call_ollama_one"]))
 
     def test_la_sezione_persona_e_configurabile_dalla_tab_setup(self):
         meta = {m["key"]: m for m in ast.literal_eval(self.assignments["_ENV_META"])}

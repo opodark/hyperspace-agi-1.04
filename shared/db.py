@@ -8,29 +8,45 @@
 import json
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 
 DB_PATH = os.getenv("DB_PATH", "./data/hyperspace.db")
+_DB_LOCK = threading.RLock()
+
+
+def _journal_mode():
+    # WAL requires reliable shared-memory mmap/locking. Docker Desktop bind
+    # mounts can SIGBUS during commit; rollback journal is the portable default.
+    mode = os.getenv("SQLITE_JOURNAL_MODE", "DELETE").strip().upper()
+    if mode not in {"DELETE", "WAL"}:
+        raise ValueError("SQLITE_JOURNAL_MODE must be DELETE or WAL")
+    return mode
 
 
 def _ensure_dir():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 
 @contextmanager
 def _conn():
-    _ensure_dir()
-    con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout = 30000")
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA synchronous = NORMAL")
-    try:
-        yield con
-        con.commit()
-    finally:
-        con.close()
+    with _DB_LOCK:
+        _ensure_dir()
+        con = sqlite3.connect(DB_PATH, timeout=30.0)
+        try:
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA busy_timeout = 30000")
+            con.execute("PRAGMA mmap_size = 0")
+            con.execute(f"PRAGMA journal_mode = {_journal_mode()}")
+            con.execute("PRAGMA synchronous = FULL")
+            yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
 
 def init_db():

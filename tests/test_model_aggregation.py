@@ -43,6 +43,7 @@ def _run(nodes, models_by_node, aliases=None):
         "_node_list": lambda: nodes,
         "_node_ref_for": lambda nid: (aliases or {}).get(nid) or nid[:8],
         "_fetch_node_models": lambda n: models_by_node.get(n.get("node_id"), []),
+        "_fetch_models": lambda: {"models": models_by_node.get("direct", [])},
     }
     exec(_load_functions(), scope)
     return scope["_aggregate_mesh_models"](force=True)
@@ -54,6 +55,16 @@ def _node(node_id, endpoint, **extra):
 
 
 class ModelAggregationTests(unittest.TestCase):
+    def test_direct_models_survive_without_workers(self):
+        agg = _run([], {"direct": ["lmstudio-model"]})
+        self.assertEqual(agg, {"bare": ["lmstudio-model"], "per_node": []})
+
+    def test_direct_models_deduplicate_mesh_catalog(self):
+        agg = _run([_node(MAC, "http://mac:8081")],
+                   {MAC: ["shared"], "direct": ["shared", "direct-only"]})
+        self.assertEqual(agg["bare"], ["direct-only", "shared"])
+        self.assertEqual(len(agg["per_node"]), 1)
+
     def test_nodo_non_chiamabile_non_pubblica_modelli(self):
         """Endpoint vuoto (nodo locale pseudo-registrato): zero voci pubblicate.
 

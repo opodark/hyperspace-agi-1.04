@@ -255,6 +255,66 @@ await check("send regge un fetch che controlla il receiver", async () => {
   assert.equal(result.text, "ciao");
 });
 
+console.log("== fallback multi-endpoint ==");
+await check("listModels: se il primo CP e' irraggiungibile prova il secondo", async () => {
+  const calls = [];
+  const impl = async (url) => {
+    calls.push(url);
+    if (url.includes("cp1")) throw new Error("Failed to fetch");
+    return { ok: true, status: 200, json: async () => ({ data: [{ id: "qwen3:8b" }] }) };
+  };
+  const client = new ChatClient({ baseUrls: ["http://cp1:8085", "http://cp2:8085"], model: "x", fetchImpl: impl });
+  const models = await client.listModels();
+  assert.deepEqual(models.map((m) => m.id), ["qwen3:8b"]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], "http://cp1:8085/v1/models");
+  assert.equal(calls[1], "http://cp2:8085/v1/models");
+});
+
+await check("listModels: un HTTP errore dal primo CP non prova il secondo", async () => {
+  const calls = [];
+  const impl = async (url) => {
+    calls.push(url);
+    return { ok: false, status: 502, json: async () => ({}) };
+  };
+  const client = new ChatClient({ baseUrls: ["http://cp1:8085", "http://cp2:8085"], model: "x", fetchImpl: impl });
+  await assert.rejects(() => client.listModels(), (e) => e.status === 502);
+  assert.equal(calls.length, 1);
+});
+
+await check("send: rete giu' sul primo CP -> stream dal secondo", async () => {
+  const calls = [];
+  const impl = async (url) => {
+    calls.push(url);
+    if (url.includes("cp1")) throw new Error("Failed to fetch");
+    return { ok: true, status: 200, json: async () => ({}),
+             body: (async function* () { yield delta("ciao"); yield DONE; })() };
+  };
+  const client = new ChatClient({ baseUrls: ["http://cp1:8085", "http://cp2:8085"], model: "qwen3:8b", fetchImpl: impl });
+  const result = await client.send([{ role: "user", content: "x" }]);
+  assert.equal(result.text, "ciao");
+  assert.equal(calls.length, 2);
+});
+
+await check("send: errore SSE non ripete la richiesta su un altro CP", async () => {
+  let calls = 0;
+  const client = new ChatClient({ baseUrls: ["http://cp1", "http://cp2"], model: "x",
+    fetchImpl: async () => { calls++; return new Response('data: {"error":"backend failure"}\n\n'); } });
+  await assert.rejects(() => client.send([]), /backend failure/);
+  assert.equal(calls, 1);
+});
+
+await check("send: stream interrotto dopo un delta non cambia CP", async () => {
+  let calls = 0;
+  const seen = [];
+  const client = new ChatClient({ baseUrls: ["http://cp1", "http://cp2"], model: "x",
+    fetchImpl: async () => { calls++; return { ok: true, status: 200,
+      body: (async function* () { yield delta("parziale"); throw new Error("connection reset"); })() }; } });
+  await assert.rejects(() => client.send([], { onDelta: (part) => seen.push(part) }), /connection reset/);
+  assert.deepEqual(seen, ["parziale"]);
+  assert.equal(calls, 1);
+});
+
 console.log();
 if (process.exitCode) {
   console.error("TEST CHAT: FALLITI");

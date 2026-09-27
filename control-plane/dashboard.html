@@ -688,6 +688,12 @@ main,.panel,.card{min-width:0}
 
 <div id="panel-setup" class="panel">
   <div class="sec-title">Setup</div>
+  <div class="card">
+    <label class="label" for="configAdminToken">Token amministrativo</label>
+    <input id="configAdminToken" type="password" class="inp" autocomplete="off" placeholder="Token amministrativo di rete"/>
+    <button class="btn btn-primary" onclick="unlockConfig()">Accedi alla configurazione</button>
+    <span class="hint">Usa il token di Network. Rimane soltanto nella sessione del browser.</span>
+  </div>
   <div class="card"><div class="card-title">&#129302; Ollama</div>
     <div class="setup-grid">
       <div class="fg"><label class="label">Ollama URL</label><input id="oUrl" class="inp inp-mono"/></div>
@@ -2033,7 +2039,7 @@ async function diagTopology(){document.getElementById('dTopo').textContent='...'
 async function diagRegistry(){document.getElementById('dReg').textContent='...';var d=await(await fetch('/registry/nodes')).json();document.getElementById('dReg').textContent=JSON.stringify(d,null,2);}
 async function checkOllama(){document.getElementById('dOllama').textContent='...';var d=await(await fetch('/ollama/status')).json();document.getElementById('dOllama').textContent=JSON.stringify(d,null,2);}
 async function checkHb(){var d=await(await fetch('/hb/status')).json();document.getElementById('dHb').textContent=JSON.stringify(d,null,2);}
-async function diagRoutingWeights(){document.getElementById('dRoutingWeights').textContent='...';var d=await(await fetch('/config/routing-weights')).json();document.getElementById('dRoutingWeights').textContent=JSON.stringify(d,null,2);}
+async function diagRoutingWeights(){document.getElementById('dRoutingWeights').textContent='...';var d=await(await configFetch('/config/routing-weights')).json();document.getElementById('dRoutingWeights').textContent=JSON.stringify(d,null,2);}
 async function checkDreamWorker(){
   var id=document.getElementById('drNode').value;if(!id)return;
   var out=document.getElementById('dDreamWorker');out.textContent='Caricamento...';
@@ -2160,8 +2166,21 @@ async function checkOllamaModal(){
 }
 
 // Setup
+function configFetch(url,options){
+  options=options||{};
+  options.headers=Object.assign({},options.headers||{},networkHeaders(false));
+  return fetch(url,options);
+}
+function unlockConfig(){
+  var token=document.getElementById('configAdminToken').value.trim();
+  if(token)sessionStorage.setItem('hyperspaceNetworkAdminToken',token);
+  else sessionStorage.removeItem('hyperspaceNetworkAdminToken');
+  document.getElementById('configAdminToken').value='';
+  loadCfg();loadEnv();
+}
 async function loadCfg(){
-  var c=await(await fetch('/config/advanced')).json();
+  var response=await configFetch('/config/advanced'),c=await response.json();
+  if(!response.ok){showMsg(c.error||'Accesso non autorizzato');return;}
   document.getElementById('oUrl').value=(c.ollama&&c.ollama.url)||'';
   document.getElementById('oModel').value=(c.ollama&&c.ollama.defaultModel)||'';
   document.getElementById('meshEps').value=(c.mesh&&c.mesh.nodeEndpoints||[]).join('\n');
@@ -2177,7 +2196,7 @@ async function saveCfg(){
     security:{sharedSecret:document.getElementById('secVal').value},
     _authority:{serverUrl:document.getElementById('aUrl').value}
   };
-  var d=await(await fetch('/config/advanced',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+  var d=await(await configFetch('/config/advanced',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
   showMsg(d.ok?'Salvato':'Errore');
 }
 // Control-Plane Env: modifica a runtime + persistenza su .env
@@ -2192,7 +2211,7 @@ function envField(v){
 async function loadEnv(){
   var banner=document.getElementById('envBanner');
   var el=document.getElementById('cpEnvList');
-  var d=await(await fetch('/config/env')).json();
+  var d=await(await configFetch('/config/env')).json();
   if(!d.ok){banner.textContent='Errore: '+(d.error||'unreachable');banner.className='env-banner err';el.innerHTML='';return;}
   CP_ENV=d;
   banner.textContent=d.writable
@@ -2255,7 +2274,7 @@ async function saveEnv(){
     if(v.type==='bool')updates[v.key]=inp.checked?'true':'false';
     else updates[v.key]=inp.value;
   });
-  var d=await(await fetch('/config/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:updates})})).json();
+  var d=await(await configFetch('/config/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:updates})})).json();
   if(d.ok){
     showMsg('Env aggiornato ('+d.applied.length+' variabili)'+(d.persisted===false?' — .env NON scritto, valido solo fino a riavvio':''));
     loadEnv();
@@ -2301,7 +2320,7 @@ async function loadSocial(){
 async function connectChannel(key,disconnect){
   var tok=document.getElementById('tok_'+key).value.trim();
   if(!disconnect && !tok){showMsg('Token vuoto per '+key);return;}
-  var env=await(await fetch('/config/env')).json();
+  var env=await(await configFetch('/config/env')).json();
   var m=(env.vars||[]).find(function(v){return v.key==='CHANNEL_CLIENTS';});
   var cur=(m&&m.value)||'';
   var map={};
@@ -2309,12 +2328,12 @@ async function connectChannel(key,disconnect){
   if(disconnect)delete map[key.toLowerCase()];
   else map[key.toLowerCase()]=tok;
   var next=Object.keys(map).map(function(k){return k+'='+map[k];}).join(';');
-  var d=await(await fetch('/config/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:{CHANNEL_CLIENTS:next}})})).json();
+  var d=await(await configFetch('/config/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({updates:{CHANNEL_CLIENTS:next}})})).json();
   if(d.ok){showMsg('Canale aggiornato ('+key+')');loadSocial();}
   else{showMsg('Errore: '+(d.error||'unknown'));}
 }
 async function rotateSecret(){
-  var d=await(await fetch('/config/secret/rotate',{method:'POST'})).json();
+  var d=await(await configFetch('/config/secret/rotate',{method:'POST'})).json();
   if(d.ok)showMsg('Segreto ruotato: '+d.secret.slice(0,8)+'...');
 }
 function toggleSec(btn){

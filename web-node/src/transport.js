@@ -15,10 +15,13 @@ export class TransportError extends Error {
 }
 
 export class WebNodeTransport {
-  constructor({ baseUrl, fetchImpl = globalThis.fetch, timeoutBufferMs = 5000 } = {}) {
+  constructor({ baseUrl, baseUrls, fetchImpl = globalThis.fetch, timeoutBufferMs = 5000 } = {}) {
     if (typeof fetchImpl !== "function") throw new TransportError("fetch non disponibile");
-    this.baseUrl = String(baseUrl || "").replace(/\/+$/, "");
-    if (!this.baseUrl) throw new TransportError("baseUrl mancante");
+    // baseUrls (lista) ha la precedenza su baseUrl (singolo): il fallback prova
+    // gli URL in ordine e passa al successivo solo su errore di rete/timeout.
+    const list = Array.isArray(baseUrls) && baseUrls.length ? baseUrls : (baseUrl ? [baseUrl] : []);
+    this.baseUrls = list.map((u) => String(u || "").replace(/\/+$/, "")).filter(Boolean);
+    if (!this.baseUrls.length) throw new TransportError("baseUrl mancante");
     // `fetch` va invocata con `this` = window. Chiamarla come `this.fetch(...)`
     // le passerebbe QUESTO oggetto come receiver, e il browser la rifiuta con
     // "Failed to execute 'fetch' on 'Window': Illegal invocation" — che arriva
@@ -29,12 +32,28 @@ export class WebNodeTransport {
     this.timeoutBufferMs = Math.max(500, Number(timeoutBufferMs) || 5000);
   }
 
+  /** Prova gli URL in ordine: passa al successivo solo su errore di rete/timeout
+   *  (TransportError con status 0). Se il CP risponde (status > 0) l'errore e'
+   *  reale e non c'e' fallback: un altro CP non darebbe esito diverso. */
   async _post(path, body, timeoutMs) {
+    let lastError = null;
+    for (const base of this.baseUrls) {
+      try {
+        return await this._postOne(base, path, body, timeoutMs);
+      } catch (error) {
+        lastError = error;
+        if (error instanceof TransportError && error.status > 0) throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  async _postOne(base, path, body, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response;
     try {
-      response = await this.fetch(`${this.baseUrl}${path}`, {
+      response = await this.fetch(`${base}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
