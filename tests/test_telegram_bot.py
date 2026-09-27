@@ -201,6 +201,17 @@ class ConsegnaImmaginiTests(unittest.TestCase):
         self.assertEqual(self.driver.immagini_da_consegnare({"messages": []}), [])
         self.assertEqual(self.driver.immagini_da_consegnare(None), [])
 
+    def test_percorso_reale_risolve_relativo_e_lascia_assoluto(self):
+        from pathlib import Path
+        output = Path(self.driver.COMFY_OUTPUT_DIR)
+        self.assertEqual(
+            self.driver.percorso_reale("HyperSpace/bridge_00001_.png"),
+            str(output / "HyperSpace/bridge_00001_.png"))
+        self.assertEqual(
+            self.driver.percorso_reale("/Users/x/out/a.png"),
+            "/Users/x/out/a.png")
+        self.assertEqual(self.driver.percorso_reale(""), "")
+
 
 class UnSoloDriverTests(unittest.TestCase):
     """Due driver sullo stesso bot si rubano i messaggi: il secondo non deve partire.

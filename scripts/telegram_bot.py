@@ -252,6 +252,25 @@ def segnala_scrittura(chat_id, stato: dict, adesso: float) -> bool:
     return True
 
 
+COMFY_OUTPUT_DIR = os.getenv("COMFY_OUTPUT_DIR", "").strip() or "/Users/opo/ComfyUI-Shared/output"
+
+
+def percorso_reale(file: str) -> str:
+    """Il percorso reale di un file d'immagine.
+
+    Il ponte riferisce il file con il percorso RELATIVO alla cartella output di
+    ComfyUI (es. HyperSpace/bridge_00001_.png): qui si risolve contro
+    COMFY_OUTPUT_DIR. Un percorso già assoluto (Windows, dove il ponte usa
+    OUTPUT_DESKTOP) resta com'è.
+    """
+    file = str(file or "").strip()
+    if not file:
+        return ""
+    if os.path.isabs(file):
+        return file
+    return str(Path(COMFY_OUTPUT_DIR) / file)
+
+
 def immagini_da_consegnare(risposta) -> list:
     """Le consegne valide ricevute dal control-plane: `(id, file, chat)`.
 
@@ -297,12 +316,13 @@ def consegna_outbox() -> int:
     """
     inviate = 0
     for consegna in immagini_da_consegnare(cp_get("/channel/outbox")):
-        if not os.path.isfile(consegna["file"]):
+        file_reale = percorso_reale(consegna["file"])
+        if not os.path.isfile(file_reale):
             print(f"[telegram] immagine non trovata: {consegna['file']}", flush=True)
             continue
         didascalia = consegna["prompt"][:200] if consegna["prompt"] else "Ecco l'immagine."
         try:
-            invia_foto(consegna["chat"], consegna["file"], didascalia)
+            invia_foto(consegna["chat"], file_reale, didascalia)
         except (requests.RequestException, OSError) as e:
             print(f"[telegram] invio immagine fallito: {e}", flush=True)
             continue

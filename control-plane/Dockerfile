@@ -10,6 +10,7 @@ COPY control-plane/routing.py .
 COPY control-plane/dashboard.html .
 COPY control-plane/desktop.html .
 COPY control-plane/conversations.html .
+COPY control-plane/diario.html .
 COPY control-plane/connectors ./connectors
 
 COPY shared ./shared
