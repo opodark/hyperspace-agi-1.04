@@ -56,6 +56,21 @@ COMFY_DEFAULT = "http://127.0.0.1:8188"
 # file prodotto, non serve a generare.
 OUTPUT_DESKTOP = (Path(os.environ.get("LOCALAPPDATA", "")) / "Comfy-Desktop" /
                   "ComfyUI-Installs" / "ComfyUI" / "ComfyUI" / "output")
+
+
+def _output_default() -> str:
+    """La cartella output di default del ponte.
+
+    Su Windows (LOCALAPPDATA presente) è quella dell'app desktop: il driver
+    Telegram usa lì il percorso ASSOLUTO per consegnare il file. Altrove (es. il
+    Mac) è vuota, così il ponte riferisce il percorso RELATIVO
+    (HyperSpace/bridge_...png) e /diario/immagini lo serve dal volume montato
+    (DIARIO_IMMAGINI_DIR) — un percorso assoluto del Mac non sarebbe leggibile
+    dal control-plane in container.
+    """
+    if os.environ.get("LOCALAPPDATA"):
+        return str(OUTPUT_DESKTOP)
+    return ""
 PREFISSO = "HyperSpace/bridge"
 
 
@@ -204,7 +219,7 @@ def main(argv=None) -> int:
     parser.add_argument("--token", default=os.getenv("CHANNEL_TOKEN", ""))
     parser.add_argument("--comfy", default=os.getenv("COMFY_URL", COMFY_DEFAULT))
     parser.add_argument("--output",
-                        default=os.getenv("COMFY_OUTPUT_DIR") or str(OUTPUT_DESKTOP))
+                        default=os.getenv("COMFY_OUTPUT_DIR") or _output_default())
     parser.add_argument("--model", default=os.getenv("BRIDGE_MODEL", ""),
                         help="famiglia di modello che questo ponte sa eseguire "
                              "(es. sdxl-turbo per il Mac); vuoto = qualunque job")
