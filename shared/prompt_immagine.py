@@ -5,7 +5,7 @@
 La regex (`richiesta_immagine` in `image_jobs.py`) è gratuita e deterministica ma
 rigida: capisce solo frasi che COMINCIANO col verbo e un elenco fisso di parole.
 Un utente vero scrive "ora fammi un...", "dai disegnami un...", stili arbitrari,
-negazioni. Il modello piccolo abliterated (`maternion/spark-x2.5-heretic:4b`) è il secondo passaggio per quelle
+negazioni. Il modello senza censura della persona (`qwen3-8b-abliterated`, 8B) è il secondo passaggio per quelle
 frasi: decide se è una richiesta d'immagine e ne estrae il prompt pulito.
 
 La regex resta il primo passaggio (nessuna rete) e il fallback quando il modello
@@ -21,7 +21,7 @@ from shared.image_jobs import richiesta_immagine
 # Il modello piccolo e per quanto resta in RAM dopo l'uso. `keep_alive` corto
 # perché il Mac ha 16 GB e questo modello vive accanto a SDXL-Turbo e alla
 # persona (8B): una volta usato si scarica in fretta.
-MODELLO_PROMPT = os.getenv("PROMPT_IMAGE_MODEL", "maternion/spark-x2.5-heretic:4b")
+MODELLO_PROMPT = os.getenv("PROMPT_IMAGE_MODEL", "qwen3-8b-abliterated")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 KEEP_ALIVE_S = 60
 
