@@ -1,0 +1,22 @@
+{
+  "$commento": [
+    "Manifest del checkpoint SDXL-Turbo per gli sketch del Mac.",
+    "Fonte unica per il download (install-model.sh) e per il grafo del ponte",
+    "(shared/image_jobs.py MODELLO_SDXL). Le impronte vengono dall'oggetto LFS",
+    "del file upstream, verificate il 2026-09-27.",
+    "A differenza del Qwen-Image (GGUF + text encoder + VAE separati), SDXL-Turbo",
+    "e' un checkpoint UNICO: CheckpointLoaderSimple porta con se' UNet, CLIP e VAE.",
+    "Quindi una sola destinazione: 'checkpoints'."
+  ],
+  "repo": "stabilityai/sdxl-turbo",
+  "revisione": "71153311d3dbb46851df1931d3ca6e939de83304",
+  "modello_base": "stabilityai/sdxl-turbo",
+  "licenza": "Stability AI Non-Commercial Community License (sai-nc-community)",
+  "nota_licenza": "I pesi NON sono distribuiti con HyperSpace: ognuno ha la licenza del proprio autore e si scarica a parte (THIRD-PARTY-NOTICES.md). SDXL-Turbo e' NON commerciale (sai-nc-community): solo ricerca/sperimentazione.",
+  "checkpoint": {
+    "destinazione": "checkpoints",
+    "file": "sd_xl_turbo_1.0_fp16.safetensors",
+    "sha256": "e869ac7d6942cb327d68d5ed83a40447aadf20e0c3358d98b2cc9e270db0da26",
+    "byte": 6938081905
+  }
+}
