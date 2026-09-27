@@ -95,6 +95,7 @@ from shared.feed import Feed, nuovo_post
 from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
 from shared.sketch import job_sketch, puo_generare
 from shared.diario import Diario, file_da_job, voce
+from shared.conversation_log import ConversationLog, battuta
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
@@ -2917,9 +2918,12 @@ def channel_ingest():
 
 # ── DIARIO CONVERSAZIONI (diagnostica) ──────────────────────────────────────
 # Le ultime battute scambiate sui canali, per la finestrella /conversations.
-# In memoria e con un tetto: è un cruscotto di diagnostica, non un archivio.
+# Persistente su disco (append-only, con tetto e contatore `dropped`): non è
+# più solo un cruscotto volatile, sopravvive al riavvio del control-plane.
 _MAX_CONVERSATION_TURNS = 200
-_conversation_log = deque(maxlen=_MAX_CONVERSATION_TURNS)
+CONVERSATION_FILE = os.getenv("CONVERSATION_FILE", "").strip() or os.path.join(
+    BASE_DIR, "..", "data", "conversations.json")
+_conversation_log = ConversationLog.load(CONVERSATION_FILE, _MAX_CONVERSATION_TURNS)
 
 
 # ── FEED DELLE INFLUENCER ────────────────────────────────────────────────────
@@ -3140,18 +3144,10 @@ def dream_loop():
 def _record_conversation(channel: str, surface: str, chat: str, context: list,
                          action: str, text: str = "", reason: str = "") -> None:
     """Annota una battuta (messaggi in arrivo + risposta/azione) nel diario."""
-    _conversation_log.append({
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "channel": channel,
-        "surface": surface,
-        "chat": str(chat or "")[:64],
-        "messages": [{"author": str(m.get("author", ""))[:64],
-                      "text": str(m.get("text", ""))[:1000]}
-                     for m in (context or []) if isinstance(m, dict)],
-        "action": action,
-        "text": str(text or "")[:2000],
-        "reason": str(reason or "")[:200],
-    })
+    _conversation_log.add(battuta(channel=channel, surface=surface, chat=chat,
+                                  messages=context, action=action, text=text,
+                                  reason=reason))
+    _conversation_log.save(CONVERSATION_FILE)
 
 
 @app.route('/channel/reply', methods=['POST'])
@@ -7653,8 +7649,18 @@ def conversations_page():
 
 @app.route('/conversations/data')
 def conversations_data():
-    """Le ultime battute scambiate sui canali, per /conversations (diagnostica)."""
-    return jsonify({"ok": True, "turns": list(_conversation_log)})
+    """Le battute del diario, con filtro opzionale per canale/superficie."""
+    canale = str(request.args.get("channel", "") or "").strip().lower()
+    superficie = str(request.args.get("surface", "") or "").strip().lower()
+    tutte = _conversation_log.list()
+    channels = sorted({str(t.get("channel", "")) for t in tutte if t.get("channel")})
+    turns = tutte
+    if canale:
+        turns = [t for t in turns if str(t.get("channel", "")).lower() == canale]
+    if superficie:
+        turns = [t for t in turns if str(t.get("surface", "")).lower() == superficie]
+    return jsonify({"ok": True, "turns": turns,
+                    "dropped": _conversation_log.dropped, "channels": channels})
 
 
 @app.route('/diario')

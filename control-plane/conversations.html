@@ -42,6 +42,9 @@
 <header>
   <span class="dot" id="dot"></span>
   <h1>Conversazioni dei chatbot</h1>
+  <select id="channelFilter" style="background:#1b2430;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px;">
+    <option value="">tutti i canali</option>
+  </select>
   <span class="count" id="count"></span>
   <a href="/dashboard">dashboard</a>
 </header>
@@ -50,17 +53,27 @@
   const wrap = document.getElementById('wrap');
   const dot = document.getElementById('dot');
   const count = document.getElementById('count');
+  const filter = document.getElementById('channelFilter');
   function esc(s) {
     return String(s ?? '').replace(/[&<>"]/g, c =>
       ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   }
+  function fillFilter(channels) {
+    const current = filter.value;
+    const options = ['<option value="">tutti i canali</option>']
+      .concat((channels || []).map(c => `<option value="${esc(c)}"${c === current ? ' selected' : ''}>${esc(c)}</option>`));
+    filter.innerHTML = options.join('');
+    filter.value = current;
+  }
   async function tick() {
     try {
-      const r = await fetch('/conversations/data');
+      const q = filter.value ? '?channel=' + encodeURIComponent(filter.value) : '';
+      const r = await fetch('/conversations/data' + q);
       const d = await r.json();
-      const turns = (d.turns || []).slice().reverse();
+      const turns = d.turns || [];
       dot.className = 'dot';
-      count.textContent = turns.length + ' turni';
+      count.textContent = turns.length + ' turni' + (d.dropped ? ' · ' + d.dropped + ' scartati' : '');
+      fillFilter(d.channels);
       if (!turns.length) {
         wrap.innerHTML = '<div class="empty">Nessuna conversazione ancora.</div>';
         return;
@@ -86,6 +99,7 @@
       wrap.innerHTML = '<div class="empty">control-plane non raggiungibile</div>';
     }
   }
+  filter.addEventListener('change', tick);
   tick();
   setInterval(tick, 4000);
 </script>
