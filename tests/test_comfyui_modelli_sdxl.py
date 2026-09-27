@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Il checkpoint SDXL-Turbo: manifest e grafo devono dire la stessa cosa.
+"""Il checkpoint RealVisXL (SDXL NSFW): manifest e grafo devono dire la stessa cosa.
 
-Stessa disciplina di test_comfyui_modelli.py, ma per lo sketch del Mac: il nome
+Stessa disciplina di test_comfyui_modelli.py, ma per il modello del Mac: il nome
 del checkpoint e' una STRINGA in due posti — il manifest `modelli-sdxl.json` che
 `install-model.sh` scarica e `MODELLO_SDXL` nel grafo che il ponte manda a
 ComfyUI. L'unico modo di non scoprire un disallineamento *durante una
@@ -47,11 +47,10 @@ class ManifestSdxlTests(unittest.TestCase):
         manifest = carica()
         self.assertEqual(manifest["checkpoint"]["destinazione"], "checkpoints")
 
-    def test_la_licenza_e_dichiarata_come_non_commerciale(self):
+    def test_la_licenza_e_dichiarata(self):
         manifest = carica()
         self.assertIn("licenza", manifest)
         self.assertTrue(manifest["licenza"].strip())
-        self.assertIn("Non-Commercial", manifest["licenza"])
 
 
 if __name__ == "__main__":

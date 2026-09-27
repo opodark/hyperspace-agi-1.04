@@ -45,9 +45,9 @@ class JobSketchTests(unittest.TestCase):
         self.assertIn("schizzo", job["prompt"])
 
     def test_il_negativo_non_e_vuoto(self):
-        # SDXL usa il negativo: lo sketch porta le esclusioni assolute.
+        # RealVisXL usa il negativo di qualità (anatomia), non filtri di contenuto.
         job = job_sketch("un gatto")
-        self.assertIn("fotografia", job["negativo"])
+        self.assertIn("bad anatomy", job["negativo"])
 
 
 class PuoGenerareTests(unittest.TestCase):

@@ -246,9 +246,9 @@ class GrafoSdxlTests(unittest.TestCase):
         grafo = workflow(self.job)
         self.assertEqual(grafo["451"]["class_type"], "CheckpointLoaderSimple")
 
-    def test_cfg_e_passi_da_turbo(self):
+    def test_cfg_e_passi_da_realvisxl(self):
         grafo = workflow(self.job)
-        self.assertEqual(grafo["458"]["inputs"]["cfg"], 1.0)
+        self.assertEqual(grafo["458"]["inputs"]["cfg"], 7.0)
         self.assertEqual(grafo["458"]["inputs"]["steps"], 2)
 
     def test_il_negativo_arriva_al_clip_negativo(self):

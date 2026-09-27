@@ -94,7 +94,7 @@ from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job
 from shared.prompt_immagine import chiama_ollama, configura_modello, richiesta_immagine_smart
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
-from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, puo_generare
+from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, negativo_sketch, puo_generare
 from shared.diario import Diario, file_da_job, voce
 from shared.conversation_log import ConversationLog, battuta
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
@@ -1182,7 +1182,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
         # fotorealistico resta al canale utente via webUI (docs/comfyui.md).
         accodato = image_queue.accoda(nuovo_job(
             idea,
-            negativo="",
+            negativo=negativo_sketch(),
             larghezza=SKETCH_LATO, altezza=SKETCH_LATO, passi=SKETCH_PASSI,
             richiedente=autore, canale=channel,
             famiglia=FAMIGLIA_SDXL,

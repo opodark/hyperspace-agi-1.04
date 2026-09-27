@@ -25,12 +25,11 @@ STILE_SKETCH = (
     "tratto veloce, bozza d'artista"
 )
 
-# Passi e lato: SDXL-Turbo è distillato per 1-4 passi a 512×512. A 2 passi le
-# figure escono storte; 4 è il punto dolce (il grosso del salto 2→4, senza il
-# tempo in più dei 6). ~66s invece di ~33s. Il lato resta 512: risoluzione
-# nativa di Turbo, alzarla non migliora la figura.
-SKETCH_PASSI = 4
-SKETCH_LATO = 512
+# Passi e lato: RealVisXL è un SDXL fotorealistico (non distillato) a 1024×1024.
+# 28 passi danno anatomia decente (mani/visi/intime) su MPS; il costo è ~8-10
+# minuti a immagine invece dei ~66s di Turbo.
+SKETCH_PASSI = 28
+SKETCH_LATO = 1024
 SKETCH_CANALE = "feed"
 SKETCH_PER_DAY = 4
 
@@ -50,8 +49,12 @@ def prompt_sketch(idea: str, *, autore: str = "") -> str:
 
 
 def negativo_sketch() -> str:
-    """Le esclusioni dello sketch: le assolute del ritratto, più il no-foto."""
-    return NEGATIVO_BASE
+    """Il negativo di qualità per RealVisXL: solo anatomia, nessun filtro di contenuto."""
+    return (
+        "bad hands, bad anatomy, ugly, deformed, face asymmetry, eyes asymmetry, "
+        "deformed eyes, deformed mouth, open mouth, extra fingers, extra limbs, "
+        "blurry, low quality, jpeg artifacts"
+    )
 
 
 def job_sketch(idea: str, *, autore: str = "", post_id: str = "",

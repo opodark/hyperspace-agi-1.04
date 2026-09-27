@@ -338,14 +338,14 @@ MODELLO_DEFAULT = {
     "scheduler": "simple",
 }
 
-# La ricetta SDXL-Turbo: un checkpoint UNICO (CheckpointLoaderSimple porta con sé
-# UNet, CLIP e VAE), cfg 1.0 e pochi passi. È il modello leggero del Mac: per gli
-# sketch non serve il GGUF di Qwen né il text encoder da 8B.
+# La ricetta RealVisXL: SDXL fotorealistico + NSFW, checkpoint UNICO
+# (CheckpointLoaderSimple porta con sé UNet, CLIP e VAE). cfg ~7 e 28+ passi:
+# niente più Turbo distillato (che sfigurava mani e parti intime).
 MODELLO_SDXL = {
-    "ckpt": "sd_xl_turbo_1.0_fp16.safetensors",
-    "cfg": 1.0,
-    "sampler": "euler",
-    "scheduler": "normal",
+    "ckpt": "RealVisXL_V5.0_fp16.safetensors",
+    "cfg": 7.0,
+    "sampler": "dpmpp_2m",
+    "scheduler": "karras",
 }
 
 
