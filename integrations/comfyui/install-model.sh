@@ -101,7 +101,8 @@ fi
 
 mkdir -p "$DEST_DIR"
 echo "[modelli] scarico $FILE ..."
-curl -fL -C - --retry 3 -o "$PARTIAL" "$URL"
+curl -fL -C - --retry 6 --retry-delay 3 \
+     --speed-limit 1000000 --speed-time 60 -o "$PARTIAL" "$URL"
 
 attuale="$(shasum -a 256 "$PARTIAL" | awk '{print $1}')"
 if [[ "$attuale" != "$SHA" ]]; then
