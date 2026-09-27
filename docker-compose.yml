@@ -196,6 +196,7 @@ services:
 
   # -- Obsidian -------------------------------------------------------------------------
   obsidian:
+    profiles: ["opt"]
     image: lscr.io/linuxserver/obsidian:latest
     container_name: hyperspace_obsidian
     env_file:
@@ -509,6 +510,7 @@ services:
   # OMNIROUTE_API_KEY nel .env. OMNIROUTE_ENABLED=false disattiva del tutto
   # questo fallback (vedi _try_omniroute_fallback).
   omniroute:
+    profiles: ["opt"]
     image: diegosouzapw/omniroute:latest
     container_name: hyperspace_omniroute
     ports:
