@@ -28,7 +28,10 @@ fi
 
 export CHANNEL_URL="${CHANNEL_URL:-http://127.0.0.1:8085}"
 export COMFY_URL="${COMFY_URL:-http://127.0.0.1:8188}"
-export COMFY_OUTPUT_DIR="${COMFY_OUTPUT_DIR:-/Users/opo/ComfyUI-Shared/output}"
+# COMFY_OUTPUT_DIR NON si imposta qui: senza, il ponte riferisce il file con il
+# suo percorso RELATIVO (es. HyperSpace/bridge_00001_.png). Il diario lo serve
+# da /app/comfy-output (volume montato dal docker-compose): un percorso assoluto
+# del Mac non sarebbe leggibile dal control-plane in container.
 export BRIDGE_MODEL="${BRIDGE_MODEL:-sdxl-turbo}"
 
 PYTHON=".venv/bin/python"

@@ -444,6 +444,9 @@ services:
       # gia': qui mancava solo al control-plane.
       - ./data/control-plane:/app/data
       - sandbox_exchange:/sandbox-exchange
+      # Output di ComfyUI (gli sketch del Mac): montato in sola lettura perché
+      # /diario/immagini possa servire i PNG generati fuori dal container.
+      - ${COMFY_OUTPUT_DIR:-/Users/opo/ComfyUI-Shared/output}:/app/comfy-output:ro
     environment:
       PYTHONUNBUFFERED: "1"
       ENV_FILE_PATH:    /repo/.env
@@ -458,6 +461,7 @@ services:
       MEMORY_MAX_ENTRIES: "${MEMORY_MAX_ENTRIES:-200}"
       MEMORY_BACKEND: "${MEMORY_BACKEND:-hermes}"
       MEMORY_FILE: "${MEMORY_FILE:-/app/data/memory.json.gz}"
+      DIARIO_IMMAGINI_DIR: "/app/comfy-output"
       # Memoria locale-prima (shared/memory_sync.py): mirror sempre scritto, coda
       # delle voci che Hermes non ha ancora accettato, lettura degradata dal mirror.
       MEMORY_MIRROR: "${MEMORY_MIRROR:-true}"
