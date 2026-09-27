@@ -1197,8 +1197,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
     if not destinazione:
         return ("L'ho messa in coda, ma non so dove mandartela: chiedila dalla chat "
                 "(nel canale il driver manda l'id della conversazione).")
-    return (f"La disegno: {accodato['larghezza']}x{accodato['altezza']}, "
-            f"{accodato['passi']} passi. Arriva qui appena è pronta.")
+    return "Ok! Mi metto subito al lavoro: appena è pronta te la mando qui."
 
 
 def _trascrizione(context) -> str:

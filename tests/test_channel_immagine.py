@@ -304,6 +304,16 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
                 self.assertNotIn(bugia, minuscolo)
         self.assertIn("appena è pronta", risposta)
 
+    def test_la_risposta_e_calda_e_non_svela_i_numeri(self):
+        """Niente '512x512, N passi' in chat: il parametro tecnico non è per chi chiede."""
+        scope = _load(operator=())
+        risposta = scope["_channel_immagine"](
+            _contesto("mandami una foto di te", autore="chiunque"),
+            channel="telegram", destinazione="1")
+        self.assertIn("mi metto", risposta.lower())
+        self.assertNotIn("512", risposta)
+        self.assertNotIn("passi", risposta.lower())
+
     def test_il_log_dice_da_quale_regola_e_arrivata(self):
         scope = _load(operator={"alberto"})
         scope["_channel_immagine"](

@@ -106,7 +106,7 @@ il default di `/image/generate` è esattamente quello.
 ### Fase 3 — fatta e verificata
 
 - **`!immagine <idea>` nel canale**: il comando entra dalla chat, il control-plane
-  risponde subito ("La disegno: 512x512, 6 passi") e mette il job in coda. Chi può
+  risponde subito ("Ok! Mi metto subito al lavoro") e mette il job in coda. Chi può
   chiederlo: l'**operatore** (`CHANNEL_OPERATOR` nel `.env`); senza quella variabile
   il comando è aperto a chiunque sia in chat — una scelta, non un caso, ma da fare
   sapendo che la scheda è una sola.
