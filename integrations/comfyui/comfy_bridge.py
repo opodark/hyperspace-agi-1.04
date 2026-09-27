@@ -91,7 +91,7 @@ def _richiesta(url: str, *, payload=None, timeout: float = 30.0,
         return 0, {"errore": f"connessione interrotta: {errore}"}
 
 
-def _verifiche(comfy_url: str, output_dir: str) -> list:
+def _verifiche(comfy_url: str, output_dir: str, modello: str = "") -> list:
     """Cosa manca perché una generazione possa riuscire. Vuoto = si può fare."""
     problemi = []
     stato, dati = _richiesta(f"{comfy_url}/system_stats", timeout=10)
@@ -104,9 +104,15 @@ def _verifiche(comfy_url: str, output_dir: str) -> list:
     log(f"ComfyUI {sistema.get('comfyui_version', '?')} | {dispositivo.get('name', '?')} "
         f"| VRAM libera {round((dispositivo.get('vram_free') or 0) / 1073741824, 2)} GB")
     # I file dichiarati nel grafo devono ESSERE lì: si chiede a ComfyUI l'elenco
-    # delle sue scelte, che è la stessa cosa che vede il grafo.
-    for nodo, campo in (("UnetLoaderGGUF", "unet_name"), ("CLIPLoader", "clip_name"),
-                        ("VAELoader", "vae_name")):
+    # delle sue scelte, che è la stessa cosa che vede il grafo. I nodi dipendono
+    # dalla famiglia: SDXL-Turbo usa CheckpointLoaderSimple (checkpoint unico),
+    # Qwen-Image usa UnetLoaderGGUF + CLIPLoader + VAELoader.
+    if modello == "sdxl-turbo":
+        nodi = (("CheckpointLoaderSimple", "ckpt_name"),)
+    else:
+        nodi = (("UnetLoaderGGUF", "unet_name"), ("CLIPLoader", "clip_name"),
+                ("VAELoader", "vae_name"))
+    for nodo, campo in nodi:
         stato, info = _richiesta(f"{comfy_url}/object_info/{nodo}", timeout=10)
         nodo_info = ((info or {}).get(nodo) or {})
         scelte = (((nodo_info.get("input") or {}).get("required") or {}).get(campo) or [])
@@ -209,7 +215,7 @@ def main(argv=None) -> int:
     base = args.url.rstrip("/")
     intestazioni = {"X-Hyperspace-Channel-Token": args.token} if args.token else {}
 
-    problemi = _verifiche(args.comfy, args.output)
+    problemi = _verifiche(args.comfy, args.output, args.model)
     stato, salute = _richiesta(f"{base}/image/status", timeout=10, headers=intestazioni)
     if stato == 200:
         log(f"control-plane {base}: ok (in coda {salute.get('in_coda')}, "
