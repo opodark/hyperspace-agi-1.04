@@ -25,9 +25,11 @@ STILE_SKETCH = (
     "tratto veloce, bozza d'artista"
 )
 
-# Passi e lato: SDXL-Turbo dà il massimo in 1-4 passi a 512×512. Di più è solo
-# spreco di memoria sul Mac.
-SKETCH_PASSI = 2
+# Passi e lato: SDXL-Turbo è distillato per 1-4 passi a 512×512, ma a 2 passi le
+# figure escono storte (anatomia approssimativa). Sei passi costano ~100s invece
+# di ~33s (il Mac ha il tempo, non la scheda) e l'anatomia regge. Il lato resta
+# 512: è la risoluzione nativa di Turbo, alzarla non migliora la figura.
+SKETCH_PASSI = 6
 SKETCH_LATO = 512
 SKETCH_CANALE = "feed"
 SKETCH_PER_DAY = 4

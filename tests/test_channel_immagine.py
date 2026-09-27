@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job, richiesta_immagine, workflow  # noqa: E402
+from shared.sketch import SKETCH_LATO, SKETCH_PASSI  # noqa: E402
 
 SOURCE = ROOT / "control-plane" / "main.py"
 COSTANTI = {"COMANDI_IMMAGINE"}
@@ -67,6 +68,8 @@ def _load(operator=(), coda=None):
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
         "FAMIGLIA_SDXL": FAMIGLIA_SDXL,
+        "SKETCH_LATO": SKETCH_LATO,
+        "SKETCH_PASSI": SKETCH_PASSI,
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
@@ -285,6 +288,8 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
         self.assertEqual(len(scope["image_queue"].job), 1)
         self.assertEqual(scope["image_queue"].job[0]["famiglia"], FAMIGLIA_SDXL)
         self.assertEqual(scope["image_queue"].job[0]["prompt"], "di te")
+        self.assertEqual(scope["image_queue"].job[0]["passi"], SKETCH_PASSI)
+        self.assertEqual(scope["image_queue"].job[0]["larghezza"], SKETCH_LATO)
         self.assertIn("appena è pronta", risposta)
 
     def test_la_risposta_non_dice_che_la_foto_e_gia_mandata(self):

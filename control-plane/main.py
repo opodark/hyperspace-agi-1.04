@@ -93,7 +93,7 @@ from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job, richiesta_immagine
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
-from shared.sketch import job_sketch, puo_generare
+from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, puo_generare
 from shared.diario import Diario, file_da_job, voce
 from shared.conversation_log import ConversationLog, battuta
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
@@ -1182,7 +1182,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
         accodato = image_queue.accoda(nuovo_job(
             idea,
             negativo="",
-            larghezza=512, altezza=512, passi=2,
+            larghezza=SKETCH_LATO, altezza=SKETCH_LATO, passi=SKETCH_PASSI,
             richiedente=autore, canale=channel,
             famiglia=FAMIGLIA_SDXL,
             destinazione=destinazione))
