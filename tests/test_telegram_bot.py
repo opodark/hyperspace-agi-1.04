@@ -63,6 +63,84 @@ class MessaggiDiBotTests(unittest.TestCase):
     def test_un_messaggio_senza_mittente_non_e_di_un_bot(self):
         self.assertFalse(self.driver.da_bot({}))
 
+    def test_di_default_un_bot_non_e_autorizzato(self):
+        msg = {"text": f"@{NOSTRO} ciao", "from": {"is_bot": True,
+                                                      "username": "PimpaChatBot"}}
+        self.assertFalse(self.driver.bot_autorizzato(msg, NOSTRO, 42, "anna"))
+
+    def test_modalita_bot_richiede_allowlist_e_menzione(self):
+        driver = carica_driver(TELEGRAM_BOT_TO_BOT="1",
+                               TELEGRAM_BOT_ALLOWLIST="PimpaChatBot")
+        base = {"from": {"is_bot": True, "username": "PimpaChatBot"}}
+        self.assertTrue(driver.bot_autorizzato(
+            {**base, "text": f"@{NOSTRO} ciao"}, NOSTRO, 42, "anna"))
+        self.assertFalse(driver.bot_autorizzato(
+            {**base, "text": "parlo da solo"}, NOSTRO, 42, "anna"))
+        self.assertFalse(driver.bot_autorizzato(
+            {"text": f"@{NOSTRO} ciao", "from": {"is_bot": True,
+                                                    "username": "SconosciutoBot"}},
+            NOSTRO, 42, "anna"))
+
+    def test_budget_ferma_la_catena(self):
+        driver = carica_driver(TELEGRAM_BOT_MAX_TURNS="2", TELEGRAM_BOT_WINDOW_S="60")
+        entry = {}
+        self.assertTrue(driver.bot_nel_budget(entry, 100.0))
+        self.assertTrue(driver.bot_nel_budget(entry, 101.0))
+        self.assertFalse(driver.bot_nel_budget(entry, 102.0))
+        self.assertTrue(driver.bot_nel_budget(entry, 161.0))
+
+
+class GuestModeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.driver = carica_driver()
+
+    def test_risultato_guest_e_un_articolo_testuale(self):
+        result = self.driver.risultato_guest("ciao")
+        self.assertEqual(result["type"], "article")
+        self.assertEqual(result["input_message_content"]["message_text"], "ciao")
+        self.assertTrue(result["id"])
+
+    def test_guest_umano_riceve_una_risposta(self):
+        self.driver.cp_post = lambda path, payload: {"action": "reply", "text": "Eccomi"}
+        calls = []
+        self.driver.tg = lambda method, **params: calls.append((method, params)) or {"ok": True}
+        msg = {"guest_query_id": "q1", "text": "@Pimpachatbot ciao",
+               "from": {"is_bot": False, "username": "alberto"},
+               "chat": {"id": 7}}
+        self.assertTrue(self.driver.rispondi_guest(
+            msg, username="Pimpachatbot", bot_id=42, nome="anna", budget={}))
+        self.assertEqual(calls[0][0], "answerGuestQuery")
+        self.assertEqual(calls[0][1]["guest_query_id"], "q1")
+
+
+class BusinessModeTests(unittest.TestCase):
+    def test_business_e_fail_closed_senza_opt_in(self):
+        driver = carica_driver()
+        msg = {"from": {"username": "AshleyNicoleX"}}
+        self.assertFalse(driver.business_autorizzato(msg))
+
+    def test_business_accetta_solo_allowlist(self):
+        driver = carica_driver(TELEGRAM_BUSINESS_ENABLED="1",
+                               TELEGRAM_BUSINESS_ALLOWLIST="AshleyNicoleX")
+        self.assertTrue(driver.business_autorizzato(
+            {"from": {"username": "AshleyNicoleX"}}))
+        self.assertFalse(driver.business_autorizzato(
+            {"from": {"username": "AltroBot"}}))
+
+    def test_risposta_business_usa_connection_id(self):
+        driver = carica_driver(TELEGRAM_BUSINESS_ENABLED="1",
+                               TELEGRAM_BUSINESS_ALLOWLIST="AshleyNicoleX")
+        driver.cp_post = lambda path, payload: {"action": "reply", "text": "Hello"}
+        calls = []
+        driver.tg = lambda method, **params: calls.append((method, params)) or {"ok": True}
+        msg = {"business_connection_id": "bc1", "text": "Hi",
+               "chat": {"id": 7},
+               "from": {"is_bot": True, "username": "AshleyNicoleX"}}
+        self.assertTrue(driver.rispondi_business(msg, budget={}))
+        self.assertEqual(calls[0], ("sendMessage", {
+            "business_connection_id": "bc1", "chat_id": 7, "text": "Hello"}))
+
 
 class ChiamataPerNomeTests(unittest.TestCase):
     @classmethod

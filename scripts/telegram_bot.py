@@ -21,6 +21,13 @@ Config (variabili d'ambiente):
                        serve ripetere il nome: chi ha avviato una conversazione non
                        si chiama per nome a ogni frase. A 0 si torna a pretendere
                        la menzione a ogni messaggio.
+  TELEGRAM_BOT_TO_BOT  1 = accetta messaggi dei bot autorizzati, solo se
+                       menzionano Anna o rispondono a un suo messaggio.
+  TELEGRAM_BOT_ALLOWLIST
+                       username bot ammessi, separati da virgola e senza @.
+  TELEGRAM_BOT_MAX_TURNS
+                       massimo di messaggi bot accettati per chat nella
+                       finestra (default 4), poi serve attendere il reset.
   TELEGRAM_LOCK_FILE   lucchetto di istanza singola (default data/telegram-driver.lock).
                        Serve perché Telegram consegna ogni update a UNO solo dei
                        poller: due driver si dividono i messaggi senza dare errore.
@@ -39,6 +46,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -101,6 +109,15 @@ SEGNALE_SCRITTURA_S = 4.0
 #     la combinazione giusta è privacy OFF (vede tutto) + mention ON (parla solo
 #     se chiamato), così il secondo bot può restare in ascolto senza accavallarsi.
 REQUIRE_MENTION = os.getenv("TELEGRAM_REQUIRE_MENTION", "0").strip() == "1"
+BOT_TO_BOT = os.getenv("TELEGRAM_BOT_TO_BOT", "0").strip() == "1"
+BOT_ALLOWLIST = {x.strip().lower().lstrip("@") for x in
+                 os.getenv("TELEGRAM_BOT_ALLOWLIST", "").split(",") if x.strip()}
+BOT_MAX_TURNS = max(1, int(os.getenv("TELEGRAM_BOT_MAX_TURNS", "4")))
+BOT_WINDOW_S = max(30.0, float(os.getenv("TELEGRAM_BOT_WINDOW_S", "300")))
+BUSINESS_ENABLED = os.getenv("TELEGRAM_BUSINESS_ENABLED", "0").strip() == "1"
+BUSINESS_ALLOWLIST = {x.strip().lower().lstrip("@") for x in
+                      os.getenv("TELEGRAM_BUSINESS_ALLOWLIST", "").split(",")
+                      if x.strip()}
 
 
 def tg(method, **params):
@@ -144,6 +161,92 @@ def da_bot(msg) -> bool:
     È la guardia contro il ciclo fra due bot nello stesso gruppo.
     """
     return bool((msg.get("from") or {}).get("is_bot"))
+
+
+def bot_autorizzato(msg, username: str, bot_id, nome: str = "") -> bool:
+    """Accetta un bot solo opt-in, in allowlist e rivolto esplicitamente a noi."""
+    if not da_bot(msg) or not BOT_TO_BOT:
+        return False
+    mittente = str((msg.get("from") or {}).get("username") or "").lower().lstrip("@")
+    return bool(mittente and mittente in BOT_ALLOWLIST
+                and rivolta_a_noi(msg, username, bot_id, nome))
+
+
+def bot_nel_budget(entry: dict, adesso: float) -> bool:
+    """Limita una catena bot-to-bot anche se l'altro bot risponde all'istante."""
+    inizio = float(entry.get("bot_window_start") or 0.0)
+    if not inizio or adesso - inizio > BOT_WINDOW_S:
+        entry["bot_window_start"] = adesso
+        entry["bot_turns"] = 0
+    if int(entry.get("bot_turns") or 0) >= BOT_MAX_TURNS:
+        return False
+    entry["bot_turns"] = int(entry.get("bot_turns") or 0) + 1
+    return True
+
+
+def risultato_guest(testo: str) -> dict:
+    """Un risultato testuale valido per answerGuestQuery."""
+    return {"type": "article", "id": uuid.uuid4().hex,
+            "title": "Risposta di Anna",
+            "input_message_content": {"message_text": str(testo or "")[:4000]}}
+
+
+def rispondi_guest(msg: dict, *, username: str, bot_id, nome: str,
+                   budget: dict) -> bool:
+    """Elabora una singola invocazione Guest Mode e pubblica una sola risposta."""
+    query_id = str(msg.get("guest_query_id") or "").strip()
+    text = str(msg.get("text") or "").strip()
+    if not query_id or not text:
+        return False
+    if da_bot(msg):
+        if (not bot_autorizzato(msg, username, bot_id, nome)
+                or not bot_nel_budget(budget, time.time())):
+            return False
+    else:
+        budget["bot_turns"] = 0
+        budget["bot_window_start"] = 0.0
+    author = author_of(msg)
+    cleaned = testo_senza_menzione(text, username, nome)
+    res = cp_post("/channel/reply", {
+        "surface": "pm", "chat": "guest:" + query_id,
+        "context": [{"author": author, "text": cleaned}],
+        "pending": 1, "oldest_age_s": 10.0, "force": True, "max_chars": 900})
+    if res.get("action") != "reply" or not res.get("text"):
+        return False
+    tg("answerGuestQuery", guest_query_id=query_id,
+       result=risultato_guest(res["text"]))
+    return True
+
+
+def business_autorizzato(msg: dict) -> bool:
+    """Fail-closed: una segretaria non risponde fuori dall'allowlist."""
+    mittente = str((msg.get("from") or {}).get("username") or "").lower().lstrip("@")
+    return bool(BUSINESS_ENABLED and mittente and mittente in BUSINESS_ALLOWLIST
+                and not msg.get("sender_business_bot"))
+
+
+def rispondi_business(msg: dict, *, budget: dict) -> bool:
+    """Risponde per conto dell'account collegato, soltanto nelle chat ammesse."""
+    connection_id = str(msg.get("business_connection_id") or "").strip()
+    chat_id = (msg.get("chat") or {}).get("id")
+    text = str(msg.get("text") or "").strip()
+    if not connection_id or chat_id is None or not text or not business_autorizzato(msg):
+        return False
+    if da_bot(msg) and not bot_nel_budget(budget, time.time()):
+        return False
+    if not da_bot(msg):
+        budget["bot_turns"] = 0
+        budget["bot_window_start"] = 0.0
+    author = author_of(msg)
+    res = cp_post("/channel/reply", {
+        "surface": "pm", "chat": "business:" + str(chat_id),
+        "context": [{"author": author, "text": text}],
+        "pending": 1, "oldest_age_s": 10.0, "force": True, "max_chars": 900})
+    if res.get("action") != "reply" or not res.get("text"):
+        return False
+    tg("sendMessage", business_connection_id=connection_id,
+       chat_id=chat_id, text=res["text"])
+    return True
 
 
 def testo_senza_menzione(text, username: str, nome: str = "") -> str:
@@ -360,6 +463,8 @@ def main():
     last_commands = 0.0
     last_state = 0.0
     last_outbox = 0.0
+    guest_budget = {}
+    business_budget = {}
     # Chi siamo: servono @username (per le menzioni) e id (per riconoscere le
     # risposte ai nostri messaggi). Se getMe non risponde e la modalità mention è
     # attiva si esce: un bot che non sa il proprio nome resterebbe muto per
@@ -381,15 +486,44 @@ def main():
         # 1. Nuovi messaggi
         try:
             updates = tg("getUpdates", offset=offset, timeout=30,
-                         allowed_updates=["message"])
+                         allowed_updates=["message", "guest_message",
+                                          "business_connection", "business_message"])
         except requests.RequestException as e:
             print(f"[telegram] getUpdates: {e}", flush=True)
             time.sleep(5)
             continue
         for upd in updates.get("result") or []:
             offset = max(offset, int(upd.get("update_id", 0)) + 1)
+            connection = upd.get("business_connection")
+            if connection:
+                print("[telegram] connessione segretaria "
+                      f"{connection.get('id', '?')} "
+                      f"enabled={connection.get('is_enabled', False)}", flush=True)
+                continue
+            business = upd.get("business_message")
+            if business:
+                chat_id = str((business.get("chat") or {}).get("id") or "business")
+                try:
+                    if rispondi_business(
+                            business, budget=business_budget.setdefault(chat_id, {})):
+                        print(f"[telegram] inviata risposta business a {chat_id}", flush=True)
+                except requests.RequestException as e:
+                    print(f"[telegram] risposta business fallita: {e}", flush=True)
+                continue
+            guest = upd.get("guest_message")
+            if guest:
+                chat_id = str((guest.get("chat") or {}).get("id") or
+                              guest.get("guest_query_id") or "guest")
+                try:
+                    if rispondi_guest(guest, username=username, bot_id=bot_id,
+                                      nome=nome,
+                                      budget=guest_budget.setdefault(chat_id, {})):
+                        print(f"[telegram] inviata risposta guest a {chat_id}", flush=True)
+                except requests.RequestException as e:
+                    print(f"[telegram] risposta guest fallita: {e}", flush=True)
+                continue
             msg = upd.get("message")
-            if not msg or not msg.get("text") or da_bot(msg):
+            if not msg or not msg.get("text"):
                 continue
             chat = msg.get("chat") or {}
             chat_id = chat.get("id")
@@ -398,7 +532,18 @@ def main():
                                                "batch_start": time.time(),
                                                "addressed": False,
                                                "ultima_risposta_ts": 0.0,
-                                               "typing_ts": 0.0})
+                                               "typing_ts": 0.0,
+                                               "bot_turns": 0,
+                                               "bot_window_start": 0.0})
+            is_bot = da_bot(msg)
+            if is_bot:
+                if (not bot_autorizzato(msg, username, bot_id, nome)
+                        or not bot_nel_budget(entry, time.time())):
+                    continue
+            else:
+                # Un intervento umano interrompe la catena automatica.
+                entry["bot_turns"] = 0
+                entry["bot_window_start"] = 0.0
             entry["surface"] = surface_of(chat)
             author = author_of(msg)
             text = testo_senza_menzione(msg["text"], username, nome)

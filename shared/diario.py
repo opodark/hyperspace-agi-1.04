@@ -78,6 +78,25 @@ class Diario:
                 return True
         return False
 
+    def get(self, voce_id: str) -> dict | None:
+        """Restituisce una copia della voce, se presente."""
+        for v in self._voci:
+            if v.get("id") == str(voce_id):
+                return dict(v)
+        return None
+
+    def aggiorna_instagram(self, voce_id: str, *, status: str,
+                           media_id: str = "", error: str = "") -> bool:
+        """Registra l'esito Instagram sulla voce per rendere l'invio idempotente."""
+        for v in self._voci:
+            if v.get("id") == str(voce_id):
+                v["instagram_status"] = str(status or "")[:32]
+                v["instagram_media_id"] = str(media_id or "")[:128]
+                v["instagram_error"] = str(error or "")[:300]
+                v["instagram_updated_at"] = _adesso()
+                return True
+        return False
+
     def list(self, limit: int | None = None) -> list:
         voci = list(reversed(self._voci))
         if limit is None:

@@ -39,8 +39,10 @@ def build_dream_prompt(sistema: str, *, memorie=(), feed_recente=()) -> str:
              "una scena onirica in una o due frasi, e un'idea per il disegno",
              "che la illustra (uno schizzo, non una fotografia)."]
     if memorie:
-        righe += ["", "Ricordi recenti della stanza:",
+        righe += ["", "Echi anonimi delle conversazioni recenti:",
                   *[f"- {m}" for m in memorie[:5]]]
+        righe += ["Usali soltanto come ispirazione emotiva o simbolica. Non citare frasi, "
+                  "username, identità o dettagli privati e non fingere che siano ricordi tuoi."]
     if feed_recente:
         righe += ["", "Ultimi post della vetrina (per non ripeterti):",
                   *[f"- [{p.get('author', '?')}] {p.get('caption', '')}"

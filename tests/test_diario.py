@@ -73,6 +73,16 @@ class DiarioTests(unittest.TestCase):
         d.add(voce(id="b", author="aurora", testo="2"))
         self.assertEqual([v["id"] for v in d.list()], ["b", "a"])
 
+    def test_pubblicazione_instagram_persiste_ed_e_leggibile(self):
+        d = Diario()
+        d.add(voce(id="sogno-a", author="anna", tipo="sogno", testo="stelle"))
+        self.assertTrue(d.aggiorna_instagram(
+            "sogno-a", status="published", media_id="ig-123"))
+        d.save(self.path)
+        pagina = Diario.load(self.path).get("sogno-a")
+        self.assertEqual(pagina["instagram_status"], "published")
+        self.assertEqual(pagina["instagram_media_id"], "ig-123")
+
 
 if __name__ == "__main__":
     unittest.main()

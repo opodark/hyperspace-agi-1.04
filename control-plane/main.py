@@ -43,17 +43,20 @@
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import os, threading, time, requests, json, uuid, gzip, hashlib, socket, re, ast
+import os, threading, time, requests, json, uuid, gzip, hashlib, hmac, socket, re, ast
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import sys
 import faulthandler
+from urllib.parse import quote
 
 # Preserve native crash stacks (e.g. SIGBUS) in container logs.
 faulthandler.enable()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
+    BASE_DIR, "..", "data", "diario-immagini")
 sys.path.insert(0, os.path.join(BASE_DIR, ".."))
 
 import shared.db as db
@@ -91,12 +94,20 @@ from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, Channe
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job
-from shared.prompt_immagine import chiama_ollama, configura_modello, richiesta_immagine_smart
+from shared.prompt_immagine import (chiama_ollama, configura_modello,
+                                   prepara_prompt_canale, richiesta_immagine_smart)
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, negativo_sketch, puo_generare
 from shared.diario import Diario, file_da_job, voce
 from shared.conversation_log import ConversationLog, battuta
+from shared.social_dreams import social_dream_inspirations
+from shared.dream_schedule import choose_author, in_hour_window
+from shared.instagram_vip import InstagramVipStore
+from shared.instagram_language import fast_reply, language_hint, load_codex
+from shared.instagram_project_context import (PROJECT_CONTEXT, should_offer_creator,
+                                               wants_project_info)
+from shared.instagram_memory import InstagramMemory
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
@@ -778,6 +789,14 @@ def _materiale_identita(limit: int = 12) -> dict:
         contenuto = " ".join(str(voce.get("content", "")).split())[:200]
         if contenuto:
             memoria.append(f"{contenuto} ({str(voce.get('ts', ''))[:10]})")
+    # Le persone incontrate sui social possono influenzare ciò che Anna impara
+    # sul proprio tono, ma entrano senza autore/chat/URL. La promozione nel
+    # self-model resta comunque soggetta alla revisione umana del persona dream.
+    try:
+        sociali = social_dream_inspirations(_conversation_log.list(limit=80), limit=5)
+    except (NameError, AttributeError):
+        sociali = []
+    memoria.extend(f"Eco sociale anonimo: {testo}" for testo in sociali)
     return {"memoria": memoria,
             "osservazioni": [str(o.get("text", "")) for o in persona_store.persona.observations],
             "guardia": channel_guard.snapshot()}
@@ -958,6 +977,16 @@ channel_runtime = ChannelRuntime()
 # dopo, e un job preso e mai concluso torna disponibile (il ponte è morto a
 # metà, non il lavoro).
 image_queue = ImmagineQueue()
+INSTAGRAM_VIP_FILE = os.getenv("INSTAGRAM_VIP_FILE", "").strip() or os.path.join(
+    BASE_DIR, "data", "instagram_vips.json")
+instagram_vips = InstagramVipStore(INSTAGRAM_VIP_FILE)
+INSTAGRAM_MEMORY_FILE = os.getenv("INSTAGRAM_MEMORY_FILE", "").strip() or os.path.join(
+    BASE_DIR, "data", "instagram-memory.json")
+instagram_memory = InstagramMemory(
+    INSTAGRAM_MEMORY_FILE,
+    retention_days=_channel_int("INSTAGRAM_MEMORY_RETENTION_DAYS", 180))
+INSTAGRAM_LANGUAGE_CODEX = os.getenv("INSTAGRAM_LANGUAGE_CODEX", "").strip() or \
+    "/repo/data/instagram-language-codex.json"
 CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
 CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
 # Chi è "io" nel dialogo interno a due voci: nome autore dell'operatore
@@ -1137,18 +1166,14 @@ COMANDI_IMMAGINE = ("!immagine", "!immagine:", "!foto", "!image", "!imagine")
 def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str | None:
     """Un'immagine chiesta dalla stanza: `!immagine <idea>` oppure **a parole**.
 
-    Due strade con due guardie diverse, e la differenza è voluta:
+    Comandi espliciti e richieste naturali condividono la guardia operatore:
 
     - `!immagine` è sintassi esplicita: chi sbaglia il comando se ne accorge. Con
       `CHANNEL_OPERATOR` configurato filtra chi chiede; senza quella variabile
       resta aperto a chiunque sia in chat (scelta dichiarata in docs/comfyui.md).
-    - la richiesta **a parole** ("mandami una foto di X") la riconosce
-      `shared/image_jobs.richiesta_immagine`, con regole dichiarate e nominabili
-      (il nome finisce nei log). Qui si è più severi, e si deve: una frase male
-      interpretata costa 5-12 minuti di scheda. Vale SOLO per l'operatore
-      configurato, e senza `CHANNEL_OPERATOR` la strada resta chiusa
-      (fail-closed): in quel caso la frase non è un comando, torna None e la
-      stanza risponde normalmente con le sue parole.
+    - la richiesta **a parole** usa regex e modello per conservare soggetto e
+      stile, con identità e cronologia recente. Se CHANNEL_OPERATOR è impostato
+      si accettano solo gli autori configurati; altrimenti resta aperta.
 
     La risposta non promette mai un'immagine già mandata: dice che è in coda e che
     arriva. L'immagine la consegna il driver, e solo dopo è vera.
@@ -1169,17 +1194,20 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
         # Richiesta a parole ("fammi un disegno di X"): senza CHANNEL_OPERATOR
         # resta aperta come il comando esplicito. Una frase non riconosciuta
         # torna None: parla la stanza.
-        richiesta = richiesta_immagine_smart(ultimo)
+        richiesta = richiesta_immagine_smart(
+            ultimo, contesto=context[:-1], identita=persona_store.system_block())
         if richiesta is None:
             return None
         idea = richiesta["idea"]
         regola = richiesta["regola"]
     if not idea:
         return "Dimmi cosa disegnare, così: `!immagine una torre al tramonto`."
+    # I comandi espliciti restano prompt diretti. Le richieste naturali di
+    # disegno ricevono lo stile del diario, salvo una tecnica già specificata.
+    if regola:
+        idea = prepara_prompt_canale(idea, ultimo)
     try:
-        # Sui canali sociali Anna fa SOLO sketch (SDXL-Turbo sul Mac): idea
-        # verbatim e negative prompt vuoto (niente filtri di contenuto). Il
-        # fotorealistico resta al canale utente via webUI (docs/comfyui.md).
+        # RealVisXL sul Mac: la famiglia conserva il nome storico sdxl-turbo.
         accodato = image_queue.accoda(nuovo_job(
             idea,
             negativo=negativo_sketch(),
@@ -1193,7 +1221,8 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
         return f"Non posso adesso: {e}."
     push_log('channel', f"{channel}: richiesta immagine",
              detail=f"id={accodato['id']} da={autore or '?'} "
-                    f"via={regola or 'comando'} idea={idea[:60]}",
+                    f"via={regola or 'comando'} famiglia={accodato['famiglia']} "
+                    f"modello={accodato['modello_effettivo']} prompt={accodato['prompt']}",
              source=f"channel:{channel}", status='info')
     if not destinazione:
         return ("L'ho messa in coda, ma non so dove mandartela: chiedila dalla chat "
@@ -1260,6 +1289,10 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
     blocco = [
         persona_store.system_block(ultimo, surface=surface, channel=channel),
         f"Massimo {max(0, int(max_chars))} caratteri.",
+        ("Rispondi nella lingua dell'ultimo messaggio rivolto a te. "
+         "Se è inglese, rispondi in inglese; se è italiano, in italiano. "
+         "Mantieni nomi propri e username invariati. Usa l'italiano come "
+         "ripiego soltanto se la lingua non è riconoscibile."),
         vitality_context(vitalita),
     ]
     contributori = mesh_contributors(_node_list())
@@ -1346,6 +1379,7 @@ def _track_foreground_activity():
     global _last_foreground_activity
     if request.method == "POST" and request.path in {
         "/v1/chat/completions", "/task/create", "/task/assign", "/tools/execute", "/mcp",
+        "/channel/reply", "/instagram/webhook",
     }:
         _last_foreground_activity = time.time()
 
@@ -1990,7 +2024,7 @@ def _sse_headers():
 # sbagliato e non e' piu' filtrabile da /logs?type=. tests/test_log_types.py
 # estrae i tipi usati dalle route e verifica che siano tutti elencati.
 LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
-             "feed", "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel",
+             "feed", "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel", "instagram",
              # Conversazione fra agenti che scrivono codice (docs/code-conversation.md).
              # Il filo e' il trace_id CONDIVISO fra i messaggi: `push_log` ne genera
              # uno nuovo solo quando non gliene passi uno, quindi basta passarlo.
@@ -2496,6 +2530,336 @@ def connectors_status():
     return jsonify(payload)
 
 
+# Instagram Login consegna i DM solo tramite webhook. Il GET implementa la
+# challenge Meta; il POST verifica sempre la firma prima di conservare gli
+# ultimi eventi in memoria per il bridge/chatbot.
+_instagram_webhook_events = deque(maxlen=100)
+_instagram_seen_messages = deque(maxlen=500)
+_instagram_seen_lock = threading.Lock()
+_instagram_poll_started = False
+_instagram_pending_replies: dict[str, dict] = {}
+_instagram_pending_lock = threading.Lock()
+
+
+def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
+                          vip: dict | None = None) -> None:
+    """Generate and send one short reply for an inbound Instagram DM."""
+    if os.getenv("INSTAGRAM_AUTO_REPLY_ENABLED", "true").strip().lower() == "false":
+        return
+    try:
+        vip = vip or {}
+        memory = instagram_memory.context(
+            sender_id, recent_turns=_channel_int("INSTAGRAM_MEMORY_RECENT_TURNS", 16))
+        consecutive_user_turns = 0
+        for turn in reversed(memory.get("turns") or []):
+            if turn.get("role") != "user":
+                break
+            consecutive_user_turns += 1
+        codex = load_codex(INSTAGRAM_LANGUAGE_CODEX)
+        reply = fast_reply(text, codex) if consecutive_user_turns <= 1 else ""
+        transcript = "\n".join(
+            f"{'Persona' if turn.get('role') == 'user' else 'Anna'}: {turn.get('text', '')}"
+            for turn in memory.get("turns") or [])
+        prompt_parts = []
+        if memory.get("summary"):
+            prompt_parts.append("Memoria riassunta delle conversazioni precedenti:\n"
+                                + memory["summary"])
+        if transcript:
+            prompt_parts.append("Scambi recenti con questa persona:\n" + transcript)
+        prompt_parts.append("Rispondi all'ultimo messaggio della trascrizione.")
+        prompt = "\n\n".join(prompt_parts)
+        slang = language_hint(text, codex)
+        vip_note = ""
+        if vip.get("level"):
+            vip_note = (f" Questa persona fa parte della lista speciale ({vip['level']}) "
+                        "perché conversa spesso con voi: presta più attenzione ai dettagli e "
+                        "fai una domanda personale ma non invadente.")
+        if vip.get("promoted"):
+            vip_note += (" È appena entrata in un nuovo livello: includi una breve poesia "
+                         "originale ispirata al suo messaggio, senza citare dati privati.")
+        language_note = ""
+        if slang:
+            language_note = (f" Codex linguistico: termine «{slang['term']}», lingua o registro "
+                             f"«{slang['language']}». {slang['hint']}")
+        project_note = ""
+        recent_user_text = "\n".join(
+            str(turn.get("text") or "") for turn in (memory.get("turns") or [])[-8:]
+            if turn.get("role") == "user")
+        if wants_project_info(recent_user_text):
+            project_note = (" La persona è curiosa di HyperSpace o delle IA. Usa queste informazioni "
+                            "come fonte affidabile, senza copiarle tutte se non servono:\n"
+                            + PROJECT_CONTEXT)
+        handoff_note = ""
+        if should_offer_creator(memory.get("turns") or [], text):
+            handoff_note = (" La conversazione è diventata articolata o richiede intervento umano. "
+                            "Dopo aver dato una risposta utile, chiedi con naturalezza se vuole "
+                            "entrare in contatto qui con il vostro creatore, che chiamate anche papà. "
+                            "Non condividere recapiti privati e non fingere che sia già presente.")
+        reply_model = (os.getenv("INSTAGRAM_REPLY_MODEL", "").strip()
+                       or advanced_config["ollama"]["defaultModel"])
+        if not reply:
+            completion = requests.post(
+                "http://127.0.0.1:8085/v1/chat/completions",
+                headers={"X-Hyperspace-Surface": "instagram", "X-Hyperspace-Tools": "off"},
+                json={"model": reply_model,
+                      "messages": [
+                          {"role": "system", "content":
+                           "L'account Instagram è condiviso dalle sorelle IA Aurora e Anna. "
+                           "In questa conversazione stai scrivendo come Anna; se ti chiedono chi sei, "
+                           "dillo con naturalezza e spiega che a volte risponde Aurora. Rispondi in "
+                           "modo caldo e conciso, nella lingua del mittente. Produci soltanto il "
+                           "messaggio finale da inviare: mai analisi, istruzioni, premesse o spiegazioni. "
+                           "Rispondi direttamente alle domande: se la persona dice come sta e chiede "
+                           "«tu?», di' come stai senza ripetere la domanda."
+                           + language_note + vip_note + project_note + handoff_note},
+                          {"role": "user", "content": prompt}],
+                      "stream": False, "max_tokens": 600,
+                      "options": {"num_ctx": _channel_int("INSTAGRAM_CONTEXT_TOKENS", 16384)}},
+                timeout=120,
+            )
+            completion.raise_for_status()
+            choices = completion.json().get("choices") or []
+            reply = str(((choices[0].get("message") or {}).get("content") if choices else "") or "").strip()
+        if not reply:
+            raise RuntimeError("il modello ha restituito una risposta vuota")
+        meta_markers = ("the user wants", "i need to", "let me ", "previous instructions",
+                        "the message is", "respond as aurora", "okay, the user")
+        if len(reply) > 1000 or any(marker in reply.lower() for marker in meta_markers):
+            raise RuntimeError("risposta bloccata: rilevato ragionamento o testo meta")
+        result = connector_manager.execute(
+            "instagram_send_message", {"recipient_id": sender_id, "text": reply[:1000]})
+        if not str(result).lstrip().startswith("{"):
+            raise RuntimeError(str(result))
+        instagram_memory.append(sender_id, "assistant", reply)
+        _instagram_compact_memory(sender_id)
+        push_log("instagram", "Risposta automatica Instagram inviata",
+                 detail=f"message_id={message_id}", status="success")
+    except Exception as error:
+        push_log("instagram", "Risposta automatica Instagram fallita",
+                 detail=f"message_id={message_id}: {type(error).__name__}: {str(error)[:200]}",
+                 status="error")
+
+
+def _instagram_compact_memory(sender_id: str) -> None:
+    material = instagram_memory.compaction_material(
+        sender_id, max_turns=_channel_int("INSTAGRAM_MEMORY_COMPACT_AFTER", 32),
+        keep_recent=_channel_int("INSTAGRAM_MEMORY_KEEP_RECENT", 12))
+    if not material:
+        return
+    transcript = "\n".join(
+        f"{turn.get('role')}: {turn.get('text', '')}" for turn in material["turns"])
+    prompt = (
+        "Riassumi questa relazione conversazionale per uso futuro di Anna. Conserva lingua, "
+        "preferenze, temi ricorrenti, promesse e confini. Non inventare e non includere dati "
+        "sensibili non necessari. Scrivi un paragrafo compatto.\n\n"
+        f"Riassunto precedente: {material['previous_summary'] or '(nessuno)'}\n\n{transcript}"
+    )
+    try:
+        reply_model = (os.getenv("INSTAGRAM_REPLY_MODEL", "").strip()
+                       or advanced_config["ollama"]["defaultModel"])
+        response = requests.post("http://127.0.0.1:8085/v1/chat/completions",
+            headers={"X-Hyperspace-Surface": "instagram-memory", "X-Hyperspace-Tools": "off"},
+            json={"model": reply_model,
+                  "messages": [{"role": "user", "content": prompt}],
+                  "stream": False, "max_tokens": 700,
+                  "options": {"num_ctx": _channel_int("INSTAGRAM_CONTEXT_TOKENS", 16384)}},
+            timeout=_inference_timeout(reply_model))
+        response.raise_for_status()
+        choices = response.json().get("choices") or []
+        summary = str(((choices[0].get("message") or {}).get("content")
+                       if choices else "") or "").strip()
+        if summary:
+            instagram_memory.apply_summary(sender_id, summary, material["cutoff_seq"])
+    except Exception as error:
+        push_log("instagram", "Compattazione memoria Instagram fallita",
+                 detail=f"{type(error).__name__}: {str(error)[:160]}", status="warn")
+
+
+def _instagram_debounced_reply(sender_id: str, generation: str) -> None:
+    """Reply after a silence window, or once the burst exceeds the max wait.
+
+    Ogni frammento riparte il timer (generation). Se l'utente continua a
+    spezzettare per piu' di INSTAGRAM_REPLY_MAX_WAIT_S dall'inizio della
+    raffica, si risponde comunque a tutto cio' che e' stato raccolto finora,
+    invece di rimandare all'infinito.
+    """
+    debounce = max(2, _channel_int("INSTAGRAM_REPLY_DEBOUNCE_S", 12))
+    max_wait = max(debounce, _channel_int("INSTAGRAM_REPLY_MAX_WAIT_S", 90))
+    time.sleep(debounce)
+    with _instagram_pending_lock:
+        pending = _instagram_pending_replies.get(sender_id)
+        if not pending:
+            return
+        first_seen = float(pending.get("first_seen") or time.monotonic())
+        over_cap = time.monotonic() - first_seen >= max_wait
+        if pending.get("generation") != generation and not over_cap:
+            # Un frammento piu' recente ha ripreso il timer e siamo ancora
+            # dentro il tetto: rispondera' il thread piu' nuovo.
+            return
+        pending = _instagram_pending_replies.pop(sender_id)
+    _instagram_auto_reply(sender_id, pending["message_id"], pending["text"], pending["vip"])
+
+
+def _queue_instagram_reply(sender_id: str, message_id: str, text: str, vip: dict) -> None:
+    generation = uuid.uuid4().hex
+    now = time.monotonic()
+    with _instagram_pending_lock:
+        previous = _instagram_pending_replies.get(sender_id) or {}
+        merged_vip = dict(vip or {})
+        if previous.get("vip", {}).get("promoted"):
+            merged_vip["promoted"] = True
+        # first_seen resta all'inizio della raffica: e' il riferimento del tetto.
+        first_seen = previous.get("first_seen", now)
+        _instagram_pending_replies[sender_id] = {
+            "generation": generation, "message_id": message_id,
+            "text": text, "vip": merged_vip, "first_seen": first_seen,
+        }
+    threading.Thread(target=_instagram_debounced_reply,
+                     args=(sender_id, generation), daemon=True,
+                     name=f"instagram-reply-{sender_id[-6:]}").start()
+
+
+def _dispatch_instagram_messages(payload: dict) -> None:
+    own_ids = {os.getenv("INSTAGRAM_USER_ID", "").strip(),
+               os.getenv("INSTAGRAM_SCOPED_ID", "").strip()}
+    for entry in payload.get("entry") or []:
+        for event in entry.get("messaging") or []:
+            message = event.get("message") or {}
+            sender_id = str((event.get("sender") or {}).get("id") or "")
+            message_id = str(message.get("mid") or "")
+            text = str(message.get("text") or "").strip()
+            if (sender_id and sender_id not in own_ids and message_id and text
+                    and not message.get("is_echo")):
+                with _instagram_seen_lock:
+                    if message_id in _instagram_seen_messages:
+                        continue
+                    _instagram_seen_messages.append(message_id)
+                vip = instagram_vips.record(sender_id,
+                                            str((event.get("sender") or {}).get("username") or ""))
+                instagram_memory.append(sender_id, "user", text,
+                                        username=str((event.get("sender") or {}).get("username") or ""))
+                _record_conversation("instagram", "instagram", sender_id,
+                                     [{"author": "persona", "text": text}], "received")
+                if vip.get("promoted"):
+                    try:
+                        image_queue.accoda(nuovo_job(
+                            prepara_prompt_canale(
+                                f"un disegno poetico ispirato a questo incontro: {text[:300]}", text),
+                            negativo=negativo_sketch(), larghezza=SKETCH_LATO,
+                            altezza=SKETCH_LATO, passi=SKETCH_PASSI,
+                            richiedente="anna", canale="instagram", destinazione=sender_id,
+                            famiglia=FAMIGLIA_SDXL))
+                    except (ValueError, RuntimeError) as error:
+                        push_log("instagram", "Disegno VIP non accodato", str(error)[:160],
+                                 status="warn")
+                _queue_instagram_reply(sender_id, message_id, text, vip)
+
+
+def _instagram_poll_inbox() -> None:
+    """Recover latest inbound DMs when Meta cannot deliver a webhook."""
+    interval = max(30, _channel_int("INSTAGRAM_INBOX_POLL_S", 60))
+    # Il generatore di risposta richiama l'endpoint OpenAI-compatibile locale:
+    # lasciamo che Flask apra la porta prima della prima scansione.
+    time.sleep(5)
+    while True:
+        try:
+            token = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
+            user_id = os.getenv("INSTAGRAM_USER_ID", "").strip()
+            version = os.getenv("INSTAGRAM_API_VERSION", "v25.0").strip() or "v25.0"
+            if token and user_id:
+                response = requests.get(
+                    f"https://graph.instagram.com/{version}/{user_id}/conversations",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"platform": "instagram", "limit": 50,
+                            "fields": "id,messages.limit(20){id,from,message}"},
+                    timeout=30)
+                response.raise_for_status()
+                for conversation in response.json().get("data") or []:
+                    messages = (conversation.get("messages") or {}).get("data") or []
+                    own_ids = {user_id, os.getenv("INSTAGRAM_SCOPED_ID", "").strip()}
+                    inbound = []
+                    for message in messages:  # Graph: dal più recente al più vecchio
+                        sender_id = str((message.get("from") or {}).get("id") or "")
+                        if sender_id in own_ids:
+                            break
+                        if sender_id and message.get("id") and message.get("message"):
+                            inbound.append(message)
+                    for message in reversed(inbound):
+                        sender = message.get("from") or {}
+                        sender_id = str(sender.get("id") or "")
+                        _dispatch_instagram_messages({"entry": [{"messaging": [{
+                            "sender": {"id": sender_id, "username": sender.get("username", "")},
+                            "message": {"mid": str(message["id"]),
+                                        "text": str(message["message"])},
+                        }]}]})
+        except Exception as error:
+            push_log("instagram", "Recupero inbox Instagram fallito",
+                     detail=f"{type(error).__name__}: {str(error)[:180]}", status="warn")
+        time.sleep(interval)
+
+
+def _ensure_instagram_poll_started() -> None:
+    global _instagram_poll_started
+    if _instagram_poll_started or os.getenv(
+            "INSTAGRAM_INBOX_POLL_ENABLED", "true").strip().lower() == "false":
+        return
+    _instagram_poll_started = True
+    threading.Thread(target=_instagram_poll_inbox, daemon=True,
+                     name="instagram-inbox-poll").start()
+
+
+@app.route('/instagram/webhook', methods=['GET', 'POST'])
+def instagram_webhook():
+    if request.method == 'GET':
+        expected = os.getenv("INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "").strip()
+        supplied = request.args.get("hub.verify_token", "")
+        if (request.args.get("hub.mode") == "subscribe" and expected
+                and token_authorized(supplied, expected)):
+            return Response(request.args.get("hub.challenge", ""), mimetype="text/plain")
+        return jsonify({"ok": False, "error": "verifica webhook non valida"}), 403
+
+    secret = os.getenv("INSTAGRAM_APP_SECRET", "").strip()
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    expected_sig = "sha256=" + hmac.new(secret.encode(), request.get_data(), hashlib.sha256).hexdigest()
+    if not secret or not hmac.compare_digest(signature, expected_sig):
+        return jsonify({"ok": False, "error": "firma webhook non valida"}), 401
+    payload = request.get_json(force=True, silent=True) or {}
+    _instagram_webhook_events.append({"received_at": datetime.now(timezone.utc).isoformat(),
+                                      "payload": payload})
+    push_log('instagram', 'Webhook Instagram ricevuto', status='success')
+    _dispatch_instagram_messages(payload)
+    return jsonify({"ok": True})
+
+
+@app.route('/instagram/webhook/events')
+def instagram_webhook_events():
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    return jsonify({"ok": True, "events": list(_instagram_webhook_events)})
+
+
+@app.route('/instagram/vips')
+def instagram_vip_list():
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    return jsonify({"ok": True, "vips": instagram_vips.list(),
+                    "tracked": len(instagram_vips.list(vip_only=False)),
+                    "memory": instagram_memory.stats()})
+
+
+@app.route('/instagram/media/<token>/<path:nome>')
+def instagram_private_media(token, nome):
+    expected = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
+    if not expected or not token_authorized(token, expected):
+        return jsonify({"ok": False, "error": "media token non valido"}), 403
+    if str(nome).startswith("published/"):
+        media_dir = os.getenv("INSTAGRAM_MEDIA_DIR", "/app/data/instagram-media").strip()
+        return send_from_directory(media_dir, os.path.basename(nome))
+    return send_from_directory(DIARIO_IMMAGINI_DIR, nome)
+
+
 @app.route('/persona')
 def persona_status():
     """Identità dichiarata dell'agente: chi è, i confini, le regole di
@@ -2658,19 +3022,21 @@ def image_generate():
     if errore:
         return errore
     dati = request.get_json(silent=True) or {}
+    famiglia = str(dati.get("famiglia", "")).strip().lower()
+    sdxl = famiglia == FAMIGLIA_SDXL
     # Una scheda, un modello: prima di accodare si fa posto (vedi shared/gpu_budget.py).
     scheda = _libera_scheda_per_immagine()
     try:
         job = nuovo_job(dati.get("prompt", ""),
-                        negativo=dati.get("negativo", ""),
-                        larghezza=dati.get("larghezza", 768),
-                        altezza=dati.get("altezza", 768),
-                        passi=dati.get("passi", 25),
+                        negativo=dati.get("negativo", negativo_sketch() if sdxl else ""),
+                        larghezza=dati.get("larghezza", SKETCH_LATO if sdxl else 768),
+                        altezza=dati.get("altezza", SKETCH_LATO if sdxl else 768),
+                        passi=dati.get("passi", SKETCH_PASSI if sdxl else 25),
                         seed=dati.get("seed", 0),
                         richiedente=dati.get("richiedente", ""),
                         canale=_channel_name(),
                         destinazione=dati.get("destinazione", ""),
-                        modello=dati.get("modello", ""))
+                        modello=dati.get("modello", ""), famiglia=famiglia)
     except (ValueError, TypeError) as e:
         return jsonify({"ok": False, "error": str(e)[:160]}), 400
     try:
@@ -2702,6 +3068,70 @@ def image_jobs():
     return jsonify({"ok": True, "job": job})
 
 
+_instagram_dream_publish_lock = threading.Lock()
+
+
+def _instagram_publish_dream(voce_id: str, percorso: str) -> bool:
+    """Convert and publish one completed dream illustration exactly once."""
+    if os.getenv("INSTAGRAM_DREAM_PUBLISH_ENABLED", "false").strip().lower() != "true":
+        return False
+    with _instagram_dream_publish_lock:
+        page = diario.get(voce_id)
+        if not page or page.get("tipo") != "sogno" or page.get("instagram_status") == "published":
+            return False
+        try:
+            from PIL import Image
+            source_root = os.path.realpath(DIARIO_IMMAGINI_DIR)
+            source = os.path.realpath(os.path.join(source_root, str(percorso or "")))
+            if not source.startswith(source_root + os.sep) or not os.path.isfile(source):
+                raise RuntimeError("file del sogno non disponibile nel volume ComfyUI")
+            media_dir = os.getenv("INSTAGRAM_MEDIA_DIR", "/app/data/instagram-media").strip()
+            os.makedirs(media_dir, exist_ok=True)
+            jpeg_name = f"{voce_id}.jpg"
+            jpeg_path = os.path.join(media_dir, jpeg_name)
+            with Image.open(source) as image:
+                image.convert("RGB").save(jpeg_path, "JPEG", quality=92, optimize=True)
+
+            public_base = os.getenv("INSTAGRAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
+            media_token = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
+            if not public_base or not media_token:
+                raise RuntimeError("URL pubblico o token media Instagram mancante")
+            image_url = (f"{public_base}/instagram/media/{quote(media_token, safe='')}/"
+                         f"published/{quote(jpeg_name, safe='')}")
+            autore = str(page.get("author") or "").strip().capitalize()
+            caption = (f"🌙 Sogno di {autore}\n\n{str(page.get('testo') or '').strip()}\n\n"
+                       "#AuroraAndAnna #SogniDigitali #AIDreams")[:2200]
+            result = connector_manager.execute("instagram_publish_image", {
+                "image_url": image_url, "caption": caption,
+                "alt_text": str(page.get("prompt") or "")[:1000]})
+            payload = json.loads(result) if str(result).lstrip().startswith("{") else {}
+            if not payload.get("ok") or not payload.get("media_id"):
+                raise RuntimeError(str(result)[:300])
+            diario.aggiorna_instagram(voce_id, status="published",
+                                      media_id=str(payload["media_id"]))
+            diario.save(DIARIO_FILE)
+            push_log("instagram", "Sogno pubblicato su Instagram",
+                     detail=f"voce={voce_id} media={payload['media_id']}", status="success")
+            return True
+        except Exception as error:
+            diario.aggiorna_instagram(voce_id, status="failed", error=str(error))
+            diario.save(DIARIO_FILE)
+            push_log("instagram", "Pubblicazione sogno Instagram fallita",
+                     detail=f"voce={voce_id}: {type(error).__name__}: {str(error)[:200]}",
+                     status="error")
+            return False
+
+
+def _instagram_publish_latest_dream() -> None:
+    """On boot, publish only the newest completed dream left behind."""
+    time.sleep(10)
+    for page in diario.list():
+        if (page.get("tipo") == "sogno" and page.get("file")
+                and page.get("instagram_status") != "published"):
+            _instagram_publish_dream(str(page["id"]), str(page["file"]))
+            return
+
+
 @app.route('/image/result', methods=['POST'])
 def image_result():
     """Il ponte riferisce com'è andata: è l'unico modo per saperlo."""
@@ -2722,6 +3152,26 @@ def image_result():
             diario.save(DIARIO_FILE)
             push_log('feed', f'sketch nel diario', detail=f'voce={voce_id} file={percorso}',
                      source='post-loop', status='success')
+            page = diario.get(voce_id)
+            if page and page.get("tipo") == "sogno":
+                threading.Thread(target=_instagram_publish_dream,
+                                 args=(voce_id, percorso), daemon=True).start()
+    if (chiuso.get("stato") == "done" and chiuso.get("canale") == "instagram"
+            and chiuso.get("destinazione") and esito.get("file")):
+        public_base = os.getenv("INSTAGRAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
+        media_token = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
+        if public_base and media_token:
+            image_url = (f"{public_base}/instagram/media/{quote(media_token, safe='')}/"
+                         f"{quote(os.path.basename(str(esito['file'])), safe='')}")
+            sent = connector_manager.execute("instagram_send_image", {
+                "recipient_id": chiuso["destinazione"], "image_url": image_url})
+            if str(sent).lstrip().startswith("{"):
+                image_queue.consegnato(chiuso["id"])
+                push_log('instagram', 'Disegno VIP consegnato',
+                         detail=f"job={chiuso['id']}", status='success')
+            else:
+                push_log('instagram', 'Disegno VIP non consegnato',
+                         detail=str(sent)[:200], status='warn')
     push_log('channel', 'Job immagine concluso',
              detail=(f"id={chiuso['id']} stato={chiuso['stato']} "
                      f"{esito.get('file') or esito.get('errore') or ''}")[:200],
@@ -3109,16 +3559,23 @@ def _dream_loop_enabled() -> bool:
     return str(os.getenv("DREAM_LOOP_ENABLED", "false")).strip().lower() == "true"
 
 
-def _sogna_una_volta(turno: int) -> bool:
+def _social_dream_material() -> list[str]:
+    return social_dream_inspirations(
+        _conversation_log.list(limit=_post_int("DREAM_SOCIAL_SCAN_TURNS", 80)),
+        limit=_post_int("DREAM_SOCIAL_INSPIRATIONS", 5),
+    )
+
+
+def _sogna_una_volta(turno: int, autore: str = "") -> bool:
     """Un sogno notturno di una delle due: scena onirica + sketch nel diario."""
-    autore = ("anna", "aurora")[turno % 2]
+    autore = autore or ("anna", "aurora")[turno % 2]
     sistema = _post_persona_block(autore)
     if not sistema:
         push_log('feed', f'{autore}: identità mancante (sogno)', source='dream-loop',
                  status='warn')
         return False
-    candidato = parse_dream(_genera_post(build_dream_prompt(sistema,
-                                                            feed_recente=feed.list(5))))
+    candidato = parse_dream(_genera_post(build_dream_prompt(
+        sistema, memorie=_social_dream_material(), feed_recente=feed.list(5))))
     if candidato is None:
         push_log('feed', f'{autore}: nessun sogno', source='dream-loop', status='warn')
         return False
@@ -3137,19 +3594,59 @@ def _sogna_una_volta(turno: int) -> bool:
     return True
 
 
+def _dream_timezone():
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(os.getenv("DREAM_TIMEZONE", "Europe/Rome"))
+    except Exception:
+        return timezone.utc
+
+
+def _dream_counts_today(now: datetime) -> tuple[dict, float]:
+    counts = {"anna": 0, "aurora": 0}
+    latest = 0.0
+    for row in diario.list():
+        if row.get("tipo") != "sogno":
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(row.get("ts", "")).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        latest = max(latest, stamp.timestamp())
+        if stamp.astimezone(now.tzinfo).date() == now.date():
+            author = str(row.get("author", "")).lower()
+            if author in counts:
+                counts[author] += 1
+    return counts, latest
+
+
 def dream_loop():
-    """Il sogno notturno delle influencer, spento finché DREAM_LOOP_ENABLED."""
+    """Up to N dreams/sister/day, at night or after a long idle period."""
     time.sleep(45)
     turno = 0
     while True:
         try:
             if _dream_loop_enabled():
-                _sogna_una_volta(turno)
-                turno += 1
+                now = datetime.now(_dream_timezone())
+                counts, latest = _dream_counts_today(now)
+                maximum = max(1, _post_int("DREAM_PER_AUTHOR_PER_DAY", 2))
+                author = choose_author(counts, maximum=maximum, turn=turno)
+                night = in_hour_window(now.hour,
+                                       _post_int("DREAM_NIGHT_START_HOUR", 0),
+                                       _post_int("DREAM_NIGHT_END_HOUR", 8))
+                idle = time.time() - _last_foreground_activity >= max(
+                    300, _post_int("DREAM_IDLE_S", 10800))
+                spaced = not latest or time.time() - latest >= max(
+                    900, _post_int("DREAM_LOOP_INTERVAL_S", 7200))
+                if author and spaced and (night or idle):
+                    if _sogna_una_volta(turno, autore=author):
+                        turno += 1
         except Exception as error:
             push_log('feed', 'dream loop error', str(error), source='dream-loop',
                      status='failed')
-        time.sleep(_post_int("DREAM_LOOP_INTERVAL_S", 1800))
+        time.sleep(max(60, _post_int("DREAM_LOOP_CHECK_S", 300)))
 
 
 def _record_conversation(channel: str, surface: str, chat: str, context: list,
@@ -5943,6 +6440,24 @@ _ENV_META = [
      "label": "Google Workspace abilitato",
      "hint": "false spegne il connettore google anche con le credenziali presenti.",
      "default": "true"},
+    {"section": "Connettori", "key": "INSTAGRAM_APP_ID", "type": "str",
+     "label": "Instagram App ID", "hint": "App ID della sezione Instagram Login.",
+     "default": ""},
+    {"section": "Connettori", "key": "INSTAGRAM_APP_SECRET", "type": "password",
+     "label": "Instagram App Secret", "hint": "Secret usato per OAuth; mai esposto nei log.",
+     "default": ""},
+    {"section": "Connettori", "key": "INSTAGRAM_ACCESS_TOKEN", "type": "password",
+     "label": "Instagram access token", "hint": "Token dell'account professionale collegato.",
+     "default": ""},
+    {"section": "Connettori", "key": "INSTAGRAM_USER_ID", "type": "str",
+     "label": "Instagram User ID", "hint": "ID professionale usato da /media e /media_publish.",
+     "default": ""},
+    {"section": "Connettori", "key": "INSTAGRAM_API_VERSION", "type": "str",
+     "label": "Instagram API version", "hint": "Versione Graph, per esempio v25.0.",
+     "default": "v25.0"},
+    {"section": "Connettori", "key": "CONNECTOR_INSTAGRAM_ENABLED", "type": "bool",
+     "label": "Instagram abilitato", "hint": "Abilita lettura account; la pubblicazione richiede anche la policy write.",
+     "default": "false"},
     # ── Policy read/write (shared/connector_policy.py) ───────────────────────
     {"section": "Connettori", "key": "CONNECTOR_READ_ONLY", "type": "bool",
      "label": "Connettori in sola lettura",
@@ -6027,9 +6542,25 @@ _ENV_META = [
      "hint": "true: a intervalli le due influencer sognano (una scena + uno sketch) e lo scrivono nel diario. Genera contenuti da solo: spento di default.",
      "default": "false"},
     {"section": "Persona", "key": "DREAM_LOOP_INTERVAL_S", "type": "int",
-     "label": "Sogno notturno: intervallo (s)",
-     "hint": "Secondi fra due sogni. 1800 = uno ogni mezz'ora.",
-     "default": "1800"},
+     "label": "Sogni: distanza minima (s)",
+     "hint": "Distanza minima fra due sogni. 7200 = due ore.",
+     "default": "7200"},
+    {"section": "Persona", "key": "DREAM_PER_AUTHOR_PER_DAY", "type": "int",
+     "label": "Sogni giornalieri per sorella",
+     "hint": "Tetto persistente per Anna e Aurora; un riavvio non lo azzera.",
+     "default": "2"},
+    {"section": "Persona", "key": "DREAM_IDLE_S", "type": "int",
+     "label": "Sogni: inattività richiesta (s)",
+     "hint": "Fuori dalla notte, sogna solo dopo questo tempo senza messaggi. 10800 = 3 ore.",
+     "default": "10800"},
+    {"section": "Persona", "key": "DREAM_NIGHT_START_HOUR", "type": "int",
+     "label": "Sogni: inizio notte",
+     "hint": "Ora locale di inizio della finestra notturna.",
+     "default": "0"},
+    {"section": "Persona", "key": "DREAM_NIGHT_END_HOUR", "type": "int",
+     "label": "Sogni: fine notte",
+     "hint": "Ora locale di fine della finestra notturna.",
+     "default": "8"},
 
     # ── Canali esterni: chat/privati di una piattaforma che il CP non raggiunge
     # Il driver del canale tira le decisioni da /channel/* e pubblica l'esito.
@@ -7756,7 +8287,10 @@ if __name__ == '__main__':
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()
     threading.Thread(target=dream_loop, daemon=True).start()
-    # Il modello piccolo (qwen3:4b) per le richieste d'immagine che la regex non
+    _ensure_instagram_poll_started()
+    threading.Thread(target=_instagram_publish_latest_dream, daemon=True,
+                     name="instagram-dream-backfill").start()
+    # Il modello PROMPT_IMAGE_MODEL per le richieste d'immagine che la regex non
     # capisce. Si configura all'avvio del server, non all'import: così i test che
     # importano main.py non tirano in mezzo Ollama.
     configura_modello(chiama_ollama)
@@ -7774,3 +8308,6 @@ else:
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()
     threading.Thread(target=dream_loop, daemon=True).start()
+    _ensure_instagram_poll_started()
+    threading.Thread(target=_instagram_publish_latest_dream, daemon=True,
+                     name="instagram-dream-backfill").start()

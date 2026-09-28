@@ -84,6 +84,8 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         "richiedente": str(richiedente or "")[:64],
         "canale": str(canale or "")[:32],
         "modello": str(modello or "")[:120],
+        "modello_effettivo": str(modello or "")[:120] or (
+            MODELLO_SDXL["ckpt"] if famiglia == FAMIGLIA_SDXL else MODELLO_DEFAULT["unet"]),
         "famiglia": famiglia,
         "destinazione": str(destinazione or "")[:64],
         "consegnato": False,
@@ -288,7 +290,9 @@ class ImmagineQueue:
                 "max_jobs": self.max_jobs,
                 "ttl_s": self.ttl_s,
                 "ultimi": [{"id": j["id"], "stato": j["stato"],
-                            "prompt": j["prompt"][:60],
+                            "prompt": j["prompt"],
+                            "famiglia": j["famiglia"],
+                            "modello_effettivo": j["modello_effettivo"],
                             "esito": j.get("esito", {})} for j in self._storico[-5:]],
             }
 
@@ -393,7 +397,7 @@ def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSp
 
 def workflow_sdxl(job: dict, *, modello: dict | None = None,
                   prefisso: str = "HyperSpace") -> dict:
-    """Il grafo SDXL-Turbo: checkpoint unico, cfg 1.0, pochi passi.
+    """Il grafo SDXL/RealVisXL: checkpoint unico, CFG 7 e sampler DPM++ 2M.
 
     A differenza di Qwen, SDXL usa il negativo (non le istruzioni dentro il
     prompt) e un `CLIPTextEncode` per lato. Gli id dei nodi sono gli stessi del
@@ -442,5 +446,4 @@ def immagini_da_history(run: dict) -> list:
             cartella = str(immagine.get("subfolder") or "").strip("/")
             file.append(f"{cartella}/{nome}".lstrip("/"))
     return file
-
 

@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from connectors.github import GitHubConnector            # noqa: E402
 from connectors.google import GoogleWorkspaceConnector   # noqa: E402
+from connectors.instagram import InstagramConnector      # noqa: E402
 from connectors.manager import ConnectorManager          # noqa: E402
 from connectors.office365 import Office365Connector      # noqa: E402
 from shared.connector_policy import ConnectorPolicy      # noqa: E402
@@ -31,6 +32,7 @@ SOURCE = ROOT / "control-plane" / "main.py"
 
 EXPECTED_CONNECTORS = {"github": GitHubConnector,
                        "google": GoogleWorkspaceConnector,
+                       "instagram": InstagramConnector,
                        "office365": Office365Connector}
 
 # Chiavi che decidono se un connettore è attivo e cosa può scrivere. I test le
@@ -38,8 +40,10 @@ EXPECTED_CONNECTORS = {"github": GitHubConnector,
 # un GITHUB_TOKEN vero nel .env di sviluppo cambierebbe l'esito.
 CONNECTOR_KEYS = ("GITHUB_TOKEN", "MS_CLIENT_ID", "MS_CLIENT_SECRET", "MS_TENANT_ID",
                   "GOOGLE_CREDENTIALS_JSON", "GOOGLE_DELEGATE_EMAIL",
+                  "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_USER_ID",
                   "CONNECTOR_GITHUB_ENABLED", "CONNECTOR_OFFICE365_ENABLED",
                   "CONNECTOR_GOOGLE_ENABLED", "CONNECTOR_READ_ONLY",
+                  "CONNECTOR_INSTAGRAM_ENABLED",
                   "CONNECTOR_WRITE_TOOLS")
 
 
@@ -219,7 +223,8 @@ class ToolSchemaTests(unittest.TestCase):
     """Credenziali finte: si costruisce il catalogo, senza mai chiamare l'API."""
 
     FAKE = {"GITHUB_TOKEN": "fake", "MS_CLIENT_ID": "fake", "MS_CLIENT_SECRET": "fake",
-            "GOOGLE_CREDENTIALS_JSON": "{}"}
+            "GOOGLE_CREDENTIALS_JSON": "{}", "INSTAGRAM_ACCESS_TOKEN": "fake",
+            "INSTAGRAM_USER_ID": "1784"}
 
     def _manager(self):
         with connector_env(**self.FAKE):
@@ -280,7 +285,8 @@ class ToolSchemaTests(unittest.TestCase):
         self.assertEqual(sorted(nomi), sorted(set(nomi)), f"nomi duplicati: {nomi}")
 
     def test_ogni_tool_ha_il_prefisso_del_suo_connettore(self):
-        prefissi = {"github": "github_", "office365": "o365_", "google": "google_"}
+        prefissi = {"github": "github_", "office365": "o365_", "google": "google_",
+                    "instagram": "instagram_"}
         for conn in self._manager().connectors:
             with self.subTest(connector=conn.name):
                 for tool in conn.get_tools():
@@ -360,4 +366,3 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

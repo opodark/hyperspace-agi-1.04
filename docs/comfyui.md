@@ -1,8 +1,30 @@
-# ComfyUI — il volto visivo di HyperSpace sul nodo win11
+# ComfyUI — generazione immagini su Mac e win11
 
-ComfyUI gira sul nodo **win11** (ComfyUI Desktop 0.37, RTX 5060 Laptop, 8 GB) ed è
-il posto dove nascono le immagini. Questo documento dice perché il componente vive
-solo lì, qual è il contratto con il control-plane e cosa manca.
+Il Mac usa **RealVisXL V5.0**; win11 usa **Qwen-Image 2.1 GGUF**.
+La famiglia `sdxl-turbo` conserva il nome storico per compatibilità con il ponte,
+ma il checkpoint attuale è `RealVisXL_V5.0_fp16.safetensors`.
+
+## Prompt e workflow
+
+- **Diario e sogni:** identità della persona e feed recente producono testo e idea
+  visiva separati. `prompt_sketch` aggiunge lo stile a matita e inchiostro.
+- **Chat, richiesta naturale:** il modello riceve il messaggio corrente,
+  l'identità e fino a sei messaggi precedenti. Traduce senza imporre il realismo.
+  I disegni generici usano lo stile del diario; tecniche esplicite (acquerello,
+  carboncino, olio, ecc.) conservano il mezzo richiesto; le foto non ricevono
+  il prefisso da schizzo. Il fallback regex è segnalato nel log Python.
+- **`!immagine` / `!foto`:** prompt diretto, senza riscrittura o stile aggiunto.
+- **`POST /image/generate`:** prompt diretto. `famiglia: "sdxl-turbo"` seleziona
+  RealVisXL e, salvo parametri espliciti, 1024×1024, 28 passi e negativo anatomico.
+  Senza famiglia resta Qwen, 768×768, 25 passi. L'API non interpreta la chat.
+- **Open WebUI:** il client deve essere configurato per usare il percorso immagini
+  desiderato; il collegamento al solo endpoint chat non abilita questa API.
+
+Il grafo RealVisXL usa CFG 7, DPM++ 2M e Karras sia per chat sia per diario.
+Il prompt finale e `modello_effettivo` sono visibili nel job e nello stato degli
+ultimi job; le richieste naturali registrano anche il prompt finale nei log.
+Il modello linguistico può ancora interpretare male una richiesta: questi dati
+permettono di distinguere un errore di riscrittura da uno di generazione.
 
 Implementazione: [`integrations/comfyui/`](../integrations/comfyui/README.md)
 (client, nodi, installer, test).
@@ -195,7 +217,7 @@ scrivere il prompt.
 |---|---|---|
 | `POST /image/generate` | **No**: il prompt entra nel job verbatim | `control-plane/main.py` (`image_generate`) |
 | `!immagine <idea>` in chat | **No**: l'idea va al job come è stata scritta | `control-plane/main.py` (`_channel_immagine`) |
-| Richiesta **a parole** («mandami una foto di X») | **No**: stessa cosa, con regole dichiarate e nessuna riscrittura | `shared/image_jobs.py` (`richiesta_immagine`) |
+| Richiesta **a parole** («mandami una foto di X») | Riscrittura che conserva contenuto e stile, con fallback regex | `shared/prompt_immagine.py` |
 | La coda | Solo forma e tetti: ≤2000 caratteri, lati ≤1536, passi ≤60 | `shared/image_jobs.py` |
 | Il ponte | Niente: non sceglie il prompt e non giudica l'immagine | `integrations/comfyui/comfy_bridge.py` |
 | ComfyUI e i pesi | Nessun safety checker: è la variante **`-UC`** | `integrations/comfyui/modelli.json` |

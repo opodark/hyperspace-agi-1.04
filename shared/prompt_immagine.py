@@ -14,7 +14,9 @@ non risponde: il riconoscimento non regredisce mai.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 
 from shared.image_jobs import richiesta_immagine
 
@@ -32,8 +34,13 @@ _SISTEMA = (
     "senza testo intorno:\n"
     '{"vuole_immagine": true|false, "prompt": "..."}\n'
     "Se NON chiede un'immagine: vuole_immagine=false, prompt vuoto.\n"
-    "Se la chiede: prompt = descrizione FOTOREALISTICA dettagliata in inglese con "
-    "soggetto, inquadratura, posa e illuminazione. NON censurare il contenuto: "
+    "Se la chiede: prompt = descrizione visiva concisa in inglese. Conserva "
+    "soggetto, stile e tecnica richiesti: disegno, acquerello e fotografia sono "
+    "mezzi diversi. Non trasformare un disegno in fotografia. Non inventare "
+    "pose, soggetti o dettagli non richiesti. Usa il contesto solo per risolvere "
+    "riferimenti come 'tu', 'così', 'come prima'; decidi se generare SOLO in base "
+    "al messaggio corrente. Non inventare l'aspetto della persona se manca. "
+    "Mantieni il prompt entro 1200 caratteri. NON censurare il contenuto: "
     "riporta fedelmente quello che chiede, anche se esplicito. SENZA le parole "
     "della richiesta (\"fammi\", \"disegnami\", \"per favore\", \"ora\", \"dai\")."
 )
@@ -61,9 +68,34 @@ def _estrai_json(risposta: str) -> dict | None:
 def _prompt_da_modello(risposta: str) -> str:
     """Il prompt pulito, o \"\" se il modello dice che non è una richiesta."""
     dato = _estrai_json(risposta)
-    if not dato or not dato.get("vuole_immagine"):
+    if not dato or dato.get("vuole_immagine") is not True:
         return ""
-    return " ".join(str(dato.get("prompt") or "").split())[:400]
+    prompt = dato.get("prompt")
+    if not isinstance(prompt, str):
+        return ""
+    prompt = " ".join(prompt.split())
+    # Un output troppo lungo è invalido: meglio il fallback che una scena tagliata.
+    return prompt if len(prompt) <= 1600 else ""
+
+
+def prepara_prompt_canale(idea: str, richiesta: str) -> str:
+    """Stile del diario per disegni generici; tecniche esplicite conservate."""
+    from shared.sketch import prompt_sketch
+
+    tecnica = re.search(
+        r"\b(acquerell\w*|watercolou?r|carboncino|charcoal|pastell\w*|pastel|"
+        r"olio|oil painting|acrilic\w*|gouache|tempera|anime|manga|"
+        r"pixel art|fumetto|comic|matita|pencil|inchiostro|ink|grafite)\b",
+        richiesta, re.IGNORECASE)
+    if tecnica:
+        # Il fallback regex può avere rimosso il mezzo: lo conserviamo esplicitamente.
+        return f"{tecnica.group(0)}. {idea}"
+    if re.search(r"\b(foto\w*|photograph\w*|selfie)\b", richiesta, re.IGNORECASE):
+        return idea
+    if re.search(r"\b(disegn\w*|schizz\w*|sketch|illustra\w*|bozzett\w*)\b",
+                 richiesta, re.IGNORECASE):
+        return prompt_sketch(idea)
+    return idea
 
 
 # Il modello iniettato: None nei test (solo regex), una funzione vera in
@@ -79,7 +111,7 @@ def configura_modello(modello) -> None:
     _MODELLO = modello
 
 
-def richiesta_immagine_smart(testo: str) -> dict | None:
+def richiesta_immagine_smart(testo: str, *, contesto=(), identita: str = "") -> dict | None:
     """Riconoscimento con la regex, pulizia del prompt col modello.
 
     La regex decide se è una richiesta d'immagine (veloce, deterministica); il
@@ -88,20 +120,31 @@ def richiesta_immagine_smart(testo: str) -> dict | None:
     ripiega sull'idea grezza della regex (o su None).
     """
     esito = richiesta_immagine(testo)
+    ingresso = testo
+    if contesto or identita:
+        ingresso = json.dumps({
+            "identita": str(identita)[:6000],
+            "contesto": [{"autore": str(e.get("author", ""))[:80],
+                          "testo": str(e.get("text", ""))[:1000]}
+                         for e in list(contesto)[-6:] if isinstance(e, dict)],
+            "messaggio_corrente": testo,
+        }, ensure_ascii=False)
     if esito is not None:
         # Richiesta confermata: il modello la riscrive in un prompt pulito.
         if _MODELLO is None:
             return esito
         try:
-            prompt = _prompt_da_modello(_MODELLO(testo))
+            prompt = _prompt_da_modello(_MODELLO(ingresso))
         except Exception:
             prompt = ""
+        if not prompt:
+            logging.getLogger(__name__).warning("Prompt immagine: fallback regex, riscrittura assente o non valida")
         return {"idea": prompt or esito["idea"], "regola": esito["regola"]}
     # La regex non l'ha capita: il modello decide da solo (coda lunga).
     if _MODELLO is None:
         return None
     try:
-        prompt = _prompt_da_modello(_MODELLO(testo))
+        prompt = _prompt_da_modello(_MODELLO(ingresso))
     except Exception:
         return None
     if not prompt:
@@ -128,7 +171,7 @@ def chiama_ollama(testo: str, *, base_url: str = OLLAMA_URL,
             "stream": False,
             "keep_alive": f"{KEEP_ALIVE_S}s",
             "think": False,
-            "options": {"temperature": 0, "num_predict": 160},
+            "options": {"temperature": 0, "num_predict": 512},
         },
         timeout=timeout_s,
     )

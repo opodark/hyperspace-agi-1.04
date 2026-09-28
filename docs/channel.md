@@ -277,7 +277,26 @@ non risponde".
 
 ### Due bot nello stesso gruppo
 
-Due Aurora nella stessa stanza sono possibili, ma il driver deve sapere due cose:
+Telegram supporta la comunicazione bot-to-bot quando viene abilitata in
+`@BotFather`. Il driver la tiene spenta per default e richiede anche:
+
+- `TELEGRAM_BOT_TO_BOT=1`;
+- `TELEGRAM_BOT_ALLOWLIST=pimpachatbot,altrobot`;
+- una menzione o una reply diretta ad Anna;
+- massimo `TELEGRAM_BOT_MAX_TURNS` messaggi bot nella finestra
+  `TELEGRAM_BOT_WINDOW_S` (default 4 in 5 minuti).
+
+Senza opt-in i messaggi degli altri bot si ignorano, come prima. Con l'opt-in
+restano valide queste regole:
+
+Con **Guest Mode** Anna può essere menzionata anche in una chat di cui non è
+membro. Il driver riceve `guest_message` e risponde una sola volta tramite
+`answerGuestQuery`; per continuare occorre una nuova menzione o una reply diretta.
+
+Con **Secretary/Business Mode** il driver riceve `business_message` e può
+rispondere per conto del profilo collegato usando `business_connection_id`.
+È fail-closed: richiede `TELEGRAM_BUSINESS_ENABLED=1` e gli username espliciti
+in `TELEGRAM_BUSINESS_ALLOWLIST`; una lista vuota non risponde a nessuno.
 
 - **i messaggi degli altri bot si ignorano sempre** (`from.is_bot`): senza questo
   A pubblica → B legge → B risponde → A legge, all'infinito. Non è spam, è

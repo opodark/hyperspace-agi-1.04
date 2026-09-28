@@ -27,6 +27,7 @@ perche' sono quegli oggetti a finire nel grafo che ComfyUI esegue.
 import ast
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 
 from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job, richiesta_immagine, workflow  # noqa: E402
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, negativo_sketch  # noqa: E402
-from shared.prompt_immagine import richiesta_immagine_smart  # noqa: E402
+from shared.prompt_immagine import prepara_prompt_canale, richiesta_immagine_smart  # noqa: E402
 
 SOURCE = ROOT / "control-plane" / "main.py"
 COSTANTI = {"COMANDI_IMMAGINE"}
@@ -73,6 +74,8 @@ def _load(operator=(), coda=None):
         "SKETCH_PASSI": SKETCH_PASSI,
         "negativo_sketch": negativo_sketch,
         "richiesta_immagine_smart": richiesta_immagine_smart,
+        "prepara_prompt_canale": prepara_prompt_canale,
+        "persona_store": SimpleNamespace(system_block=lambda: "Sono Anna"),
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
@@ -276,6 +279,16 @@ class RichiestaAParoleTests(unittest.TestCase):
 class RichiestaAParoleCanaleTests(unittest.TestCase):
     """Il collegamento: chi può chiedere a parole, e cosa risponde la stanza."""
 
+    def test_disegno_usa_stesso_prompt_del_diario_fino_a_clip(self):
+        from shared.sketch import prompt_sketch
+        scope = _load()
+        scope["_channel_immagine"](_contesto("fammi un disegno di un faro"),
+                                   channel="telegram", destinazione="1")
+        job = scope["image_queue"].job[0]
+        self.assertEqual(workflow(job)["452"]["inputs"]["text"],
+                         prompt_sketch("di un faro"))
+        self.assertIn(job["modello_effettivo"], scope["_log"][0][1]["detail"])
+
     def test_l_operatore_ottiene_il_job_con_l_idea_verbatim(self):
         scope = _load(operator={"alberto"})
         risposta = scope["_channel_immagine"](
@@ -347,4 +360,3 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
