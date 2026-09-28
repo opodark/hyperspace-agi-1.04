@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import unittest
 
 from shared.instagram_project_context import should_offer_creator, wants_project_info

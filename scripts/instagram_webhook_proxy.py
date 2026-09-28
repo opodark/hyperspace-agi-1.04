@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Expose only the Instagram webhook and proxy it to the local control plane."""
 
 from http.client import HTTPConnection

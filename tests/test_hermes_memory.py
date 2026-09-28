@@ -20,7 +20,7 @@ class HermesMemoryClientTests(TestCase):
     def test_unreachable_peer_is_skipped_briefly_then_recovers(self, request, clock):
         clock.return_value = 100.0
         request.side_effect = requests.ConnectTimeout("offline")
-        client = HermesMemoryClient("http://bridge", "token")
+        client = HermesMemoryClient("http://bridge", "token", cooldown=15.0)
         for _ in range(2):
             with self.assertRaises(HermesMemoryError):
                 client.stats()
@@ -30,6 +30,22 @@ class HermesMemoryClientTests(TestCase):
         request.return_value.json.return_value = {"ok": True, "entries": 2}
         self.assertEqual(client.stats()["entries"], 2)
         self.assertEqual(request.call_count, 2)
+
+    @mock.patch("shared.hermes_memory.time.monotonic")
+    @mock.patch("shared.hermes_memory.requests.request")
+    def test_unavailable_flags_degraded_until_cooldown_elapses(self, request, clock):
+        clock.return_value = 100.0
+        request.side_effect = requests.ConnectTimeout("offline")
+        client = HermesMemoryClient("http://bridge", "token", cooldown=60.0)
+        self.assertFalse(client.unavailable())
+        with self.assertRaises(HermesMemoryError):
+            client.stats()
+        self.assertTrue(client.unavailable())
+        self.assertIn("offline", client.last_error())
+        clock.return_value = 159.0
+        self.assertTrue(client.unavailable())
+        clock.return_value = 160.0
+        self.assertFalse(client.unavailable())
 
     @mock.patch("shared.hermes_memory.requests.request")
     def test_connect_timeout_is_not_retried(self, request):

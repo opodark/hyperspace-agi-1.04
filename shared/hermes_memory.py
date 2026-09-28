@@ -22,7 +22,7 @@ class HermesMemoryError(RuntimeError):
 
 class HermesMemoryClient:
     def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None,
-                 timeout: float = 5.0):
+                 timeout: float = 5.0, cooldown: Optional[float] = None):
         self.base_url = (base_url or os.getenv(
             "HERMES_MEMORY_URL", "http://host.docker.internal:8098"
         )).rstrip("/")
@@ -35,8 +35,21 @@ class HermesMemoryClient:
                 except OSError:
                     self.token = ""
         self.timeout = timeout
+        # Failsafe "sticky": dopo un errore di trasporto Hermes resta marcato
+        # irraggiungibile per questo intervallo, e chi legge serve il mirror
+        # locale senza pagare il timeout a ogni richiesta.
+        self.cooldown = float(cooldown if cooldown is not None
+                              else os.getenv("HERMES_MEMORY_COOLDOWN_S", "60"))
         self._unavailable_until = 0.0
         self._last_transport_error = ""
+
+    def unavailable(self) -> bool:
+        """True mentre Hermes è considerato giù (circuito aperto)."""
+        return time.monotonic() < self._unavailable_until
+
+    def last_error(self) -> str:
+        """L'ultimo errore di trasporto; vuoto se Hermes è (o sembra) raggiungibile."""
+        return self._last_transport_error
 
     def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         if time.monotonic() < self._unavailable_until:
@@ -67,7 +80,7 @@ class HermesMemoryClient:
             body = response.json()
         except (requests.ConnectionError, requests.Timeout) as exc:
             self._last_transport_error = f"Hermes memory bridge request failed: {exc}"
-            self._unavailable_until = time.monotonic() + 15.0
+            self._unavailable_until = time.monotonic() + self.cooldown
             raise HermesMemoryError(self._last_transport_error) from exc
         except (requests.RequestException, ValueError) as exc:
             raise HermesMemoryError(f"Hermes memory bridge request failed: {exc}") from exc

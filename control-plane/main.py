@@ -3571,17 +3571,17 @@ def _sogna_una_volta(turno: int, autore: str = "") -> bool:
     autore = autore or ("anna", "aurora")[turno % 2]
     sistema = _post_persona_block(autore)
     if not sistema:
-        push_log('feed', f'{autore}: identità mancante (sogno)', source='dream-loop',
+        push_log('dream', f'{autore}: identità mancante (sogno)', source='dream-loop',
                  status='warn')
         return False
     candidato = parse_dream(_genera_post(build_dream_prompt(
         sistema, memorie=_social_dream_material(), feed_recente=feed.list(5))))
     if candidato is None:
-        push_log('feed', f'{autore}: nessun sogno', source='dream-loop', status='warn')
+        push_log('dream', f'{autore}: nessun sogno', source='dream-loop', status='warn')
         return False
     ok, motivo = filtra_dream(candidato, autore=autore, diario=diario.list(20))
     if not ok:
-        push_log('feed', f'{autore}: sogno scartato ({motivo})', source='dream-loop',
+        push_log('dream', f'{autore}: sogno scartato ({motivo})', source='dream-loop',
                  status='warn')
         return False
     voce_id = "sogno-" + uuid.uuid4().hex[:8]
@@ -3589,7 +3589,7 @@ def _sogna_una_volta(turno: int, autore: str = "") -> bool:
                     testo=candidato["scena"], prompt=candidato.get("disegno", "")))
     diario.save(DIARIO_FILE)
     _accoda_sketch(autore, candidato.get("disegno", ""), voce_id)
-    push_log('feed', f'{autore}: sogno scritto', detail=candidato["scena"][:120],
+    push_log('dream', f'{autore}: sogno scritto', detail=candidato["scena"][:120],
              source='dream-loop', status='success')
     return True
 
@@ -3644,7 +3644,7 @@ def dream_loop():
                     if _sogna_una_volta(turno, autore=author):
                         turno += 1
         except Exception as error:
-            push_log('feed', 'dream loop error', str(error), source='dream-loop',
+            push_log('dream', 'dream loop error', str(error), source='dream-loop',
                      status='failed')
         time.sleep(max(60, _post_int("DREAM_LOOP_CHECK_S", 300)))
 
@@ -4742,8 +4742,8 @@ def omega_health():
     return jsonify({
         "status": "ok", "engine": "hyperspace-agi", "version": "1.05.0",
         "memories": _health_memory_count(), "nodes_active": nodes_active,
-        "memory_source": "mirror" if MEMORY_BACKEND == "hermes" else "legacy",
-        "memory_pending": memory_sync.pending() if MEMORY_BACKEND == "hermes" else 0,
+        "memory_source": "legacy" if _memory_effective_backend() == "legacy" else "mirror",
+        "memory_pending": memory_sync.pending() if _memory_effective_backend() == "hermes" else 0,
         "ttl_days": MEMORY_TTL_DAYS,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
@@ -7318,10 +7318,37 @@ def get_tasks():
     return jsonify(merged)
 
 # ── MEMORY ENDPOINTS ──────────────────────────────────────────────────────────
+def _memory_effective_backend() -> str:
+    """Backend effettivo: `legacy` quando il backend autorevole Hermes è giù.
+
+    Il failsafe è "sticky": dopo un errore di trasporto Hermes resta marcato
+    irraggiungibile per HERMES_MEMORY_COOLDOWN_S, e in quel periodo le letture
+    leggono il mirror locale (lo stesso file gzip di `MEMORY_BACKEND=legacy`)
+    senza pagare il timeout a ogni richiesta. Allo scadere si ritenta Hermes.
+    """
+    if MEMORY_BACKEND != "hermes":
+        return MEMORY_BACKEND
+    if _hermes_memory.unavailable():
+        return "legacy"
+    return "hermes"
+
+
+def _memory_search_local(data: dict, *, reason: str = ""):
+    """Ricerca testuale sul mirror: la semantica richiede Hermes, il testo no."""
+    query = str(data.get("query", "")).strip().lower()
+    limite = max(1, int(data.get("limit", 50)))
+    voci = memory_sync.read_local(MEMORY_MAX_ENTRIES)
+    trovate = [voce for voce in voci
+               if not query or query in str(voce.get("content", "")).lower()]
+    return jsonify({"ok": True, "degraded": True, "source": "mirror",
+                    "reason": reason, "entries": trovate[:limite],
+                    "count": len(trovate[:limite])})
+
+
 @app.route('/memory')
 def get_memory():
     limit   = int(request.args.get("limit", MEMORY_MAX_ENTRIES))
-    if MEMORY_BACKEND == "hermes":
+    if _memory_effective_backend() == "hermes":
         try:
             esito = memory_sync.read(limit)
         except HermesMemoryError as exc:
@@ -7353,7 +7380,7 @@ def push_memory():
 
 @app.route('/memory/stats')
 def memory_stats():
-    if MEMORY_BACKEND == "hermes":
+    if _memory_effective_backend() == "hermes":
         # Anche con Hermes giù: la risposta degradata dice cosa c'è in locale e
         # quanto è in coda, che è l'unica cosa da guardare in quel momento. Un 503
         # nasconderebbe proprio quello.
@@ -7384,6 +7411,9 @@ def search_memory():
     data = request.get_json(force=True, silent=True) or {}
     if MEMORY_BACKEND != "hermes":
         return jsonify({"ok": False, "error": "ricerca avanzata disponibile con Hermes"}), 409
+    if _hermes_memory.unavailable():
+        # Failsafe: Hermes è giù, si serve il mirror senza pagare il timeout.
+        return _memory_search_local(data, reason=_hermes_memory.last_error())
     try:
         entries = _hermes_memory.query(
             str(data.get("query", "")), int(data.get("limit", 50)),
@@ -7397,16 +7427,7 @@ def search_memory():
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
     except HermesMemoryError as exc:
-        # Degradata e dichiarata: la ricerca semantica richiede Hermes, il testo no.
-        # Meglio un risultato locale marcato che un riquadro vuoto.
-        query = str(data.get("query", "")).strip().lower()
-        limite = max(1, int(data.get("limit", 50)))
-        voci = memory_sync.read_local(MEMORY_MAX_ENTRIES)
-        trovate = [voce for voce in voci
-                   if not query or query in str(voce.get("content", "")).lower()]
-        return jsonify({"ok": True, "degraded": True, "source": "mirror",
-                        "reason": str(exc), "entries": trovate[:limite],
-                        "count": len(trovate[:limite])})
+        return _memory_search_local(data, reason=str(exc))
 
 @app.route('/memory/lifecycle', methods=['POST'])
 def memory_lifecycle():

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Grounded HyperSpace context and handoff hints for Instagram conversations."""
 from __future__ import annotations
 
