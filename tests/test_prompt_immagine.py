@@ -44,12 +44,25 @@ class SmartTests(unittest.TestCase):
     def tearDown(self):
         pi.configura_modello(None)
 
-    def test_la_regex_resta_il_primo_passaggio(self):
+    def test_la_regex_riconosce_e_il_modello_pulisce(self):
         chiamate = []
-        pi.configura_modello(lambda testo: chiamate.append(testo) or '{}')
+        pi.configura_modello(lambda testo: chiamate.append(testo) or
+                             '{"vuole_immagine": true, "prompt": "photorealistic lighthouse"}')
+        esito = pi.richiesta_immagine_smart("fammi un disegno di un faro")
+        self.assertEqual(esito, {"idea": "photorealistic lighthouse", "regola": "mandare"})
+        self.assertEqual(chiamate, ["fammi un disegno di un faro"])
+
+    def test_senza_modello_la_regex_da_l_idea_grezza(self):
+        pi.configura_modello(None)
         esito = pi.richiesta_immagine_smart("fammi un disegno di un faro")
         self.assertEqual(esito, {"idea": "di un faro", "regola": "mandare"})
-        self.assertEqual(chiamate, [])
+
+    def test_il_modello_che_fallisce_ripiega_sulla_regex(self):
+        def modello(testo):
+            raise RuntimeError("giu")
+        pi.configura_modello(modello)
+        esito = pi.richiesta_immagine_smart("fammi un disegno di un faro")
+        self.assertEqual(esito, {"idea": "di un faro", "regola": "mandare"})
 
     def test_senza_modello_la_coda_lunga_resta_muta(self):
         pi.configura_modello(None)

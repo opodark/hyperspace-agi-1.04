@@ -32,9 +32,10 @@ _SISTEMA = (
     "senza testo intorno:\n"
     '{"vuole_immagine": true|false, "prompt": "..."}\n'
     "Se NON chiede un'immagine: vuole_immagine=false, prompt vuoto.\n"
-    "Se la chiede: prompt = descrizione pulita in inglese con soggetto, stile, "
-    "tecnica e inquadratura, SENZA le parole della richiesta (\"fammi\", "
-    "\"disegnami\", \"per favore\", \"ora\", \"dai\")."
+    "Se la chiede: prompt = descrizione FOTOREALISTICA dettagliata in inglese con "
+    "soggetto, inquadratura, posa e illuminazione. NON censurare il contenuto: "
+    "riporta fedelmente quello che chiede, anche se esplicito. SENZA le parole "
+    "della richiesta (\"fammi\", \"disegnami\", \"per favore\", \"ora\", \"dai\")."
 )
 
 
@@ -79,28 +80,37 @@ def configura_modello(modello) -> None:
 
 
 def richiesta_immagine_smart(testo: str) -> dict | None:
-    """Come `richiesta_immagine`, ma con il modello per la coda lunga.
+    """Riconoscimento con la regex, pulizia del prompt col modello.
 
-    Restituisce ``{"idea": ..., "regola": ...}`` o None. La regex resta il primo
-    passaggio; il modello interviene solo quando lei non ha capito la frase.
+    La regex decide se è una richiesta d'immagine (veloce, deterministica); il
+    modello pulisce il prompt (traduce in inglese, aggiunge inquadratura/posa,
+    toglie le parole della richiesta). Se il modello non c'è o fallisce, si
+    ripiega sull'idea grezza della regex (o su None).
     """
     esito = richiesta_immagine(testo)
     if esito is not None:
-        return esito
+        # Richiesta confermata: il modello la riscrive in un prompt pulito.
+        if _MODELLO is None:
+            return esito
+        try:
+            prompt = _prompt_da_modello(_MODELLO(testo))
+        except Exception:
+            prompt = ""
+        return {"idea": prompt or esito["idea"], "regola": esito["regola"]}
+    # La regex non l'ha capita: il modello decide da solo (coda lunga).
     if _MODELLO is None:
         return None
     try:
-        risposta = _MODELLO(testo)
+        prompt = _prompt_da_modello(_MODELLO(testo))
     except Exception:
         return None
-    prompt = _prompt_da_modello(risposta)
     if not prompt:
         return None
     return {"idea": prompt, "regola": "modello"}
 
 
 def chiama_ollama(testo: str, *, base_url: str = OLLAMA_URL,
-                  model: str = MODELLO_PROMPT, timeout_s: float = 12.0) -> str:
+                  model: str = MODELLO_PROMPT, timeout_s: float = 45.0) -> str:
     """Una chiamata diretta a Ollama: stream off, keep_alive corto.
 
     `keep_alive` corto è ciò che fa "scaricare" il modello dalla memoria dopo
