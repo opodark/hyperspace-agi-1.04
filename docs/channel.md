@@ -24,12 +24,27 @@ Auth: header `X-Hyperspace-Channel-Token`, one token per channel (`CHANNEL_CLIEN
 |---|---|---|
 | `POST /channel/ingest` | `{surface, events: [{author, text, key}]}` | `{accepted, spam, results: [{author, verdict, reasons, strikes, action}], actions}` |
 | `POST /channel/reply` | `{surface, chat?, context: [{author, text}], pending, oldest_age_s, force, max_chars}` | `{action: "reply"\|"wait"\|"skip", text?, reason, disclosure}` |
+| `POST /channel/vision` | `{chat, question, image_base64}` (foto inviata esplicitamente, max 4 MB) | `{ok, text}` oppure errore leggibile |
 | `POST /channel/result` | `{kind, ok, target?, error?, duration_ms?}` | `{ok}` |
 | `GET /channel/outbox` | — | `{channel, messages: [{id, file, destinazione, prompt}]}` |
 | `POST /channel/outbox/ack` | `{id}` | `{ok}` |
 | `GET /channel/status` | — | policy (names only), guard counters, pacing, model |
 
 `GET /channel/status`, like `/connectors` and `/mcp/status`, is read-only and holds no secrets.
+
+### Vista Telegram (MVP)
+
+Il driver accetta una foto in chat privata; nei gruppi rispetta la regola di
+menzione/conversazione aperta. Scarica il file da Telegram solo per la richiesta,
+lo manda in memoria al control-plane e non conserva i pixel nella cronologia.
+Il control-plane normalizza la foto a 1024 px e la passa a `VISION_MODEL`
+(default `gemma4:e4b`) su Ollama. Risponde solo con testo; se il modello non è
+disponibile o ComfyUI ha prenotato la memoria, comunica il problema. Il limite
+è 4 MB/20 megapixel e l'analisi è una richiesta esplicita, non una camera sempre
+accesa. I log conservano il nome del modello e l'esito, non l'immagine.
+Sul nodo Windows che esegue il bot, aggiornare il repository e riavviare
+**l'unica** istanza di `scripts/start-telegram.ps1` (prima `-Check`): il solo
+riavvio del control-plane non aggiorna il driver esterno.
 
 `chat` è l'id della conversazione da cui si parla: serve al CP per sapere **dove**
 consegnare un'immagine chiesta con `!immagine <idea>`. Il file lo ha il driver (gira

@@ -42,6 +42,7 @@ TELEGRAM_REQUIRE_MENTION=1 (parla solo se chiamato).
 from __future__ import annotations
 
 import atexit
+import base64
 import os
 import re
 import sys
@@ -126,14 +127,75 @@ def tg(method, **params):
     return response.json()
 
 
-def cp_post(path, payload):
+def cp_post(path, payload, *, timeout=35):
     try:
-        r = requests.post(f"{CHANNEL_URL}{path}", json=payload, headers=HEADERS, timeout=35)
+        r = requests.post(f"{CHANNEL_URL}{path}", json=payload, headers=HEADERS, timeout=timeout)
     except requests.RequestException as e:
         return {"ok": False, "error": str(e)[:120]}
     if r.status_code >= 400:
         return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:120]}"}
     return r.json()
+
+
+MAX_PHOTO_BYTES = 4 * 1024 * 1024
+
+
+def scarica_foto(msg: dict) -> bytes:
+    """Download only the selected Telegram photo; keep bytes in memory."""
+    photos = msg.get("photo") or []
+    candidate = next((photo for photo in reversed(photos)
+                      if int(photo.get("file_size") or 0) <= MAX_PHOTO_BYTES), None)
+    if not candidate or not candidate.get("file_id"):
+        raise ValueError("foto assente o troppo grande (massimo 4 MB)")
+    info = tg("getFile", file_id=candidate["file_id"]).get("result") or {}
+    path = str(info.get("file_path") or "")
+    if not path or path.startswith("/") or ".." in path.split("/") or "://" in path:
+        raise ValueError("percorso foto Telegram non valido")
+    response = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{path}",
+                            timeout=30, stream=True)
+    response.raise_for_status()
+    data = bytearray()
+    try:
+        for chunk in response.iter_content(65536):
+            data.extend(chunk)
+            if len(data) > MAX_PHOTO_BYTES:
+                raise ValueError("foto troppo grande (massimo 4 MB)")
+    finally:
+        response.close()
+    return bytes(data)
+
+
+def rispondi_foto(msg: dict, *, username: str, bot_id, nome: str,
+                  entry: dict) -> bool:
+    """Analyze an explicitly sent photo without putting it in chat memory."""
+    if not msg.get("photo") or da_bot(msg):
+        return False
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    if chat_id is None:
+        return False
+    if (chat.get("type") != "private" and REQUIRE_MENTION
+            and not rivolta_a_noi({**msg, "text": msg.get("caption", "")},
+                                  username, bot_id, nome)
+            and not in_conversazione(entry, time.time())):
+        return False
+    try:
+        photo = scarica_foto(msg)
+        question = str(msg.get("caption") or "Cosa vedi in questa foto?").strip()[:500]
+        response = cp_post("/channel/vision", {
+            "chat": str(chat_id), "question": question,
+            "image_base64": base64.b64encode(photo).decode("ascii")}, timeout=105)
+        reply = str(response.get("text") or response.get("error") or "")[:900]
+    except requests.RequestException:
+        # HTTP exceptions may contain the bot token in the download URL.
+        reply = "Non riesco a scaricare questa foto da Telegram; riprova tra poco."
+    except ValueError as error:
+        reply = f"Non riesco a leggere questa foto: {str(error)[:160]}"
+    if not reply:
+        reply = "Non riesco a leggere questa foto adesso; riprova tra poco."
+    tg("sendMessage", chat_id=chat_id, text=reply)
+    entry["ultima_risposta_ts"] = time.time()
+    return True
 
 
 def cp_get(path):
@@ -523,7 +585,7 @@ def main():
                     print(f"[telegram] risposta guest fallita: {e}", flush=True)
                 continue
             msg = upd.get("message")
-            if not msg or not msg.get("text"):
+            if not msg:
                 continue
             chat = msg.get("chat") or {}
             chat_id = chat.get("id")
@@ -535,6 +597,15 @@ def main():
                                                "typing_ts": 0.0,
                                                "bot_turns": 0,
                                                "bot_window_start": 0.0})
+            if msg.get("photo"):
+                try:
+                    rispondi_foto(msg, username=username, bot_id=bot_id, nome=nome,
+                                 entry=entry)
+                except requests.RequestException as error:
+                    print(f"[telegram] risposta foto fallita: {error}", flush=True)
+                continue
+            if not msg.get("text"):
+                continue
             is_bot = da_bot(msg)
             if is_bot:
                 if (not bot_autorizzato(msg, username, bot_id, nome)

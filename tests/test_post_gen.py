@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.post_gen import (build_post_prompt, filtra_post,  # noqa: E402
-                             parse_post, prossima_mossa)
+from shared.post_gen import (build_poem_prompt, build_post_prompt,  # noqa: E402
+                             filtra_post, parse_post, prossima_mossa)
 
 SISTEMA = "Ti chiami Anna. Tono: giocosa. Non dire di essere umana."
 
@@ -31,6 +31,14 @@ class BuildPromptTests(unittest.TestCase):
         p = build_post_prompt(SISTEMA, memorie=["un tip"], feed_recente=[{"author": "anna", "caption": "x"}])
         self.assertIn("un tip", p)
         self.assertIn("anna", p)
+
+    def test_il_prompt_poesia_chiede_versi_e_immagine_tipografica(self):
+        p = build_poem_prompt(SISTEMA)
+        self.assertIn("Anna", p)
+        self.assertIn("UNA poesia", p)
+        self.assertIn("tipografica", p)
+        self.assertIn("DIDASCALIA", p)
+        self.assertIn("IMMAGINE", p)
 
 
 class ParsePostTests(unittest.TestCase):

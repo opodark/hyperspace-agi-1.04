@@ -96,6 +96,21 @@ class InstagramMemory:
             self._contacts[str(scoped_id)] = row
             self._save()
 
+    def clear(self, scoped_id: str) -> bool:
+        """Azzera turni e riassunto di un contatto, per ripartire da zero."""
+        scoped_id = str(scoped_id or "")
+        with self._lock:
+            row = dict(self._contacts.get(scoped_id) or {})
+            if not row:
+                return False
+            row["turns"] = []
+            row["summary"] = ""
+            row["sequence"] = 0
+            row["updated_at"] = _now()
+            self._contacts[scoped_id] = row
+            self._save()
+            return True
+
     def stats(self) -> dict:
         with self._lock:
             rows = list(self._contacts.values())

@@ -47,6 +47,47 @@ class SenzaTokenTests(unittest.TestCase):
                 self.assertIn(mancante, esito.stdout + esito.stderr)
 
 
+class FotoTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.driver = carica_driver()
+
+    def test_foto_privata_usa_vision_e_non_il_batch_testuale(self):
+        driver = self.driver
+        calls = []
+        original_download, original_post, original_tg = (
+            driver.scarica_foto, driver.cp_post, driver.tg)
+        try:
+            driver.scarica_foto = lambda msg: b"jpeg"
+            driver.cp_post = lambda path, payload, **kw: (
+                calls.append((path, payload, kw)) or {"ok": True, "text": "Vedo un gatto."})
+            driver.tg = lambda method, **params: calls.append((method, params)) or {"ok": True}
+            entry = {}
+            self.assertTrue(driver.rispondi_foto(
+                {"photo": [{"file_id": "x", "file_size": 4}],
+                 "chat": {"id": 7, "type": "private"}, "caption": "Che animale è?"},
+                username=NOSTRO, bot_id=42, nome="aurora", entry=entry))
+            self.assertEqual(calls[0][0], "/channel/vision")
+            self.assertEqual(calls[0][1]["question"], "Che animale è?")
+            self.assertEqual(calls[1], ("sendMessage", {"chat_id": 7, "text": "Vedo un gatto."}))
+            self.assertIn("ultima_risposta_ts", entry)
+        finally:
+            driver.scarica_foto, driver.cp_post, driver.tg = (
+                original_download, original_post, original_tg)
+
+    def test_gruppo_non_indirizzato_non_scarica_la_foto(self):
+        driver = carica_driver(TELEGRAM_REQUIRE_MENTION="1")
+        with mock.patch.object(driver, "scarica_foto") as download:
+            self.assertFalse(driver.rispondi_foto(
+                {"photo": [{"file_id": "x"}], "chat": {"id": 7, "type": "group"}},
+                username=NOSTRO, bot_id=42, nome="aurora", entry={}))
+            download.assert_not_called()
+
+    def test_foto_troppo_grande_blocca_il_download(self):
+        with self.assertRaises(ValueError):
+            self.driver.scarica_foto({"photo": [{"file_id": "x", "file_size": 5 * 1024 * 1024}]})
+
+
 class MessaggiDiBotTests(unittest.TestCase):
     """Il ciclo A pubblica -> B legge -> B risponde -> A legge non deve esistere."""
 

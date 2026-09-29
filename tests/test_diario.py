@@ -23,6 +23,13 @@ class VoceTests(unittest.TestCase):
     def test_il_tipo_sconosciuto_cade_su_post(self):
         self.assertEqual(voce(id="x", author="anna", tipo="boh")["tipo"], "post")
 
+    def test_la_voce_poesia_resta_poesia(self):
+        self.assertEqual(voce(id="po1", author="anna", tipo="poesia", testo="versi")["tipo"],
+                         "poesia")
+
+    def test_la_voce_dialogo_resta_dialogo(self):
+        self.assertEqual(voce(id="d1", author="anna", tipo="dialogo")["tipo"], "dialogo")
+
     def test_il_testo_si_normalizza(self):
         v = voce(id="x", author="anna", testo="  ciao   mondo  ")
         self.assertEqual(v["testo"], "ciao mondo")

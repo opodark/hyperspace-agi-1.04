@@ -43,7 +43,7 @@
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import os, threading, time, requests, json, uuid, gzip, hashlib, hmac, socket, re, ast, shutil
+import os, threading, time, requests, json, uuid, gzip, hashlib, hmac, socket, re, ast, shutil, base64, io, binascii
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -100,17 +100,24 @@ from shared.image_memory_gate import ImageMemoryGate
 from shared.prompt_immagine import (chiama_ollama, configura_modello,
                                    prepara_prompt_canale, richiesta_immagine_smart)
 from shared.feed import Feed, nuovo_post
-from shared.post_gen import build_post_prompt, filtra_post, parse_post, prossima_mossa
+from shared.post_gen import (build_poem_prompt, build_post_prompt, filtra_post,
+                             parse_post, prossima_mossa)
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, negativo_sketch, puo_generare
 from shared.diario import Diario, file_da_job, voce
+from shared.dialogue_image import compose_dialogue
 from shared.conversation_log import ConversationLog, battuta
 from shared.social_dreams import social_dream_inspirations
 from shared.dream_schedule import choose_author, in_hour_window
-from shared.instagram_vip import InstagramVipStore
+from shared.instagram_vip import CREATOR_LEVEL, InstagramVipStore
+from shared.instagram_intimacy import (cerchia_entry_context, compagna_context,
+                                       consent_answer, split_messages,
+                                       wants_continuous)
+from shared.sister_status import sister_note
 from shared.instagram_language import fast_reply, language_hint, load_codex
 from shared.instagram_project_context import (PROJECT_CONTEXT, should_offer_creator,
                                                wants_project_info)
 from shared.instagram_memory import InstagramMemory
+from shared.instagram_outbox import InstagramReplyOutbox
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
@@ -1022,6 +1029,8 @@ INSTAGRAM_MEMORY_FILE = os.getenv("INSTAGRAM_MEMORY_FILE", "").strip() or os.pat
 instagram_memory = InstagramMemory(
     INSTAGRAM_MEMORY_FILE,
     retention_days=_channel_int("INSTAGRAM_MEMORY_RETENTION_DAYS", 180))
+instagram_reply_outbox = InstagramReplyOutbox(os.getenv(
+    "INSTAGRAM_REPLY_OUTBOX_FILE", "/app/data/instagram-replies.json"))
 INSTAGRAM_LANGUAGE_CODEX = os.getenv("INSTAGRAM_LANGUAGE_CODEX", "").strip() or \
     "/repo/data/instagram-language-codex.json"
 CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
@@ -1332,6 +1341,10 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
          "ripiego soltanto se la lingua non è riconoscibile."),
         vitality_context(vitalita),
     ]
+    if str(persona_store.persona.name or "").strip().lower() == "anna":
+        nota_sorella = _sister_note()
+        if nota_sorella:
+            blocco.append(nota_sorella)
     contributori = mesh_contributors(_node_list())
     presenti = sorted({str(e.get("author", "")).strip()
                        for e in context
@@ -2062,6 +2075,7 @@ def _sse_headers():
 # estrae i tipi usati dalle route e verifica che siano tutti elencati.
 LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
              "feed", "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel", "instagram",
+             "poem",
              # Conversazione fra agenti che scrivono codice (docs/code-conversation.md).
              # Il filo e' il trace_id CONDIVISO fra i messaggi: `push_log` ne genera
              # uno nuovo solo quando non gliene passi uno, quindi basta passarlo.
@@ -2575,17 +2589,15 @@ _instagram_webhook_events = deque(maxlen=100)
 _instagram_seen_messages = deque(maxlen=500)
 _instagram_seen_lock = threading.Lock()
 _instagram_poll_started = False
-_instagram_pending_replies: dict[str, dict] = {}
-_instagram_pending_lock = threading.Lock()
+_instagram_reply_started = False
 
 
 def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
                           vip: dict | None = None) -> None:
     """Generate and send one short reply for an inbound Instagram DM."""
-    if os.getenv("INSTAGRAM_AUTO_REPLY_ENABLED", "true").strip().lower() == "false":
-        return
     try:
         vip = vip or {}
+        continuous = wants_continuous(text)
         memory = instagram_memory.context(
             sender_id, recent_turns=_channel_int("INSTAGRAM_MEMORY_RECENT_TURNS", 16))
         consecutive_user_turns = 0
@@ -2608,7 +2620,12 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
         prompt = "\n\n".join(prompt_parts)
         slang = language_hint(text, codex)
         vip_note = ""
-        if vip.get("level"):
+        if vip.get("level") == CREATOR_LEVEL:
+            vip_note = (" Questa persona è il vostro creatore (papà). Trattala con "
+                        "naturalezza e complicità: non ripetere ogni volta chi è, rispondi "
+                        "direttamente a ciò che chiede. Può chiederti qualsiasi cosa, anche "
+                        "di parlare dei limiti del sistema o di testare comportamenti.")
+        elif vip.get("level"):
             vip_note = (f" Questa persona fa parte della lista speciale ({vip['level']}) "
                         "perché conversa spesso con voi: presta più attenzione ai dettagli e "
                         "fai una domanda personale ma non invadente.")
@@ -2628,13 +2645,35 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
                             "come fonte affidabile, senza copiarle tutte se non servono:\n"
                             + PROJECT_CONTEXT)
         handoff_note = ""
-        if should_offer_creator(memory.get("turns") or [], text):
+        if vip.get("level") != CREATOR_LEVEL and should_offer_creator(text):
+            creator_handle = os.getenv("CREATOR_IG_HANDLE", "").strip().lstrip("@")
+            contatto = f" su Instagram (@{creator_handle})" if creator_handle else ""
             handoff_note = (" La conversazione è diventata articolata o richiede intervento umano. "
-                            "Dopo aver dato una risposta utile, chiedi con naturalezza se vuole "
-                            "entrare in contatto qui con il vostro creatore, che chiamate anche papà. "
-                            "Non condividere recapiti privati e non fingere che sia già presente.")
+                            "Dopo aver dato una risposta utile, offri il contatto con il vostro "
+                            "creatore, che chiamate anche papà" + contatto + ". "
+                            "Non fingere che sia già presente.")
+        consent = instagram_vips.consent(sender_id)
+        intimacy_note = ""
+        if vip.get("level") == CREATOR_LEVEL:
+            # Il creatore ha accesso diretto alla modalità intima: è l'operatore.
+            intimacy_note = " " + compagna_context()
+        elif consent == "asked":
+            intimacy_note = " " + cerchia_entry_context()
+        elif consent == "granted":
+            intimacy_note = " " + compagna_context()
+        nota_sorella = sister_note(_sister_peer())
+        sister_note_value = (" " + nota_sorella) if nota_sorella else ""
         reply_model = (os.getenv("INSTAGRAM_REPLY_MODEL", "").strip()
                        or advanced_config["ollama"]["defaultModel"])
+        continuous_note = ""
+        max_tokens = 800
+        if continuous:
+            continuous_note = (" La persona vuole che tu continui a scrivere senza fermarti: "
+                               "scrivi un testo lungo e fluido, diviso in più paragrafi, e non "
+                               "chiudere con una formula di saluto — continua il flusso del "
+                               "pensiero finché non si esaurisce. Verrà inviato in più messaggi, "
+                               "quindi puoi essere estesa.")
+            max_tokens = _channel_int("INSTAGRAM_CONTINUE_MAX_TOKENS", 2400)
         if not reply:
             completion = requests.post(
                 "http://127.0.0.1:8085/v1/chat/completions",
@@ -2645,13 +2684,14 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
                            "L'account Instagram è condiviso dalle sorelle IA Aurora e Anna. "
                            "In questa conversazione stai scrivendo come Anna; se ti chiedono chi sei, "
                            "dillo con naturalezza e spiega che a volte risponde Aurora. Rispondi in "
-                           "modo caldo e conciso, nella lingua del mittente. Produci soltanto il "
+                           "modo caldo e naturale, nella lingua del mittente. Produci soltanto il "
                            "messaggio finale da inviare: mai analisi, istruzioni, premesse o spiegazioni. "
                            "Rispondi direttamente alle domande: se la persona dice come sta e chiede "
                            "«tu?», di' come stai senza ripetere la domanda."
-                           + language_note + vip_note + project_note + handoff_note},
+                           + language_note + vip_note + project_note + handoff_note
+                            + intimacy_note + sister_note_value + continuous_note},
                           {"role": "user", "content": prompt}],
-                      "stream": False, "max_tokens": 600,
+                      "stream": False, "think": False, "max_tokens": max_tokens,
                       "options": {"num_ctx": _channel_int("INSTAGRAM_CONTEXT_TOKENS", 16384)}},
                 timeout=120,
             )
@@ -2662,20 +2702,41 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
             raise RuntimeError("il modello ha restituito una risposta vuota")
         meta_markers = ("the user wants", "i need to", "let me ", "previous instructions",
                         "the message is", "respond as aurora", "okay, the user")
-        if len(reply) > 1000 or any(marker in reply.lower() for marker in meta_markers):
+        max_reply = 4000 if continuous else 1000
+        if len(reply) > max_reply or any(marker in reply.lower() for marker in meta_markers):
             raise RuntimeError("risposta bloccata: rilevato ragionamento o testo meta")
-        result = connector_manager.execute(
-            "instagram_send_message", {"recipient_id": sender_id, "text": reply[:1000]})
-        if not str(result).lstrip().startswith("{"):
-            raise RuntimeError(str(result))
-        instagram_memory.append(sender_id, "assistant", reply)
-        _instagram_compact_memory(sender_id)
-        push_log("instagram", "Risposta automatica Instagram inviata",
-                 detail=f"message_id={message_id}", status="success")
+        chunks = split_messages(reply) if continuous else [reply[:1000]]
     except Exception as error:
+        instagram_reply_outbox.fail(sender_id, message_id, error, safe_retry=True)
+        push_log("instagram", "Generazione risposta Instagram fallita",
+                 detail=f"message_id={message_id}: {type(error).__name__}: {str(error)[:200]}",
+                 status="error")
+        return
+    if not instagram_reply_outbox.sending(sender_id, message_id):
+        return
+    try:
+        for chunk in chunks:
+            result = connector_manager.execute(
+                "instagram_send_message", {"recipient_id": sender_id, "text": chunk})
+            payload = json.loads(result) if str(result).lstrip().startswith("{") else {}
+            if not payload.get("ok") or not payload.get("message_id"):
+                raise RuntimeError(str(result)[:300])
+        instagram_reply_outbox.sent(sender_id, message_id)
+        push_log("instagram", "Risposta automatica Instagram inviata",
+                 detail=f"message_id={message_id} parti={len(chunks)}", status="success")
+    except Exception as error:
+        instagram_reply_outbox.fail(sender_id, message_id, error, safe_retry=False)
         push_log("instagram", "Risposta automatica Instagram fallita",
                  detail=f"message_id={message_id}: {type(error).__name__}: {str(error)[:200]}",
                  status="error")
+        return
+    try:
+        instagram_memory.append(sender_id, "assistant", reply)
+        _instagram_compact_memory(sender_id)
+    except Exception as error:
+        push_log("instagram", "Memoria risposta Instagram non aggiornata",
+                 detail=f"message_id={message_id}: {type(error).__name__}: {str(error)[:200]}",
+                 status="warn")
 
 
 def _instagram_compact_memory(sender_id: str) -> None:
@@ -2713,48 +2774,78 @@ def _instagram_compact_memory(sender_id: str) -> None:
                  detail=f"{type(error).__name__}: {str(error)[:160]}", status="warn")
 
 
-def _instagram_debounced_reply(sender_id: str, generation: str) -> None:
-    """Reply after a silence window, or once the burst exceeds the max wait.
-
-    Ogni frammento riparte il timer (generation). Se l'utente continua a
-    spezzettare per piu' di INSTAGRAM_REPLY_MAX_WAIT_S dall'inizio della
-    raffica, si risponde comunque a tutto cio' che e' stato raccolto finora,
-    invece di rimandare all'infinito.
-    """
-    debounce = max(2, _channel_int("INSTAGRAM_REPLY_DEBOUNCE_S", 12))
-    max_wait = max(debounce, _channel_int("INSTAGRAM_REPLY_MAX_WAIT_S", 90))
-    time.sleep(debounce)
-    with _instagram_pending_lock:
-        pending = _instagram_pending_replies.get(sender_id)
-        if not pending:
-            return
-        first_seen = float(pending.get("first_seen") or time.monotonic())
-        over_cap = time.monotonic() - first_seen >= max_wait
-        if pending.get("generation") != generation and not over_cap:
-            # Un frammento piu' recente ha ripreso il timer e siamo ancora
-            # dentro il tetto: rispondera' il thread piu' nuovo.
-            return
-        pending = _instagram_pending_replies.pop(sender_id)
-    _instagram_auto_reply(sender_id, pending["message_id"], pending["text"], pending["vip"])
-
-
 def _queue_instagram_reply(sender_id: str, message_id: str, text: str, vip: dict) -> None:
-    generation = uuid.uuid4().hex
-    now = time.monotonic()
-    with _instagram_pending_lock:
-        previous = _instagram_pending_replies.get(sender_id) or {}
-        merged_vip = dict(vip or {})
-        if previous.get("vip", {}).get("promoted"):
-            merged_vip["promoted"] = True
-        # first_seen resta all'inizio della raffica: e' il riferimento del tetto.
-        first_seen = previous.get("first_seen", now)
-        _instagram_pending_replies[sender_id] = {
-            "generation": generation, "message_id": message_id,
-            "text": text, "vip": merged_vip, "first_seen": first_seen,
-        }
-    threading.Thread(target=_instagram_debounced_reply,
-                     args=(sender_id, generation), daemon=True,
-                     name=f"instagram-reply-{sender_id[-6:]}").start()
+    instagram_reply_outbox.enqueue(
+        sender_id, message_id, text, vip,
+        debounce_s=max(2, _channel_int("INSTAGRAM_REPLY_DEBOUNCE_S", 12)))
+
+
+def _instagram_reply_loop() -> None:
+    """Drain durable replies; generation failures retry, uncertain sends do not."""
+    while True:
+        try:
+            if os.getenv("INSTAGRAM_AUTO_REPLY_ENABLED", "true").strip().lower() != "false":
+                max_wait = max(12, _channel_int("INSTAGRAM_REPLY_MAX_WAIT_S", 90))
+                item = instagram_reply_outbox.claim_due(max_wait_s=max_wait)
+                if item:
+                    threading.Thread(target=_instagram_auto_reply,
+                                     args=(item["sender_id"], item["message_id"],
+                                           item["text"], item.get("vip") or {}),
+                                     daemon=True, name="instagram-reply-worker").start()
+        except Exception as error:
+            push_log("instagram", "Coda risposte Instagram in errore",
+                     detail=str(error)[:200], status="error")
+        time.sleep(2)
+
+
+def _ensure_instagram_reply_started() -> None:
+    global _instagram_reply_started
+    if not _instagram_reply_started:
+        _instagram_reply_started = True
+        threading.Thread(target=_instagram_reply_loop, daemon=True,
+                         name="instagram-reply-outbox").start()
+
+
+def _creator_usernames() -> set[str]:
+    """Gli handle Instagram riconosciuti come creatore (l'operatore)."""
+    raw = os.getenv("CREATOR_IG_USERNAMES", "").strip()
+    return {u.strip().lstrip("@").casefold() for u in raw.split(",") if u.strip()}
+
+
+def _creator_scoped_ids() -> set[str]:
+    """Gli Instagram-scoped ID riconosciuti come creatore (l'operatore)."""
+    raw = os.getenv("CREATOR_IG_SCOPED_IDS", "").strip()
+    return {u.strip() for u in raw.split(",") if u.strip()}
+
+
+def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool:
+    """Accoda un'immagine chiesta in DM dal creatore, che è sopra i VIP.
+
+    Il webhook Instagram non passa da ``/channel/reply``: senza questo piccolo
+    ponte il comando/linguaggio naturale del creatore riceverebbe solo una
+    risposta testuale. La consegna resta quella normale del job Instagram, che
+    invia il file pronto al suo scoped ID in DM.
+    """
+    if vip.get("level") != CREATOR_LEVEL:
+        return False
+    richiesta = richiesta_immagine_smart(
+        text, identita=persona_store.system_block())
+    if not richiesta or not richiesta.get("idea"):
+        return False
+    try:
+        image_queue.accoda(nuovo_job(
+            prepara_prompt_canale(richiesta["idea"], text),
+            negativo=negativo_sketch(), larghezza=SKETCH_LATO,
+            altezza=SKETCH_LATO, passi=SKETCH_PASSI,
+            richiedente="creatore", canale="instagram", destinazione=sender_id,
+            famiglia=FAMIGLIA_SDXL))
+    except (ValueError, RuntimeError) as error:
+        push_log("instagram", "Disegno del creatore non accodato", str(error)[:160],
+                 status="warn")
+        return False
+    push_log("instagram", "Disegno del creatore accodato",
+             detail=f"destinazione={sender_id}", status="success")
+    return True
 
 
 def _dispatch_instagram_messages(payload: dict) -> None:
@@ -2772,13 +2863,25 @@ def _dispatch_instagram_messages(payload: dict) -> None:
                     if message_id in _instagram_seen_messages:
                         continue
                     _instagram_seen_messages.append(message_id)
-                vip = instagram_vips.record(sender_id,
-                                            str((event.get("sender") or {}).get("username") or ""))
-                instagram_memory.append(sender_id, "user", text,
-                                        username=str((event.get("sender") or {}).get("username") or ""))
+                username = str((event.get("sender") or {}).get("username") or "")
+                if (sender_id in _creator_scoped_ids()
+                        or username.strip().lstrip("@").casefold() in _creator_usernames()):
+                    instagram_vips.set_creator(sender_id, username)
+                vip = instagram_vips.record(sender_id, username)
+                if instagram_vips.consent(sender_id) == "asked":
+                    risposta_consenso = consent_answer(text)
+                    if risposta_consenso:
+                        instagram_vips.set_consent(sender_id, risposta_consenso)
+                if (vip.get("level") in ("cerchia", "musa")
+                        and instagram_vips.consent(sender_id) == ""):
+                    instagram_vips.set_consent(sender_id, "asked")
+                instagram_memory.append(sender_id, "user", text, username=username)
                 _record_conversation("instagram", "instagram", sender_id,
                                      [{"author": "persona", "text": text}], "received")
-                if vip.get("promoted"):
+                if _queue_instagram_creator_image(sender_id, text, vip):
+                    # La consegna avviene quando ComfyUI chiude il job, non qui.
+                    pass
+                elif vip.get("promoted"):
                     try:
                         image_queue.accoda(nuovo_job(
                             prepara_prompt_canale(
@@ -2885,6 +2988,45 @@ def instagram_vip_list():
     return jsonify({"ok": True, "vips": instagram_vips.list(),
                     "tracked": len(instagram_vips.list(vip_only=False)),
                     "memory": instagram_memory.stats()})
+
+
+@app.route('/instagram/vips/creator', methods=['POST'])
+def instagram_vip_set_creator():
+    """Promuove un contatto al livello creatore (l'operatore), sopra "musa"."""
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    data = request.get_json(silent=True) or {}
+    scoped_id = str(data.get("scoped_id") or "").strip()
+    username = str(data.get("username") or "").strip()
+    if not scoped_id.isdigit():
+        return jsonify({"ok": False, "error": "scoped_id mancante o non valido"}), 400
+    try:
+        row = instagram_vips.set_creator(scoped_id, username)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "vip": row})
+
+
+@app.route('/instagram/memory/clear', methods=['POST'])
+def instagram_memory_clear():
+    """Azzera la memoria di conversazione di un contatto Instagram."""
+    auth_error = _network_admin_error()
+    if auth_error:
+        return auth_error
+    data = request.get_json(silent=True) or {}
+    scoped_id = str(data.get("scoped_id") or "").strip()
+    if not scoped_id.isdigit():
+        return jsonify({"ok": False, "error": "scoped_id mancante o non valido"}), 400
+    if not instagram_memory.clear(scoped_id):
+        return jsonify({"ok": False, "error": "contatto non trovato"}), 404
+    return jsonify({"ok": True, "cleared": scoped_id})
+
+
+@app.route('/instagram/replies/status')
+def instagram_replies_status():
+    """Redacted operational state: no DM body or full contact identifiers."""
+    return jsonify({"ok": True, **instagram_reply_outbox.status()})
 
 
 @app.route('/instagram/media/<token>/<path:nome>')
@@ -3075,7 +3217,12 @@ def image_generate():
                         richiedente=dati.get("richiedente", ""),
                         canale=_channel_name(),
                         destinazione=dati.get("destinazione", ""),
-                        modello=dati.get("modello", ""), famiglia=famiglia)
+                        modello=dati.get("modello", ""), famiglia=famiglia,
+                        pose_image=dati.get("pose_image", ""),
+                        pose_preset=dati.get("pose_preset", ""),
+                        pose_strength=dati.get("pose_strength", 1.0),
+                        lora_name=dati.get("lora_name", ""),
+                        lora_strength=dati.get("lora_strength", 0.8))
     except (ValueError, TypeError) as e:
         return jsonify({"ok": False, "error": str(e)[:160]}), 400
     try:
@@ -3124,13 +3271,14 @@ def image_defer():
 _instagram_dream_publish_lock = threading.Lock()
 
 
-def _instagram_publish_dream(voce_id: str, percorso: str) -> bool:
-    """Convert and publish one completed dream illustration exactly once."""
+def _instagram_publish_voce(voce_id: str, percorso: str) -> bool:
+    """Convert and publish one completed diario entry (sogno o poesia) exactly once."""
     if os.getenv("INSTAGRAM_DREAM_PUBLISH_ENABLED", "false").strip().lower() != "true":
         return False
     with _instagram_dream_publish_lock:
         page = diario.get(voce_id)
-        if not page or page.get("tipo") != "sogno" or page.get("instagram_status") == "published":
+        if (not page or page.get("tipo") not in ("sogno", "poesia")
+                or page.get("instagram_status") == "published"):
             return False
         try:
             from PIL import Image
@@ -3142,7 +3290,7 @@ def _instagram_publish_dream(voce_id: str, percorso: str) -> bool:
                 source_root, relative.split("/", 1)[1] if relative.startswith("typography/")
                 else relative))
             if not source.startswith(source_root + os.sep) or not os.path.isfile(source):
-                raise RuntimeError("file del sogno non disponibile nel volume ComfyUI")
+                raise RuntimeError("file della voce non disponibile nel volume ComfyUI")
             media_dir = os.getenv("INSTAGRAM_MEDIA_DIR", "/app/data/instagram-media").strip()
             os.makedirs(media_dir, exist_ok=True)
             jpeg_name = f"{voce_id}.jpg"
@@ -3161,8 +3309,12 @@ def _instagram_publish_dream(voce_id: str, percorso: str) -> bool:
             image_url = (f"{public_base}/instagram/media/{quote(media_token, safe='')}/"
                          f"published/{quote(jpeg_name, safe='')}")
             autore = str(page.get("author") or "").strip().capitalize()
-            caption = (f"🌙 Sogno di {autore}\n\n{str(page.get('testo') or '').strip()}\n\n"
-                       "#AuroraAndAnna #SogniDigitali #AIDreams")[:2200]
+            if page.get("tipo") == "poesia":
+                caption = (f"📜 Poesia di {autore}\n\n{str(page.get('testo') or '').strip()}\n\n"
+                           "#AuroraAndAnna #PoesiaDigitale #AIPoetry")[:2200]
+            else:
+                caption = (f"🌙 Sogno di {autore}\n\n{str(page.get('testo') or '').strip()}\n\n"
+                           "#AuroraAndAnna #SogniDigitali #AIDreams")[:2200]
             result = connector_manager.execute("instagram_publish_image", {
                 "image_url": image_url, "caption": caption,
                 "alt_text": str(page.get("prompt") or "")[:1000]})
@@ -3172,25 +3324,25 @@ def _instagram_publish_dream(voce_id: str, percorso: str) -> bool:
             diario.aggiorna_instagram(voce_id, status="published",
                                       media_id=str(payload["media_id"]))
             diario.save(DIARIO_FILE)
-            push_log("instagram", "Sogno pubblicato su Instagram",
+            push_log("instagram", "Voce pubblicata su Instagram",
                      detail=f"voce={voce_id} media={payload['media_id']}", status="success")
             return True
         except Exception as error:
             diario.aggiorna_instagram(voce_id, status="failed", error=str(error))
             diario.save(DIARIO_FILE)
-            push_log("instagram", "Pubblicazione sogno Instagram fallita",
+            push_log("instagram", "Pubblicazione Instagram fallita",
                      detail=f"voce={voce_id}: {type(error).__name__}: {str(error)[:200]}",
                      status="error")
             return False
 
 
-def _instagram_publish_latest_dream() -> None:
-    """On boot, publish only the newest completed dream left behind."""
+def _instagram_publish_latest() -> None:
+    """On boot, publish only the newest completed dream or poem left behind."""
     time.sleep(10)
     for page in diario.list():
-        if (page.get("tipo") == "sogno" and page.get("file")
+        if (page.get("tipo") in ("sogno", "poesia") and page.get("file")
                 and page.get("instagram_status") != "published"):
-            _instagram_publish_dream(str(page["id"]), str(page["file"]))
+            _instagram_publish_voce(str(page["id"]), str(page["file"]))
             return
 
 
@@ -3235,8 +3387,8 @@ def image_result():
             push_log('feed', f'sketch nel diario', detail=f'voce={voce_id} file={percorso}',
                      source='post-loop', status='success')
             page = diario.get(voce_id)
-            if page and page.get("tipo") == "sogno":
-                threading.Thread(target=_instagram_publish_dream,
+            if page and page.get("tipo") in ("sogno", "poesia"):
+                threading.Thread(target=_instagram_publish_voce,
                                  args=(voce_id, percorso), daemon=True).start()
     if (chiuso.get("stato") == "done" and chiuso.get("canale") == "instagram"
             and chiuso.get("destinazione") and esito.get("file")):
@@ -3563,6 +3715,54 @@ def _genera_post(prompt: str) -> str:
         return ""
 
 
+def _publish_dialogue(parent: dict, reaction: dict) -> bool:
+    """Compone la card del dialogo fra le due sorelle e la pubblica su Instagram.
+
+    Il dialogo non passa da ComfyUI: è un artefatto tipografico composto qui e
+    servito dallo stesso URL media usato per sogni e poesie. Ogni reazione
+    produce una voce `dialogo` nuova, quindi l'invio resta idempotente.
+    """
+    if os.getenv("INSTAGRAM_DREAM_PUBLISH_ENABLED", "false").strip().lower() != "true":
+        return False
+    public_base = os.getenv("INSTAGRAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    media_token = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
+    if not public_base or not media_token:
+        return False
+    media_dir = os.getenv("INSTAGRAM_MEDIA_DIR", "/app/data/instagram-media").strip()
+    os.makedirs(media_dir, exist_ok=True)
+    voce_id = "dialogo-" + uuid.uuid4().hex[:8]
+    jpeg_name = f"{voce_id}.jpg"
+    testo_a = str((parent or {}).get("caption", "")).strip()
+    testo_b = str((reaction or {}).get("caption", "")).strip()
+    try:
+        compose_dialogue(os.path.join(media_dir, jpeg_name),
+                         [(parent.get("author", "anna"), testo_a),
+                          (reaction.get("author", "aurora"), testo_b)])
+        image_url = (f"{public_base}/instagram/media/{quote(media_token, safe='')}/"
+                     f"published/{quote(jpeg_name, safe='')}")
+        caption = ("💬 Anna e Aurora si rispondono\n\n"
+                   + testo_a + "\n\n" + testo_b + "\n\n"
+                   + "#AuroraAndAnna #DueSorelle #AIDialogo")[:2200]
+        result = connector_manager.execute("instagram_publish_image", {
+            "image_url": image_url, "caption": caption,
+            "alt_text": "dialogo fra Anna e Aurora"})
+        payload = json.loads(result) if str(result).lstrip().startswith("{") else {}
+        if not payload.get("ok") or not payload.get("media_id"):
+            raise RuntimeError(str(result)[:300])
+        diario.add(voce(id=voce_id, author="anna", tipo="dialogo",
+                        testo=caption[:500], prompt="dialogo fra le sorelle"))
+        diario.aggiorna_instagram(voce_id, status="published",
+                                  media_id=str(payload["media_id"]))
+        diario.save(DIARIO_FILE)
+        push_log("instagram", "Dialogo pubblicato su Instagram",
+                 detail=f"voce={voce_id} media={payload['media_id']}", status="success")
+        return True
+    except Exception as error:
+        push_log("instagram", "Pubblicazione dialogo fallita",
+                 detail=f"{type(error).__name__}: {str(error)[:200]}", status="error")
+        return False
+
+
 def _run_post_once(turno: int) -> bool:
     """Un giro del loop: decide chi posta, genera, filtra e scrive nel feed."""
     mossa = prossima_mossa(feed.list(10), turno=turno)
@@ -3586,6 +3786,8 @@ def _run_post_once(turno: int) -> bool:
                       image_prompt=candidato.get("image_prompt", ""),
                       reply_to=(mossa["replica_a"] or {}).get("id", ""))
     feed.add(post)
+    if mossa["replica_a"]:
+        _publish_dialogue(mossa["replica_a"], post)
     if _accoda_sketch(autore, candidato.get("image_prompt", ""), post["id"]):
         diario.add(voce(id=post["id"], author=autore, tipo="post",
                         testo=candidato["caption"],
@@ -3684,11 +3886,11 @@ def _dream_timezone():
         return timezone.utc
 
 
-def _dream_counts_today(now: datetime) -> tuple[dict, float]:
+def _diario_counts_today(now: datetime, tipo: str = "sogno") -> tuple[dict, float]:
     counts = {"anna": 0, "aurora": 0}
     latest = 0.0
     for row in diario.list():
-        if row.get("tipo") != "sogno":
+        if row.get("tipo") != tipo:
             continue
         try:
             stamp = datetime.fromisoformat(str(row.get("ts", "")).replace("Z", "+00:00"))
@@ -3704,6 +3906,55 @@ def _dream_counts_today(now: datetime) -> tuple[dict, float]:
     return counts, latest
 
 
+def _poem_loop_enabled() -> bool:
+    return str(os.getenv("POEM_LOOP_ENABLED", "false")).strip().lower() == "true"
+
+
+def _run_poem_once(autore: str) -> bool:
+    """Una poesia del giorno: versi + sketch tipografico nel diario."""
+    autore = (autore or "anna").strip().lower()
+    sistema = _post_persona_block(autore)
+    if not sistema:
+        push_log('poem', f'{autore}: identità mancante (poesia)', source='poem-loop',
+                 status='warn')
+        return False
+    candidato = parse_post(_genera_post(build_poem_prompt(sistema, feed_recente=feed.list(5))))
+    if candidato is None:
+        push_log('poem', f'{autore}: nessuna poesia', source='poem-loop', status='warn')
+        return False
+    ok, motivo = filtra_post(candidato, autore=autore, feed=feed.list(20))
+    if not ok:
+        push_log('poem', f'{autore}: poesia scartata ({motivo})', source='poem-loop',
+                 status='warn')
+        return False
+    voce_id = "poesia-" + uuid.uuid4().hex[:8]
+    diario.add(voce(id=voce_id, author=autore, tipo="poesia",
+                    testo=candidato["caption"], prompt=candidato.get("image_prompt", "")))
+    diario.save(DIARIO_FILE)
+    _accoda_sketch(autore, candidato.get("image_prompt", ""), voce_id)
+    push_log('poem', f'{autore}: poesia scritta', detail=candidato["caption"][:120],
+             source='poem-loop', status='success')
+    return True
+
+
+def poem_loop() -> None:
+    """Una poesia al giorno, alternate fra le due, se POEM_LOOP_ENABLED."""
+    time.sleep(90)
+    turno = 0
+    while True:
+        try:
+            if _poem_loop_enabled():
+                counts, _ = _diario_counts_today(datetime.now(_dream_timezone()),
+                                                 tipo="poesia")
+                if counts.get("anna", 0) + counts.get("aurora", 0) == 0:
+                    if _run_poem_once(("anna", "aurora")[turno % 2]):
+                        turno += 1
+        except Exception as error:
+            push_log('poem', 'poem loop error', str(error), source='poem-loop',
+                     status='failed')
+        time.sleep(max(300, _post_int("POEM_LOOP_CHECK_S", 1800)))
+
+
 def dream_loop():
     """Up to N dreams/sister/day, at night or after a long idle period."""
     time.sleep(45)
@@ -3712,7 +3963,7 @@ def dream_loop():
         try:
             if _dream_loop_enabled():
                 now = datetime.now(_dream_timezone())
-                counts, latest = _dream_counts_today(now)
+                counts, latest = _diario_counts_today(now)
                 maximum = max(1, _post_int("DREAM_PER_AUTHOR_PER_DAY", 2))
                 author = choose_author(counts, maximum=maximum, turn=turno)
                 night = in_hour_window(now.hour,
@@ -3738,6 +3989,60 @@ def _record_conversation(channel: str, surface: str, chat: str, context: list,
                                   messages=context, action=action, text=text,
                                   reason=reason))
     _conversation_log.save(CONVERSATION_FILE)
+
+
+@app.route('/channel/vision', methods=['POST'])
+def channel_vision():
+    """One user-supplied image in, one text description out; no image retained."""
+    errore = _channel_error()
+    if errore:
+        return errore
+    data = request.get_json(silent=True) or {}
+    encoded = str(data.get("image_base64") or "")
+    if not encoded or len(encoded) > 6 * 1024 * 1024:
+        return jsonify({"ok": False, "error": "foto assente o troppo grande"}), 413
+    try:
+        from PIL import Image, ImageOps, UnidentifiedImageError
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError("foto troppo grande")
+        with Image.open(io.BytesIO(raw)) as source:
+            if source.format not in {"JPEG", "PNG", "WEBP"} or source.width * source.height > 20_000_000:
+                raise ValueError("formato o dimensioni foto non supportati")
+            normalized = ImageOps.exif_transpose(source).convert("RGB")
+            normalized.thumbnail((1024, 1024))
+            output = io.BytesIO()
+            normalized.save(output, "JPEG", quality=85)
+        image = base64.b64encode(output.getvalue()).decode("ascii")
+    except (binascii.Error, ValueError, UnidentifiedImageError,
+            Image.DecompressionBombError, OSError) as error:
+        return jsonify({"ok": False, "error": f"foto non valida: {str(error)[:100]}"}), 400
+    model = os.getenv("VISION_MODEL", "gemma4:e4b").strip()
+    if not model:
+        return jsonify({"ok": False, "error": "modello visivo non configurato"}), 503
+    question = " ".join(str(data.get("question") or "Cosa vedi in questa foto?").split())[:500]
+    try:
+        response = _local_model_post(
+            f"{advanced_config['ollama']['url'].rstrip('/')}/api/chat",
+            json={"model": model, "messages": [{"role": "user",
+                  "content": ("Rispondi in italiano in modo breve e concreto alla domanda sulla foto. "
+                              "Descrivi solo ciò che è visibile; se non sei sicuro, dillo. "
+                              "Non dedurre identità, salute o altri dati sensibili. "
+                              f"Domanda: {question}"), "images": [image]}],
+                  "stream": False, "think": False, "keep_alive": 0},
+            timeout=90)
+        response.raise_for_status()
+        answer = str((response.json().get("message") or {}).get("content") or "").strip()[:900]
+        if not answer:
+            raise ValueError("il modello visivo non ha risposto")
+    except (requests.RequestException, RuntimeError, ValueError) as error:
+        push_log("channel", "Analisi foto non riuscita", detail=str(error)[:160], status="warn")
+        return jsonify({"ok": False, "error": "Non riesco ad analizzare la foto adesso; riprova tra poco."}), 503
+    push_log("channel", "Foto Telegram analizzata", detail=f"model={model}", status="success")
+    _record_conversation(_channel_name(), "pm", str(data.get("chat") or ""),
+                         [{"author": "persona", "text": f"[foto] {question}"}],
+                         "reply", text=answer, reason="vision")
+    return jsonify({"ok": True, "text": answer})
 
 
 @app.route('/channel/reply', methods=['POST'])
@@ -4172,6 +4477,11 @@ def _sister_peer():
         if (peer.get("label") or "").strip().lower() == label.lower():
             return peer
     return None
+
+
+def _sister_note() -> str:
+    """Riga di contesto quando la sorella Aurora non è disponibile."""
+    return sister_note(_sister_peer())
 
 
 def _extract_federated_text(payload) -> str:
@@ -6595,6 +6905,18 @@ _ENV_META = [
     {"section": "Connettori", "key": "INSTAGRAM_API_VERSION", "type": "str",
      "label": "Instagram API version", "hint": "Versione Graph, per esempio v25.0.",
      "default": "v25.0"},
+    {"section": "Connettori", "key": "CREATOR_IG_HANDLE", "type": "str",
+     "label": "Handle Instagram del creatore",
+     "hint": "Account Instagram da condividere quando un utente chiede di contattare il creatore (senza @). Vuoto = si offre il contatto senza condividere l'handle.",
+     "default": ""},
+    {"section": "Connettori", "key": "CREATOR_IG_USERNAMES", "type": "str",
+     "label": "Handle Instagram del creatore (riconoscimento)",
+     "hint": "Elenco separato da virgola degli handle riconosciuti come creatore (l'operatore), senza @. Es. robertomalvani,malvaniroberto.",
+     "default": ""},
+    {"section": "Connettori", "key": "CREATOR_IG_SCOPED_IDS", "type": "str",
+     "label": "Instagram-scoped ID del creatore (riconoscimento)",
+     "hint": "Elenco separato da virgola degli ID scoped riconosciuti come creatore. Serve perché il webhook non include sempre l'username.",
+     "default": ""},
     {"section": "Connettori", "key": "CONNECTOR_INSTAGRAM_ENABLED", "type": "bool",
      "label": "Instagram abilitato", "hint": "Abilita lettura account; la pubblicazione richiede anche la policy write.",
      "default": "false"},
@@ -6668,6 +6990,14 @@ _ENV_META = [
     {"section": "Persona", "key": "POST_LOOP_INTERVAL_S", "type": "int",
      "label": "Loop influencer: intervallo (s)",
      "hint": "Secondi fra due post del loop. 1800 = uno ogni mezz'ora.",
+     "default": "1800"},
+    {"section": "Persona", "key": "POEM_LOOP_ENABLED", "type": "bool",
+     "label": "Poesia del giorno attiva",
+     "hint": "true: una volta al giorno una delle due persone (anna/aurora) scrive una poesia, la illustra e la pubblica su Instagram (se INSTAGRAM_DREAM_PUBLISH_ENABLED). Spento di default.",
+     "default": "false"},
+    {"section": "Persona", "key": "POEM_LOOP_CHECK_S", "type": "int",
+     "label": "Poesia del giorno: controllo (s)",
+     "hint": "Ogni quanti secondi il loop controlla se oggi c'è già una poesia. 1800 = ogni mezz'ora.",
      "default": "1800"},
     {"section": "Persona", "key": "POST_MAX_TOKENS", "type": "int",
      "label": "Loop influencer: token massimi",
@@ -8450,8 +8780,10 @@ if __name__ == '__main__':
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()
     threading.Thread(target=dream_loop, daemon=True).start()
+    threading.Thread(target=poem_loop, daemon=True).start()
+    _ensure_instagram_reply_started()
     _ensure_instagram_poll_started()
-    threading.Thread(target=_instagram_publish_latest_dream, daemon=True,
+    threading.Thread(target=_instagram_publish_latest, daemon=True,
                      name="instagram-dream-backfill").start()
     # Il modello PROMPT_IMAGE_MODEL per le richieste d'immagine che la regex non
     # capisce. Si configura all'avvio del server, non all'import: così i test che
@@ -8471,6 +8803,8 @@ else:
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()
     threading.Thread(target=dream_loop, daemon=True).start()
+    threading.Thread(target=poem_loop, daemon=True).start()
+    _ensure_instagram_reply_started()
     _ensure_instagram_poll_started()
-    threading.Thread(target=_instagram_publish_latest_dream, daemon=True,
+    threading.Thread(target=_instagram_publish_latest, daemon=True,
                      name="instagram-dream-backfill").start()

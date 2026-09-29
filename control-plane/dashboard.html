@@ -164,7 +164,8 @@ main{padding:18px 20px;display:grid}
 .tb-code_verdict{background:var(--success-bg);color:var(--success)}
 .sbadge{display:inline-flex;padding:2px 7px;border-radius:99px;font-size:.75rem;font-weight:700;text-transform:uppercase;white-space:nowrap}
 .st-success{background:var(--success-bg);color:var(--success)}
-.st-failed{background:var(--error-bg);color:var(--error)}
+.st-failed,.st-error{background:var(--error-bg);color:var(--error)}
+.st-warning,.st-warn{background:var(--warning-bg);color:var(--warning)}
 .st-pending,.st-info{background:var(--info-bg);color:var(--info)}
 .log-row .summary{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:8px}
 .log-row .nc{color:var(--text-muted);font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -414,15 +415,17 @@ main,.panel,.card{min-width:0}
     <button class="lt" onclick="setTab('connection_test',this)">&#128268; Connection</button>
     <button class="lt" onclick="setTab('inter_node_message',this)">&#128225; Node Comm</button>
     <button class="lt" onclick="setTab('dream',this)">&#128173; Dreams</button>
+    <button class="lt" onclick="setTab('instagram',this)">Instagram DM</button>
     <button class="lt" onclick="setTab('node_chat',this)">&#128172; Chat</button>
     <button class="lt" onclick="setTab('mesh_event',this)">&#127760; Mesh</button>
     <button class="lt" onclick="setTab('memory_sync',this)" style="color:var(--memsync)">&#129504; Memory Sync</button>
     <button class="lt" onclick="setTab('code',this)">&#128187; Code</button>
     <button class="lt" onclick="setTab('system',this)">&#9881;&#65039; System</button>
   </div>
+  <div id="instagramReplyStatus" style="padding:10px 14px;color:var(--text-muted);font-size:.8rem">DM Instagram: caricamento stato…</div>
   <div class="filter-row">
     <input class="inp" id="fNode" placeholder="Filter node..." oninput="refreshLogs()" style="width:150px"/>
-    <select class="sel" id="fStatus" onchange="refreshLogs()"><option value="">All</option><option>success</option><option>failed</option><option>warning</option><option>pending</option><option>info</option></select>
+    <select class="sel" id="fStatus" onchange="refreshLogs()"><option value="">All</option><option>success</option><option>error</option><option>warn</option><option>failed</option><option>warning</option><option>pending</option><option>info</option></select>
     <input class="inp" id="fQ" placeholder="Search..." oninput="refreshLogs()" style="flex:1;min-width:140px"/>
     <label style="display:flex;align-items:center;gap:5px;font-size:.75rem;color:var(--text-muted);cursor:pointer"><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
     <button class="btn btn-success btn-sm" onclick="exportLogs('json')">&#8659; JSON</button>
@@ -1979,15 +1982,17 @@ async function refreshLogs(){
 }
 function renderLogs(logs,total){
   var body=document.getElementById('logBody');
+  var openRows=new Set(Array.from(body.querySelectorAll('.detail-row.open')).map(function(el){return el.id}));
   document.getElementById('logCount').textContent=logs.length+' events';
   if(total!==undefined)document.getElementById('logTotal').textContent='('+total+' total)';
   document.getElementById('logLast').textContent='Updated '+new Date().toISOString().slice(11,19)+' UTC';
   if(!logs.length){body.innerHTML='<div class="log-empty">No events.</div>';return;}
-  var stEmoji={success:'&#10003;',failed:'&#10007;',warning:'&#9888;',pending:'&#8987;',info:'&#9432;'};
+  var stEmoji={success:'&#10003;',failed:'&#10007;',error:'&#10007;',warning:'&#9888;',warn:'&#9888;',pending:'&#8987;',info:'&#9432;'};
   body.innerHTML=logs.map(function(l,i){
     var src=l.sourceNode||l.source||'--';
     var tgt=l.targetNode||l.target||'--';
-    return '<div class="log-row" data-lid="ld'+i+'">'
+    var rowId='ld'+String(l.id||l.log_id||i).replace(/[^a-zA-Z0-9_-]/g,'');
+    return '<div class="log-row" data-lid="'+rowId+'">'
       +'<span class="ts">'+escH((l.ts||'').replace('T',' ').slice(0,19))+'</span>'
       +'<span><span class="tbadge tb-'+(l.type||'system')+'">'+escH((l.type||'system').replace(/_/g,' '))+'</span></span>'
       +'<span class="nc">'+escH(src)+'</span>'
@@ -1995,10 +2000,26 @@ function renderLogs(logs,total){
       +'<span><span class="sbadge st-'+(l.status||'info')+'">'+(stEmoji[l.status||'info']||'')+' '+escH(l.status||'info')+'</span></span>'
       +'<span class="summary">'+escH(l.summary||'')+'</span>'
       +'</div>'
-      +'<div class="detail-row" id="ld'+i+'"><b>TraceID:</b> '+escH(l.traceId||l.trace_id||'')+'&nbsp;|&nbsp;<b>ID:</b> '+escH(l.id||l.log_id||'')+'&nbsp;<b>Detail:</b> '+escH(l.detail||'--')+'</div>';
+      +'<div class="detail-row'+(openRows.has(rowId)?' open':'')+'" id="'+rowId+'"><b>TraceID:</b> '+escH(l.traceId||l.trace_id||'')+'&nbsp;|&nbsp;<b>ID:</b> '+escH(l.id||l.log_id||'')+'&nbsp;<b>Detail:</b> '+escH(l.detail||'--')+'</div>';
   }).join('');
   if(document.getElementById('autoScroll').checked)body.scrollTop=body.scrollHeight;
 }
+async function refreshInstagramReplies(){
+  var el=document.getElementById('instagramReplyStatus');
+  try{
+    var data=await(await fetch('/instagram/replies/status')).json();
+    var c=data.counts||{};
+    var active=(c.queued||0)+(c.retry||0)+(c.generating||0)+(c.sending||0);
+    var recent=(data.items||[]).slice(0,6).map(function(item){
+      return escH(item.contact)+' '+escH(item.status)+' · tentativi '+escH(item.attempts)
+        +(item.error?' · '+escH(item.error):'');
+    });
+    el.innerHTML='DM Instagram — in attesa: '+active+' · da verificare: '+(c.needs_review||0)
+      +' · inviati: '+(c.sent||0)+(recent.length?'<div style="margin-top:5px">'+recent.join('<br>')+'</div>':'');
+  }catch(e){el.textContent='DM Instagram: stato non disponibile';}
+}
+refreshInstagramReplies();
+setInterval(refreshInstagramReplies,5000);
 function exportLogs(fmt){
   var node=document.getElementById('fNode').value.trim();
   var status=document.getElementById('fStatus').value;

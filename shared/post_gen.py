@@ -68,6 +68,31 @@ def build_post_prompt(sistema: str, *, memorie=(), feed_recente=(),
     return "\n".join(righe)
 
 
+def build_poem_prompt(sistema: str, *, feed_recente=()) -> str:
+    """Il prompt che chiede alla persona di scrivere UNA poesia per la vetrina.
+
+    Diverso da `build_post_prompt`: qui la poesia è il contenuto, non una
+    possibilità. I versi stanno per intero nella DIDASCALIA; l'IMMAGINE deve
+    essere tipografica e riportare una frase breve fra virgolette, così il
+    lettore può leggerla anche se il disegno usa caratteri distorti.
+    """
+    righe = [str(sistema or "").strip(),
+             "",
+             "Devi scrivere UNA poesia per la vetrina: versi brevi, nel tuo tono.",
+             "La poesia sta per intero nella DIDASCALIA (i versi esatti).",
+             "L'IMMAGINE deve essere tipografica: riporta una frase breve della poesia",
+             "tra virgolette, così il lettore può leggerla anche se il disegno usa",
+             "caratteri fantastici o distorti."]
+    if feed_recente:
+        righe += ["", "Poesie recenti della vetrina (per non ripeterti):",
+                  *[f"- [{p.get('author', '?')}] {p.get('caption', '')}" for p in feed_recente[:5]]]
+    righe += ["",
+              "Rispondi SOLO in questo formato:",
+              "DIDASCALIA: <il testo della poesia>",
+              "IMMAGINE: <idea per l'immagine tipografica>"]
+    return "\n".join(righe)
+
+
 def parse_post(testo: str) -> dict | None:
     """Risposta del modello -> {caption, image_prompt} oppure None.
 

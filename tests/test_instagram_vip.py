@@ -21,3 +21,37 @@ def test_store_promotes_once_and_persists(tmp_path):
     assert events[4]["promoted"] is True
     assert events[5]["promoted"] is False
     assert InstagramVipStore(str(path)).list()[0]["messages"] == 6
+
+
+def test_ingresso_nella_cerchia_intima_e_consenso_persistente(tmp_path):
+    path = tmp_path / "vips.json"
+    store = InstagramVipStore(str(path))
+    events = [store.record("42", "bianca") for _ in range(15)]
+    assert events[-1]["entered_intimate"] is True
+    assert store.consent("42") == ""
+
+    store.set_consent("42", "granted")
+    assert store.consent("42") == "granted"
+    assert InstagramVipStore(str(path)).consent("42") == "granted"
+
+
+def test_entered_intimate_non_ripete_al_livello_successivo(tmp_path):
+    path = tmp_path / "vips.json"
+    store = InstagramVipStore(str(path))
+    events = [store.record("7", "carla") for _ in range(15)]
+    assert events[-1]["entered_intimate"] is True   # vip -> cerchia
+    events = [store.record("7", "carla") for _ in range(15)]
+    assert events[-1]["entered_intimate"] is False  # cerchia -> musa, già dentro
+
+
+def test_il_creatore_non_si_degrada_e_non_entra_nel_consenso(tmp_path):
+    path = tmp_path / "vips.json"
+    store = InstagramVipStore(str(path))
+    store.set_creator("99", "papa")
+    assert store.list(vip_only=False)[0]["level"] == "creatore"
+    for _ in range(40):
+        store.record("99", "papa")
+    assert store.list(vip_only=False)[0]["level"] == "creatore"
+    # il creatore è sopra "musa", non entra mai nel flusso del consenso
+    assert store.consent("99") == ""
+    assert InstagramVipStore(str(path)).list(vip_only=False)[0]["level"] == "creatore"

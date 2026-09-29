@@ -11,6 +11,14 @@ from datetime import datetime, timezone
 
 LEVELS = ((30, "musa"), (15, "cerchia"), (5, "vip"))
 
+# Livelli che costituiscono la "cerchia più stretta": l'ingresso in questi
+# livelli apre la possibilità della modalità intima (sempre con consenso).
+INTIMATE_LEVELS = ("cerchia", "musa")
+
+# Il livello del creatore (l'operatore): sopra "musa", assegnato a mano, mai
+# derivato dal conteggio dei messaggi e mai degradato da `record`.
+CREATOR_LEVEL = "creatore"
+
 
 def level_for(messages: int) -> str:
     for threshold, name in LEVELS:
@@ -52,7 +60,11 @@ class InstagramVipStore:
             row = dict(self._people.get(scoped_id) or {})
             before = int(row.get("messages", 0))
             after = before + 1
-            old_level, new_level = level_for(before), level_for(after)
+            old_level = str(row.get("level") or level_for(before))
+            new_level = level_for(after)
+            # Il creatore non si degrada: il suo livello è assegnato a mano.
+            if row.get("level") == CREATOR_LEVEL:
+                new_level = CREATOR_LEVEL
             row.update({"scoped_id": scoped_id, "messages": after,
                         "level": new_level, "last_seen": now})
             if username:
@@ -62,9 +74,54 @@ class InstagramVipStore:
             if promoted:
                 milestones.append(after)
             row["milestones"] = milestones
+            # Ingresso nella cerchia più stretta: solo il primo varco conta.
+            # cerchia -> musa non è un nuovo ingresso, è già dentro.
+            entered_intimate = (new_level in INTIMATE_LEVELS
+                                and old_level not in INTIMATE_LEVELS)
             self._people[scoped_id] = row
             self.save()
-            return {**row, "promoted": promoted}
+            return {**row, "promoted": promoted, "entered_intimate": entered_intimate}
+
+    def consent(self, scoped_id: str) -> str:
+        """Stato del consenso per contatto: '' | 'asked' | 'granted' | 'denied'."""
+        scoped_id = str(scoped_id or "")
+        with self._lock:
+            return str((self._people.get(scoped_id) or {}).get("consent") or "")
+
+    def set_consent(self, scoped_id: str, status: str) -> None:
+        scoped_id = str(scoped_id or "")
+        if not scoped_id.isdigit():
+            return
+        status = str(status or "")
+        with self._lock:
+            row = dict(self._people.get(scoped_id) or {})
+            if not row:
+                return
+            row["consent"] = status
+            row["scoped_id"] = scoped_id
+            self._people[scoped_id] = row
+            self.save()
+
+    def set_creator(self, scoped_id: str, username: str = "") -> dict:
+        """Promuove un contatto al livello creatore (l'operatore), sopra "musa".
+
+        Assegnato a mano: il creatore non dipende dal conteggio dei messaggi e
+        `record` non lo degrada mai.
+        """
+        scoped_id = str(scoped_id or "")
+        if not scoped_id.isdigit():
+            raise ValueError("Instagram scoped ID non valido")
+        with self._lock:
+            row = dict(self._people.get(scoped_id) or {})
+            row["scoped_id"] = scoped_id
+            if username:
+                row["username"] = str(username).lstrip("@")[:64]
+            row["level"] = CREATOR_LEVEL
+            row.setdefault("messages", 0)
+            row["milestones"] = [5, 15, 30]
+            self._people[scoped_id] = row
+            self.save()
+            return dict(row)
 
     def list(self, *, vip_only: bool = True) -> list[dict]:
         with self._lock:

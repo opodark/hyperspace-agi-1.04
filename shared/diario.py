@@ -18,7 +18,7 @@ import os
 from datetime import datetime, timezone
 
 MAX_VOCI = 200
-TIPI = ("post", "sogno")
+TIPI = ("post", "sogno", "poesia", "dialogo")
 MAX_TESTO_CHARS = 500
 MAX_PROMPT_CHARS = 400
 

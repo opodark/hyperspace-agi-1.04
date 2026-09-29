@@ -43,23 +43,18 @@ _PROJECT_RE = re.compile(
     r"come [eè] fatt[oa] il chatbot|intelligenza artificiale|agenti? ia|codice|"
     r"open source|hip)\b", re.IGNORECASE)
 
+# Solo una richiesta ESPLICITA di contatto con il creatore: un "bug" o una
+# "configurazione" citati per caso non devono far condividere l'handle.
 _HANDOFF_RE = re.compile(
-    r"\b(creatore|sviluppatore|responsabile|proprietario|pap[aà]|contatt(?:o|are)|"
-    r"collabor(?:are|azione)|partnership|preventivo|contratto|problema tecnico|bug|"
-    r"integrazione|installazione|configurazione)\b", re.IGNORECASE)
+    r"\b(creatore|sviluppatore|responsabile|proprietario|pap[aà]|contatt\w*|"
+    r"collabor\w*|partnership|preventivo|contratto|parlare\s+con)\b",
+    re.IGNORECASE)
 
 
 def wants_project_info(text: str) -> bool:
     return bool(_PROJECT_RE.search(str(text or "")))
 
 
-def should_offer_creator(turns: list[dict], text: str) -> bool:
-    """Suggest a human handoff after explicit or sustained complex discussion."""
-    text = str(text or "")
-    if _HANDOFF_RE.search(text):
-        return True
-    user_texts = [str(t.get("text") or "") for t in turns if t.get("role") == "user"]
-    recent = user_texts[-4:]
-    total = sum(len(item) for item in recent)
-    questions = sum(item.count("?") for item in recent)
-    return len(recent) >= 3 and (total >= 320 or questions >= 3)
+def should_offer_creator(text: str) -> bool:
+    """True solo quando la persona chiede esplicitamente il creatore/contatto."""
+    return bool(_HANDOFF_RE.search(str(text or "")))

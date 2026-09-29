@@ -27,3 +27,14 @@ def test_compaction_keeps_new_turns_and_summary(tmp_path):
     context = memory.context("111", recent_turns=10)
     assert context["summary"] == "Ama parlare del tempo."
     assert context["turns"][-1]["text"] == "arrivato durante il riassunto"
+
+
+def test_clear_azzera_turni_e_riassunto(tmp_path):
+    memory = InstagramMemory(str(tmp_path / "memory.json"))
+    memory.append("111", "user", "prima")
+    memory.apply_summary("111", "un riassunto", 1)
+    assert memory.clear("111") is True
+    context = memory.context("111")
+    assert context["turns"] == []
+    assert context["summary"] == ""
+    assert memory.clear("999") is False

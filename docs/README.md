@@ -26,3 +26,4 @@ Architecture and deployment notes for HyperSpace-AGI. Mission, lexicon and phase
 - [architecture.md](architecture.md) — core layers (authority, control plane, node/worker, registry, memory graph, infra UI).
 - [network-profiles.md](network-profiles.md) — Enterprise Local vs Public Hub deployment profiles.
 - [web-node.md](web-node.md) — browser-first worker path design intent (see also [web-node/README.md](../web-node/README.md) for the fuller technical spec and current implementation status).
+- [growth-strategy.md](growth-strategy.md) — come Aurora e Anna passano da presenza privata a presenza seguita: posizionamento, canali, serie di contenuti, funnel e metriche.

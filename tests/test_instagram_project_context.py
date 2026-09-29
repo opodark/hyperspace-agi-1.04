@@ -10,11 +10,12 @@ class InstagramProjectContextTests(unittest.TestCase):
         self.assertTrue(wants_project_info("Come siete fatte come chatbot?"))
         self.assertFalse(wants_project_info("Che musica ascolti?"))
 
-    def test_handoff_esplicito_o_conversazione_articolata(self):
-        self.assertTrue(should_offer_creator([], "Vorrei parlare con il creatore"))
-        turns = [{"role": "user", "text": "x" * 120} for _ in range(3)]
-        self.assertTrue(should_offer_creator(turns, turns[-1]["text"]))
-        self.assertFalse(should_offer_creator([{"role": "user", "text": "ciao"}], "ciao"))
+    def test_handoff_solo_se_richiesto(self):
+        self.assertTrue(should_offer_creator("Vorrei parlare con il creatore"))
+        self.assertTrue(should_offer_creator("Come posso contattarti, papà?"))
+        # una conversazione lunga o un problema tecnico NON è una richiesta
+        self.assertFalse(should_offer_creator("Ho un bug e una configurazione da sistemare"))
+        self.assertFalse(should_offer_creator("ciao"))
 
 
 if __name__ == "__main__":
