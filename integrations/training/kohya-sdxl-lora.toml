@@ -1,0 +1,38 @@
+# HyperSpace identity LoRA profile for SDXL/Pony checkpoints.
+# Paths are overridden by train-kohya.sh, so this file is portable.
+network_module = "networks.lora"
+network_dim = 32
+network_alpha = 16
+resolution = "1024,1024"
+enable_bucket = true
+bucket_no_upscale = true
+min_bucket_reso = 512
+max_bucket_reso = 1536
+bucket_reso_steps = 64
+train_batch_size = 1
+gradient_accumulation_steps = 4
+max_train_epochs = 10
+learning_rate = 0.0001
+unet_lr = 0.0001
+text_encoder_lr = 0.000005
+lr_scheduler = "cosine"
+lr_warmup_steps = 0
+optimizer_type = "AdamW"
+mixed_precision = "fp16"
+save_precision = "fp16"
+gradient_checkpointing = true
+cache_latents = true
+cache_latents_to_disk = true
+caption_extension = ".txt"
+shuffle_caption = true
+keep_tokens = 1
+seed = 29092026
+save_model_as = "safetensors"
+save_every_n_epochs = 1
+sample_every_n_epochs = 1
+sample_sampler = "euler_a"
+max_token_length = 225
+sdpa = true
+xformers = false
+lowram = true
+
