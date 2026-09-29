@@ -24,14 +24,14 @@ def generate(payload):
     return scope['image_generate']()
 
 
-def test_sdxl_api_uses_realvis_and_appropriate_defaults():
+def test_sdxl_api_uses_cyberrealistic_and_appropriate_defaults():
     result, status = generate({'prompt': 'a lighthouse', 'famiglia': FAMIGLIA_SDXL})
     assert status == 201
     job = result['job']
     assert job['famiglia'] == FAMIGLIA_SDXL
     graph = workflow(job)
     assert graph['451']['class_type'] == 'CheckpointLoaderSimple'
-    assert graph['458']['inputs']['steps'] == 28
+    assert graph['458']['inputs']['steps'] == 30
     assert graph['456']['inputs']['width'] == 1024
     assert 'bad anatomy' in job['negativo']
     assert job['modello_effettivo'] == graph['451']['inputs']['ckpt_name']

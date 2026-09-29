@@ -50,7 +50,7 @@ class JobSketchTests(unittest.TestCase):
         self.assertIn("schizzo", job["prompt"])
 
     def test_il_negativo_non_e_vuoto(self):
-        # RealVisXL usa il negativo di qualità (anatomia), non filtri di contenuto.
+        # CyberRealistic Pony usa il negativo di qualità, non filtri di contenuto.
         job = job_sketch("un gatto")
         self.assertIn("bad anatomy", job["negativo"])
 

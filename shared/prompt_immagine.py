@@ -20,10 +20,11 @@ import re
 
 from shared.image_jobs import richiesta_immagine
 
-# Il modello piccolo e per quanto resta in RAM dopo l'uso. `keep_alive` corto
-# perché il Mac ha 16 GB e questo modello vive accanto a SDXL-Turbo e alla
-# persona (8B): una volta usato si scarica in fretta.
-MODELLO_PROMPT = os.getenv("PROMPT_IMAGE_MODEL", "qwen3-8b-abliterated")
+# Il modello che classifica e traduce la richiesta e per quanto resta in RAM
+# dopo l'uso. `keep_alive` corto perché sul Mac condivide la memoria con SDXL:
+# una volta usato si scarica in fretta.
+MODELLO_PROMPT = os.getenv(
+    "PROMPT_IMAGE_MODEL", "huihui_ai/gemma-4-abliterated:12b")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 KEEP_ALIVE_S = 60
 

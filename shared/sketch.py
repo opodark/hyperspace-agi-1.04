@@ -25,10 +25,9 @@ STILE_SKETCH = (
     "tratto veloce, bozza d'artista"
 )
 
-# Passi e lato: RealVisXL è un SDXL fotorealistico (non distillato) a 1024×1024.
-# 28 passi danno anatomia decente (mani/visi/intime) su MPS; il costo è ~8-10
-# minuti a immagine invece dei ~66s di Turbo.
-SKETCH_PASSI = 28
+# CyberRealistic Pony richiede 30+ passi; 30 è il minimo consigliato e contiene
+# il costo su MPS. Il lato resta quadrato per compatibilità con tutti i canali.
+SKETCH_PASSI = 30
 SKETCH_LATO = 1024
 SKETCH_CANALE = "feed"
 SKETCH_PER_DAY = 4

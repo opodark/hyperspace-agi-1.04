@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT))
 
 from shared.image_jobs import (DEFAULT_CLAIM_TTL_S, DEFAULT_JOB_TTL_S,  # noqa: E402
                                LIMITE_LATO, ImmagineQueue,
-                               immagini_da_history, nuovo_job, workflow)
+                               immagini_da_history, nuovo_job,
+                               scegli_pose_preset, workflow)
 
 
 class OrologioFinto:
@@ -287,10 +288,14 @@ class GrafoSdxlTests(unittest.TestCase):
         grafo = workflow(self.job)
         self.assertEqual(grafo["451"]["class_type"], "CheckpointLoaderSimple")
 
-    def test_cfg_e_passi_da_realvisxl(self):
+    def test_parametri_da_cyberrealistic_pony(self):
         grafo = workflow(self.job)
-        self.assertEqual(grafo["458"]["inputs"]["cfg"], 7.0)
+        self.assertEqual(grafo["458"]["inputs"]["cfg"], 5.0)
         self.assertEqual(grafo["458"]["inputs"]["steps"], 2)
+        self.assertEqual(grafo["459"]["class_type"], "CLIPSetLastLayer")
+        self.assertEqual(grafo["459"]["inputs"]["stop_at_clip_layer"], -2)
+        self.assertEqual(grafo["452"]["inputs"]["clip"], ["459", 0])
+        self.assertEqual(grafo["453"]["inputs"]["clip"], ["459", 0])
 
     def test_il_negativo_arriva_al_clip_negativo(self):
         grafo = workflow(self.job)
@@ -299,6 +304,73 @@ class GrafoSdxlTests(unittest.TestCase):
     def test_il_default_resta_qwen(self):
         grafo = workflow(nuovo_job("x"))
         self.assertEqual(grafo["451"]["class_type"], "UnetLoaderGGUF")
+
+    def test_openpose_e_opzionale_e_collegato_al_sampler(self):
+        job = nuovo_job("persona in posa", famiglia="sdxl-turbo",
+                        pose_image="pose/riferimento.jpg", pose_strength=0.72)
+        grafo = workflow(job)
+        self.assertEqual(grafo["460"]["class_type"], "LoadImage")
+        self.assertEqual(grafo["460"]["inputs"]["image"], "pose/riferimento.jpg")
+        self.assertEqual(grafo["461"]["class_type"], "DWPreprocessor")
+        self.assertEqual(grafo["462"]["class_type"], "ControlNetLoader")
+        self.assertEqual(grafo["464"]["class_type"], "ImageScale")
+        self.assertEqual(grafo["464"]["inputs"]["width"], 768)
+        self.assertEqual(grafo["463"]["inputs"]["image"], ["464", 0])
+        self.assertEqual(grafo["463"]["inputs"]["strength"], 0.72)
+        self.assertEqual(grafo["458"]["inputs"]["positive"], ["463", 0])
+        self.assertEqual(grafo["458"]["inputs"]["negative"], ["463", 1])
+
+    def test_senza_pose_il_grafo_resta_quello_normale(self):
+        grafo = workflow(self.job)
+        self.assertNotIn("460", grafo)
+        self.assertEqual(grafo["458"]["inputs"]["positive"], ["452", 0])
+
+    def test_pose_image_non_puo_uscire_dalla_cartella_input(self):
+        for path in ("../segreto.jpg", "/tmp/x.png", "https://example.test/x.png"):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    nuovo_job("x", famiglia="sdxl-turbo", pose_image=path)
+
+    def test_lora_opzionale_si_collega_a_modello_e_clip(self):
+        job = nuovo_job("ritratto", famiglia="sdxl-turbo",
+                        lora_name="HyperSpace/anna.safetensors", lora_strength=.7)
+        grafo = workflow(job)
+        self.assertEqual(grafo["455"]["class_type"], "LoraLoader")
+        self.assertEqual(grafo["455"]["inputs"]["lora_name"],
+                         "HyperSpace/anna.safetensors")
+        self.assertEqual(grafo["455"]["inputs"]["strength_model"], .7)
+        self.assertEqual(grafo["459"]["inputs"]["clip"], ["455", 1])
+        self.assertEqual(grafo["458"]["inputs"]["model"], ["455", 0])
+
+    def test_senza_lora_il_grafo_resta_invariato(self):
+        grafo = workflow(self.job)
+        self.assertNotIn("455", grafo)
+        self.assertEqual(grafo["459"]["inputs"]["clip"], ["451", 1])
+        self.assertEqual(grafo["458"]["inputs"]["model"], ["451", 0])
+
+    def test_lora_name_non_puo_uscire_dalla_cartella_modelli(self):
+        with self.assertRaises(ValueError):
+            nuovo_job("x", famiglia="sdxl-turbo", lora_name="../x.safetensors")
+
+    def test_seleziona_automaticamente_solo_pose_riconoscibili(self):
+        casi = {"una donna seduta su una sedia": "seated",
+                "adult dancer on a stage": "dancing",
+                "ritratto in piedi": "standing",
+                "un semplice ritratto": ""}
+        for prompt, atteso in casi.items():
+            with self.subTest(prompt=prompt):
+                self.assertEqual(scegli_pose_preset(prompt), atteso)
+
+    def test_non_applica_un_corpo_singolo_a_due_persone(self):
+        self.assertEqual(scegli_pose_preset("a couple sitting on a sofa"), "")
+
+    def test_preset_automatico_entra_nel_grafo_senza_foto(self):
+        job = nuovo_job("adult woman sitting on a chair", famiglia="sdxl-turbo")
+        self.assertEqual(job["pose_preset"], "seated")
+        grafo = workflow(job)
+        self.assertEqual(grafo["464"]["class_type"], "HyperSpacePosePreset")
+        self.assertEqual(grafo["464"]["inputs"]["preset"], "seated")
+        self.assertNotIn("460", grafo)
 
 
 class AffinitaTests(unittest.TestCase):

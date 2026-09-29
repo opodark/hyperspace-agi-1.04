@@ -1,22 +1,22 @@
 {
   "$commento": [
-    "Manifest del checkpoint RealVisXL V5.0 per gli sketch NSFW del Mac.",
+    "Manifest del checkpoint CyberRealistic Pony V18 per gli sketch del Mac.",
     "Fonte unica per il download (install-model.sh) e per il grafo del ponte",
     "(shared/image_jobs.py MODELLO_SDXL). Le impronte vengono dall'oggetto LFS",
-    "del file upstream, verificate il 2026-09-28.",
-    "A differenza del Qwen-Image (GGUF + text encoder + VAE separati), RealVisXL",
+    "del file upstream, verificate il 2026-09-29.",
+    "A differenza del Qwen-Image (GGUF + text encoder + VAE separati), CyberRealistic Pony",
     "e' un checkpoint UNICO: CheckpointLoaderSimple porta con se' UNet, CLIP e VAE.",
     "Quindi una sola destinazione: 'checkpoints'."
   ],
-  "repo": "SG161222/RealVisXL_V5.0",
-  "revisione": "ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc",
-  "modello_base": "SG161222/RealVisXL_V5.0",
-  "licenza": "OpenRAIL++ (openrail++)",
-  "nota_licenza": "I pesi NON sono distribuiti con HyperSpace: ognuno ha la licenza del proprio autore e si scarica a parte (THIRD-PARTY-NOTICES.md). RealVisXL e' fotorealistico e puo' produrre contenuti NSFW; openrail++ ne consente l'uso, l'utente resta responsabile dei contenuti generati.",
+  "repo": "cyberdelia/CyberRealisticPony",
+  "revisione": "bf85880a58614199d0391c93151211be2832bb8c",
+  "modello_base": "CyberRealistic Pony V18 CoreShift (Pony/SDXL)",
+  "licenza": "CreativeML OpenRAIL-M",
+  "nota_licenza": "I pesi NON sono distribuiti con HyperSpace: conservano la licenza del proprio autore e si scaricano a parte (THIRD-PARTY-NOTICES.md). Il checkpoint puo' produrre contenuti sensibili; l'utente resta responsabile di generare esclusivamente contenuti leciti e consensuali tra adulti.",
   "checkpoint": {
     "destinazione": "checkpoints",
-    "file": "RealVisXL_V5.0_fp16.safetensors",
-    "sha256": "6a35a7855770ae9820a3c931d4964c3817b6d9e3c6f9c4dabb5b3a94e5643b80",
-    "byte": 6938065488
+    "file": "CyberRealisticPony_V18.0_F16.safetensors",
+    "sha256": "1d580c1c3f3612fa4db88af65372255582d5509ca0b28f85387273368301941b",
+    "byte": 6938041288
   }
 }

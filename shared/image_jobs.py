@@ -54,11 +54,36 @@ FAMIGLIA_DEFAULT = "qwen-image-2.1"
 FAMIGLIA_SDXL = "sdxl-turbo"
 FAMIGLIE = (FAMIGLIA_DEFAULT, FAMIGLIA_SDXL)
 
+POSE_PRESET = ("standing", "arms_open", "seated", "kneeling", "lying", "walking", "dancing")
+_POSE_REGOLE = (
+    ("arms_open", r"\b(?:arms? (?:wide )?open|outstretched arms?|braccia aperte|braccia distese)\b"),
+    ("kneeling", r"\b(?:kneel(?:ing|s)?|inginocchi\w*)\b"),
+    ("lying", r"\b(?:lying down|lying on|sdraiat\w*|distes[oaie]|sul letto|on (?:a |the )?bed)\b"),
+    ("seated", r"\b(?:sitting|seated|sedut\w*|su una sedia|on (?:a |the )?chair)\b"),
+    ("walking", r"\b(?:walking|walks?|cammin\w*)\b"),
+    ("dancing", r"\b(?:dancing|dancer|dance pose|ball\w*|danz\w*)\b"),
+    ("standing", r"\b(?:standing|in piedi|erect pose)\b"),
+)
+
+
+def scegli_pose_preset(prompt: str) -> str:
+    """Select one-body presets conservatively; empty means text-only."""
+    testo = " ".join(str(prompt or "").lower().split())
+    if re.search(r"\b(?:two people|two persons|couple|coppia|due persone|"
+                 r"man and (?:a )?woman|woman and (?:a )?man|uomo e (?:una )?donna)\b", testo):
+        return ""
+    for nome, pattern in _POSE_REGOLE:
+        if re.search(pattern, testo, re.IGNORECASE):
+            return nome
+    return ""
+
 
 def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
               altezza: int = 768, passi: int = 25, seed: int = 0,
               richiedente: str = "", canale: str = "", modello: str = "",
               destinazione: str = "", famiglia: str = "",
+              pose_image: str = "", pose_preset: str = "", pose_strength: float = 1.0,
+              lora_name: str = "", lora_strength: float = 0.8,
               adesso: float | None = None) -> dict:
     """Costruisce un job valido. Solleva ValueError se il prompt è vuoto.
 
@@ -79,6 +104,19 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
     famiglia = str(famiglia or "").strip().lower()
     if famiglia not in FAMIGLIE:
         famiglia = FAMIGLIA_DEFAULT
+    pose_image = str(pose_image or "").strip().replace("\\", "/")
+    # LoadImage legge esclusivamente da ComfyUI/input. Un nome relativo evita
+    # che un job remoto trasformi il ponte in un lettore di file arbitrari.
+    if pose_image.startswith("/") or ".." in pose_image.split("/") or "://" in pose_image:
+        raise ValueError("pose_image deve essere un nome relativo dentro ComfyUI/input")
+    pose_preset = str(pose_preset or "").strip().lower()
+    if pose_preset and pose_preset not in POSE_PRESET:
+        raise ValueError("pose_preset sconosciuto")
+    if famiglia == FAMIGLIA_SDXL and not pose_image and not pose_preset:
+        pose_preset = scegli_pose_preset(testo)
+    lora_name = str(lora_name or "").strip().replace("\\", "/")
+    if lora_name.startswith("/") or ".." in lora_name.split("/") or "://" in lora_name:
+        raise ValueError("lora_name deve essere un nome relativo dentro ComfyUI/models/loras")
     return {
         "id": uuid.uuid4().hex[:12],
         "prompt": testo[:2000],
@@ -93,6 +131,11 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         "modello_effettivo": str(modello or "")[:120] or (
             MODELLO_SDXL["ckpt"] if famiglia == FAMIGLIA_SDXL else MODELLO_DEFAULT["unet"]),
         "famiglia": famiglia,
+        "pose_image": pose_image[:240],
+        "pose_preset": pose_preset,
+        "pose_strength": max(0.0, min(float(pose_strength), 2.0)),
+        "lora_name": lora_name[:240],
+        "lora_strength": max(-2.0, min(float(lora_strength), 2.0)),
         "destinazione": str(destinazione or "")[:64],
         "consegnato": False,
         "stato": "pending",
@@ -427,14 +470,17 @@ MODELLO_DEFAULT = {
     "scheduler": "simple",
 }
 
-# La ricetta RealVisXL: SDXL fotorealistico + NSFW, checkpoint UNICO
-# (CheckpointLoaderSimple porta con sé UNet, CLIP e VAE). cfg ~7 e 28+ passi:
-# niente più Turbo distillato (che sfigurava mani e parti intime).
+# La ricetta CyberRealistic Pony V18: checkpoint SDXL/Pony unico. I parametri
+# seguono la scheda ufficiale del modello: CFG 5, 30+ passi e Clip Skip 2.
 MODELLO_SDXL = {
-    "ckpt": "RealVisXL_V5.0_fp16.safetensors",
-    "cfg": 7.0,
+    "ckpt": "CyberRealisticPony_V18.0_F16.safetensors",
+    "cfg": 5.0,
+    "clip_skip": -2,
     "sampler": "dpmpp_2m",
     "scheduler": "karras",
+    "controlnet_openpose": "xinsir-controlnet-openpose-sdxl-1.0.safetensors",
+    "lora": os.getenv("SDXL_LORA_NAME", "").strip(),
+    "lora_strength": float(os.getenv("SDXL_LORA_STRENGTH", "0.8")),
 }
 
 
@@ -490,7 +536,7 @@ def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSp
 
 def workflow_sdxl(job: dict, *, modello: dict | None = None,
                   prefisso: str = "HyperSpace", jpeg: bool = True) -> dict:
-    """Il grafo SDXL/RealVisXL: checkpoint unico, CFG 7 e sampler DPM++ 2M.
+    """Il grafo CyberRealistic Pony: checkpoint unico, CFG 5 e Clip Skip 2.
 
     A differenza di Qwen, SDXL usa il negativo (non le istruzioni dentro il
     prompt) e un `CLIPTextEncode` per lato. Gli id dei nodi sono gli stessi del
@@ -499,13 +545,19 @@ def workflow_sdxl(job: dict, *, modello: dict | None = None,
     scelte = {**MODELLO_SDXL, **(modello or {})}
     if str(job.get("modello") or "").strip():
         scelte["ckpt"] = str(job["modello"]).strip()
-    return {
+    lora_name = str(job.get("lora_name") or scelte.get("lora") or "").strip()
+    modello_ref = ["451", 0]
+    clip_ref = ["451", 1]
+    grafo = {
         "451": {"class_type": "CheckpointLoaderSimple",
                 "inputs": {"ckpt_name": scelte["ckpt"]}},
-        "452": {"class_type": "CLIPTextEncode",
-                "inputs": {"clip": ["451", 1], "text": job["prompt"]}},
-        "453": {"class_type": "CLIPTextEncode",
+        "459": {"class_type": "CLIPSetLastLayer",
                 "inputs": {"clip": ["451", 1],
+                           "stop_at_clip_layer": int(scelte["clip_skip"])}},
+        "452": {"class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["459", 0], "text": job["prompt"]}},
+        "453": {"class_type": "CLIPTextEncode",
+                "inputs": {"clip": ["459", 0],
                            "text": str(job.get("negativo") or "")}},
         "456": {"class_type": "EmptyLatentImage",
                 "inputs": {"width": int(job["larghezza"]),
@@ -521,6 +573,52 @@ def workflow_sdxl(job: dict, *, modello: dict | None = None,
                 "inputs": {"samples": ["458", 0], "vae": ["451", 2]}},
         "470": _save_node(prefisso, jpeg),
     }
+    if lora_name:
+        forza = float(job.get("lora_strength", scelte.get("lora_strength", 0.8)))
+        grafo["455"] = {"class_type": "LoraLoader", "inputs": {
+            "model": ["451", 0], "clip": ["451", 1], "lora_name": lora_name,
+            "strength_model": forza, "strength_clip": forza}}
+        modello_ref = ["455", 0]
+        clip_ref = ["455", 1]
+        grafo["459"]["inputs"]["clip"] = clip_ref
+        grafo["458"]["inputs"]["model"] = modello_ref
+    pose_image = str(job.get("pose_image") or "").strip()
+    pose_preset = str(job.get("pose_preset") or "").strip()
+    if pose_image or pose_preset:
+        # La foto di riferimento resta un input locale di ComfyUI. DWPose ne
+        # estrae lo scheletro; ControlNet vincola la geometria senza copiare
+        # volto, vestiti o sfondo della sorgente.
+        grafo.update({
+            "462": {"class_type": "ControlNetLoader", "inputs": {
+                "control_net_name": scelte["controlnet_openpose"]}},
+            "463": {"class_type": "ControlNetApplyAdvanced", "inputs": {
+                "positive": ["452", 0], "negative": ["453", 0],
+                "control_net": ["462", 0], "image": ["464", 0],
+                "strength": float(job.get("pose_strength", 1.0)),
+                "start_percent": 0.0, "end_percent": 1.0}},
+        })
+        if pose_image:
+            grafo.update({
+                "460": {"class_type": "LoadImage", "inputs": {"image": pose_image}},
+                "461": {"class_type": "DWPreprocessor", "inputs": {
+                    "image": ["460", 0], "detect_hand": "enable",
+                    "detect_body": "enable", "detect_face": "disable",
+                    "resolution": max(int(job["larghezza"]), int(job["altezza"])),
+                    "bbox_detector": "yolox_l.onnx",
+                    "pose_estimator": "dw-ll_ucoco_384.onnx",
+                    "scale_stick_for_xinsr_cn": "enable"}},
+                "464": {"class_type": "ImageScale", "inputs": {
+                    "image": ["461", 0], "upscale_method": "nearest-exact",
+                    "width": int(job["larghezza"]), "height": int(job["altezza"]),
+                    "crop": "center"}},
+            })
+        else:
+            grafo["464"] = {"class_type": "HyperSpacePosePreset", "inputs": {
+                "preset": pose_preset, "width": int(job["larghezza"]),
+                "height": int(job["altezza"])}}
+        grafo["458"]["inputs"]["positive"] = ["463", 0]
+        grafo["458"]["inputs"]["negative"] = ["463", 1]
+    return grafo
 
 
 def immagini_da_history(run: dict) -> list:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Installa il checkpoint SDXL-Turbo (lo sketch del Mac) dentro la cartella
+# Installa il checkpoint SDXL/Pony (lo sketch del Mac) dentro la cartella
 # modelli di ComfyUI.
 #
 # Perche' uno script e non un download a mano: il file e' ~6.9 GB e un errore qui

@@ -1,8 +1,8 @@
 # ComfyUI — generazione immagini su Mac e win11
 
-Il Mac usa **RealVisXL V5.0**; win11 usa **Qwen-Image 2.1 GGUF**.
+Il Mac usa **CyberRealistic Pony V18 CoreShift**; win11 usa **Qwen-Image 2.1 GGUF**.
 La famiglia `sdxl-turbo` conserva il nome storico per compatibilità con il ponte,
-ma il checkpoint attuale è `RealVisXL_V5.0_fp16.safetensors`.
+ma il checkpoint attuale è `CyberRealisticPony_V18.0_F16.safetensors`.
 
 ## Prompt e workflow
 
@@ -15,12 +15,12 @@ ma il checkpoint attuale è `RealVisXL_V5.0_fp16.safetensors`.
   il prefisso da schizzo. Il fallback regex è segnalato nel log Python.
 - **`!immagine` / `!foto`:** prompt diretto, senza riscrittura o stile aggiunto.
 - **`POST /image/generate`:** prompt diretto. `famiglia: "sdxl-turbo"` seleziona
-  RealVisXL e, salvo parametri espliciti, 1024×1024, 28 passi e negativo anatomico.
+  CyberRealistic Pony e, salvo parametri espliciti, 1024×1024, 30 passi e negativo anatomico.
   Senza famiglia resta Qwen, 768×768, 25 passi. L'API non interpreta la chat.
 - **Open WebUI:** il client deve essere configurato per usare il percorso immagini
   desiderato; il collegamento al solo endpoint chat non abilita questa API.
 
-Il grafo RealVisXL usa CFG 7, DPM++ 2M e Karras sia per chat sia per diario.
+Il grafo CyberRealistic Pony usa CFG 5, Clip Skip 2, DPM++ 2M e Karras sia per chat sia per diario.
 Il prompt finale e `modello_effettivo` sono visibili nel job e nello stato degli
 ultimi job; le richieste naturali registrano anche il prompt finale nei log.
 Il modello linguistico può ancora interpretare male una richiesta: questi dati
@@ -104,6 +104,37 @@ ponte che **tira** il lavoro, come i driver di canale:
 | `GET /image/jobs` | il ponte | ritira il prossimo job (`204` = niente da fare) |
 | `POST /image/result` | il ponte | riferisce esito, file, durata |
 | `GET /image/status` | l'operatore | coda e ultimi job: "dov'è finita la mia immagine?" |
+
+Per vincolare una posa sui job SDXL, copia una foto di riferimento dentro
+`ComfyUI/input` e passa il suo nome relativo. Il riferimento serve solo a
+estrarre lo scheletro: volto, abiti e sfondo continuano a dipendere dal prompt.
+
+```json
+{
+  "prompt": "full-body portrait of an adult dancer on a stage",
+  "famiglia": "sdxl-turbo",
+  "pose_image": "pose/dancer.jpg",
+  "pose_strength": 1.0
+}
+```
+
+`pose_strength` è limitato a `0..2`; il valore consigliato è `0.8..1.1` e il
+default è `1.0`. La mappa estratta viene adattata esattamente a larghezza e
+altezza del job prima di entrare in ControlNet.
+
+Se `pose_image` non è presente, il control-plane riconosce automaticamente dal
+prompt le pose singole comuni: in piedi, seduta, inginocchiata, sdraiata, in
+cammino, in danza e con le braccia aperte (anche nei corrispondenti termini
+inglesi). Il nodo `HyperSpacePosePreset` costruisce direttamente la mappa
+OpenPose: chi scrive in Telegram non deve preparare alcun file. Il selettore è
+volutamente conservativo: richieste generiche e scene con più persone restano
+text-only, perché imporre loro uno scheletro singolo peggiorerebbe l'anatomia.
+`pose_preset` può comunque forzare uno dei preset supportati.
+Senza `pose_image` il grafo resta identico a prima. Il Mac usa
+`DWPreprocessor` da `comfyui_controlnet_aux` e il modello
+`xinsir-controlnet-openpose-sdxl-1.0.safetensors`. Percorsi assoluti, URL e
+componenti `..` sono rifiutati: `LoadImage` può leggere soltanto dalla cartella
+input di ComfyUI.
 
 Il ponte è `integrations/comfyui/comfy_bridge.py` e si autentica con un canale
 `comfy` in `CHANNEL_CLIENTS` (`python scripts/channel_token.py comfy --write`):

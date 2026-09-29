@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Il checkpoint RealVisXL (SDXL NSFW): manifest e grafo devono dire la stessa cosa.
+"""Il checkpoint CyberRealistic Pony: manifest e grafo devono dire la stessa cosa.
 
 Stessa disciplina di test_comfyui_modelli.py, ma per il modello del Mac: il nome
 del checkpoint e' una STRINGA in due posti — il manifest `modelli-sdxl.json` che
