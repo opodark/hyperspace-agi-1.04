@@ -2712,7 +2712,14 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
                  detail=f"message_id={message_id}: {type(error).__name__}: {str(error)[:200]}",
                  status="error")
         return
-    if not instagram_reply_outbox.sending(sender_id, message_id):
+    try:
+        marked = instagram_reply_outbox.sending(sender_id, message_id)
+    except Exception as error:
+        push_log("instagram", "Marcatura invio Instagram fallita",
+                 detail=f"message_id={message_id}: {type(error).__name__}: {str(error)[:200]}",
+                 status="error")
+        return
+    if not marked:
         return
     try:
         for chunk in chunks:
