@@ -55,8 +55,10 @@ STRUMENTI_DEL_CP = {
     "code_sandbox": "_tool_code_sandbox",
     "persona_get": "_tool_persona_get",
     "persona_note": "_tool_persona_note",
+    "ask_aurora": "_tool_ask_aurora",
     "shell_run": "_tool_shell_run",
     "shell_session": "_tool_shell_session",
+    "kali_scan": "_tool_kali_scan",
 }
 
 TOOL_DEL_CLIENTE = {
