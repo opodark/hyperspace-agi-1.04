@@ -5,9 +5,10 @@ Stato: preset offline, Dev Sandbox e integrazione selettiva ECC implementati,
 realizzare. Gli strumenti sono capacità di un unico HyperSpace, riutilizzabili
 da modelli locali, coding agent e sviluppo umano.
 
-Ambiente di sviluppo: MacBook sul ramo `feature/development-security-tools`.
-Il nodo centrale resta su Win11; ricostruzioni e prove di questo ramo vengono
-eseguite sul MacBook. Il push del ramo non aggiorna automaticamente il nodo centrale.
+Ambiente di sviluppo: MacBook sul ramo `main` — il lavoro di questo documento è
+stato assorbito in `main` e il ramo `feature/development-security-tools` è stato
+chiuso. Il nodo centrale resta su Win11; ricostruzioni e prove vengono eseguite
+sul MacBook. Il push di `main` non aggiorna automaticamente il nodo centrale.
 
 ## Base già presente
 
