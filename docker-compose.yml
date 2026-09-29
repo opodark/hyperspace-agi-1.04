@@ -335,7 +335,7 @@ services:
 
   # -- Open WebUI -----------------------------------------------------------------------
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:v0.11.4
     container_name: hyperspace_open_webui
     env_file:
       - path: ./.env
