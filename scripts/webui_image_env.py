@@ -33,7 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from shared.image_jobs import MODELLO_DEFAULT, workflow  # noqa: E402
+from shared.image_jobs import FAMIGLIA_SDXL, MODELLO_SDXL, workflow  # noqa: E402
 
 BASE_URL_DEFAULT = "http://host.docker.internal:8189"
 WEBUI_URL_DEFAULT = "http://127.0.0.1:3000"
@@ -48,16 +48,15 @@ PASSI_DEFAULT = 25
 # `_apply_workflow_nodes` di Open WebUI fa `workflow[node_id]['inputs'][node.key]`.
 #
 # Due assenze sono volute:
-#   - `negative_prompt` NON si mappa: Open WebUI lo manda solo se l'utente lo scrive,
-#     e quando manca sarebbe `None` — cioè `null` al posto della stringa che il nodo
-#     di Qwen si aspetta. Il negativo negativo di questo grafo sta dentro il prompt
-#     ("no text, no watermark, no logos"), come spiega `shared/image_jobs.py`;
-#   - `model` NON si mappa: il diffusion è fissato dal grafo (`UnetLoaderGGUF` con
-#     il GGUF verificato dal manifest). Mappandolo, un modello di *chat* scelto per
-#     sbaglio nella UI finirebbe in `unet_name`, e l'errore arriverebbe a
-#     generazione avviata.
+#   - `negative_prompt` NON si mappa: il negativo del grafo Pony sta nel
+#     `CLIPTextEncode` dedicato (453), che `workflow_sdxl` riempie con
+#     `job["negativo"]` (vuoto di default). Open WebUI lo manderebbe `null`
+#     se l'utente non lo scrive, e il nodo si aspetta una stringa;
+#   - `model` NON si mappa: il diffusion è fissato dal checkpoint
+#     (`CheckpointLoaderSimple` con `MODELLO_SDXL["ckpt"]`). Mappandolo, un
+#     modello di *chat* scelto per sbaglio nella UI finirebbe in `ckpt_name`.
 NODI = [
-    {"type": "prompt", "node_ids": ["452"], "key": "prompt"},
+    {"type": "prompt", "node_ids": ["452"], "key": "text"},
     {"type": "width", "node_ids": ["456"], "key": "width"},
     {"type": "height", "node_ids": ["456"], "key": "height"},
     {"type": "steps", "node_ids": ["458"], "key": "steps"},
@@ -76,7 +75,8 @@ INTESTAZIONE_ENV = ("# --- Immagini dentro Open WebUI (motore ComfyUI). Derivate
 def job_default(larghezza: int, altezza: int, passi: int) -> dict:
     """Il job da cui si legge il grafo: gli id sono fissi, i valori li sovrascrive la UI."""
     return {"id": "webui", "prompt": "", "negativo": "", "larghezza": larghezza,
-            "altezza": altezza, "passi": passi, "seed": 0, "modello": ""}
+            "altezza": altezza, "passi": passi, "seed": 0, "modello": "",
+            "famiglia": FAMIGLIA_SDXL}
 
 
 def misura(testo: str, *, lato_default: int = LATO_DEFAULT) -> tuple[int, int]:
@@ -110,7 +110,7 @@ def variabili(*, base_url: str = BASE_URL_DEFAULT, size: str = "",
         "COMFYUI_WORKFLOW_NODES": json.dumps(NODI, **compatto),
         "IMAGE_SIZE": f"{larghezza}x{altezza}",
         "IMAGE_STEPS": str(int(passi)),
-        "IMAGE_GENERATION_MODEL": MODELLO_DEFAULT["unet"],
+        "IMAGE_GENERATION_MODEL": MODELLO_SDXL["ckpt"],
     }
 
 

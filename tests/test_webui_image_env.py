@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from shared.image_jobs import MODELLO_DEFAULT, workflow  # noqa: E402
+from shared.image_jobs import MODELLO_SDXL, workflow  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "webui_image_env.py"
 
@@ -80,26 +80,26 @@ class VariabiliTests(unittest.TestCase):
                                       ("prompt", "negative_prompt", "resolution", "steps",
                                        "seed", "text"))
 
-    def test_il_prompt_va_dove_lo_aspetta_il_nodo_di_qwen(self):
+    def test_il_prompt_va_dove_lo_aspetta_il_nodo_del_pony(self):
         nodi = {n["type"]: n for n in json.loads(self.valori["COMFYUI_WORKFLOW_NODES"])}
         grafo = json.loads(self.valori["COMFYUI_WORKFLOW"])
         self.assertEqual(grafo[nodi["prompt"]["node_ids"][0]]["class_type"],
-                         "TextEncodeQwenImage21")
-        self.assertEqual(nodi["prompt"]["key"], "prompt")
+                         "CLIPTextEncode")
+        self.assertEqual(nodi["prompt"]["key"], "text")
         self.assertEqual(grafo[nodi["width"]["node_ids"][0]]["class_type"],
                          "EmptyLatentImage")
         self.assertEqual(grafo[nodi["steps"]["node_ids"][0]]["class_type"], "KSampler")
 
     def test_le_due_assenza_sono_volute(self):
         """`negative_prompt` sarebbe `null` (Open WebUI lo manda solo se scritto) e
-        `model` metterebbe un modello di *chat* dentro `UnetLoaderGGUF`."""
+        `model` metterebbe un modello di *chat* dentro `CheckpointLoaderSimple`."""
         tipi = {nodo["type"] for nodo in json.loads(self.valori["COMFYUI_WORKFLOW_NODES"])}
         self.assertNotIn("negative_prompt", tipi)
         self.assertNotIn("model", tipi)
 
     def test_il_diffusion_e_quello_del_manifest(self):
-        self.assertEqual(self.valori["IMAGE_GENERATION_MODEL"], MODELLO_DEFAULT["unet"])
-        self.assertEqual(MODELLO_DEFAULT["unet"], "qwen-image-2.1-UC-Q5_K_M.gguf")
+        self.assertEqual(self.valori["IMAGE_GENERATION_MODEL"], MODELLO_SDXL["ckpt"])
+        self.assertEqual(MODELLO_SDXL["ckpt"], "CyberRealisticPony_V18.0_F16.safetensors")
 
 
 class MisuraTests(unittest.TestCase):
@@ -127,8 +127,8 @@ class MisuraTests(unittest.TestCase):
         self.assertEqual(grafo["456"]["inputs"]["width"], 1024)
         self.assertEqual(grafo["456"]["inputs"]["height"], 768)
         self.assertEqual(grafo["458"]["inputs"]["steps"], 30)
-        self.assertEqual(grafo["452"]["inputs"]["resolution"], 1024,
-                         "il text encoder segue il lato lungo, come nel ponte")
+        self.assertEqual(grafo["452"]["inputs"]["text"], "",
+                         "il prompt parte vuoto: lo riempie Open WebUI")
 
 
 class FileEnvTests(unittest.TestCase):

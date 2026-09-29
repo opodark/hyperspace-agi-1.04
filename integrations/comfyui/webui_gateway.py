@@ -73,6 +73,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect  # noqa: E4
 from fastapi.responses import JSONResponse, Response  # noqa: E402
 
 from shared import gpu_budget  # noqa: E402
+from shared.image_jobs import FAMIGLIA_SDXL  # noqa: E402
 from shared.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
 
 COMFY_DEFAULT = "http://127.0.0.1:8188"
@@ -323,6 +324,8 @@ def main(argv=None) -> int:
     parser.add_argument("--check", action="store_true", help="verifica e basta")
     parser.add_argument("--comfy", default=os.getenv("COMFY_URL", COMFY_DEFAULT))
     parser.add_argument("--ollama", default=os.getenv("OLLAMA_RAW_BASE_URL", OLLAMA_DEFAULT))
+    parser.add_argument("--modello", default=os.getenv("WEBUI_GATEWAY_MODEL", FAMIGLIA_SDXL),
+                        help="famiglia di modello da verificare (default sdxl-turbo)")
     parser.add_argument("--host", default=os.getenv("WEBUI_GATEWAY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int,
                         default=int(os.getenv("WEBUI_GATEWAY_PORT", str(PORT_DEFAULT))))
@@ -330,7 +333,7 @@ def main(argv=None) -> int:
 
     # Le stesse verifiche del ponte: i file del grafo devono essere nella lista che
     # ComfyUI dichiara, o il job fallisce dopo minuti di sampling (2026-09-22).
-    problemi = _verifiche(args.comfy, "")
+    problemi = _verifiche(args.comfy, "", modello=args.modello)
     problemi += _problemi_scheda(args.ollama)
     if problemi:
         log("PROBLEMI:")
