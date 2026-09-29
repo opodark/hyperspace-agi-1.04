@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.diario import Diario, file_da_job, voce  # noqa: E402
+from shared.diario import (Diario, file_da_job, instagram_backfill_candidate,
+                           voce)  # noqa: E402
 
 
 class VoceTests(unittest.TestCase):
@@ -89,6 +90,20 @@ class DiarioTests(unittest.TestCase):
         pagina = Diario.load(self.path).get("sogno-a")
         self.assertEqual(pagina["instagram_status"], "published")
         self.assertEqual(pagina["instagram_media_id"], "ig-123")
+
+    def test_backfill_accetta_solo_voci_esplicitamente_pending(self):
+        base = {"id": "sogno-a", "tipo": "sogno", "file": "HyperSpace/a.jpg"}
+        self.assertTrue(instagram_backfill_candidate({**base, "instagram_status": "pending"}))
+        self.assertFalse(instagram_backfill_candidate(base))
+        self.assertFalse(instagram_backfill_candidate({**base, "instagram_status": "failed"}))
+        self.assertFalse(instagram_backfill_candidate({**base, "instagram_status": "publishing"}))
+        self.assertFalse(instagram_backfill_candidate({**base, "instagram_status": "published"}))
+
+    def test_backfill_rifiuta_pending_senza_file(self):
+        self.assertFalse(instagram_backfill_candidate({
+            "id": "sogno-a", "tipo": "sogno", "file": "",
+            "instagram_status": "pending",
+        }))
 
 
 if __name__ == "__main__":

@@ -23,6 +23,19 @@ MAX_TESTO_CHARS = 500
 MAX_PROMPT_CHARS = 400
 
 
+def instagram_backfill_candidate(page: dict) -> bool:
+    """True only for entries explicitly queued for Instagram publishing.
+
+    Legacy diary entries have no ``instagram_status``.  Treating a missing
+    status as pending republishes media that may already have been posted
+    before publication tracking was introduced.
+    """
+    page = page if isinstance(page, dict) else {}
+    return (page.get("tipo") in ("sogno", "poesia")
+            and bool(page.get("file"))
+            and page.get("instagram_status") == "pending")
+
+
 def _adesso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

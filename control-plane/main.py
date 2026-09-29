@@ -105,7 +105,8 @@ from shared.feed import Feed, nuovo_post
 from shared.post_gen import (build_poem_prompt, build_post_prompt, filtra_post,
                              parse_post, prossima_mossa)
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, negativo_sketch, puo_generare
-from shared.diario import Diario, file_da_job, voce
+from shared.diario import (Diario, file_da_job, instagram_backfill_candidate,
+                           voce)
 from shared.dialogue_image import compose_dialogue
 from shared.conversation_log import ConversationLog, battuta
 from shared.social_dreams import social_dream_inspirations
@@ -3433,7 +3434,7 @@ def _instagram_publish_voce(voce_id: str, percorso: str) -> bool:
     with _instagram_dream_publish_lock:
         page = diario.get(voce_id)
         if (not page or page.get("tipo") not in ("sogno", "poesia")
-                or page.get("instagram_status") == "published"):
+                or page.get("instagram_status") not in ("pending", "failed")):
             return False
         try:
             from PIL import Image
@@ -3470,6 +3471,11 @@ def _instagram_publish_voce(voce_id: str, percorso: str) -> bool:
             else:
                 caption = (f"🌙 Sogno di {autore}\n\n{str(page.get('testo') or '').strip()}\n\n"
                            "#AuroraAndAnna #SogniDigitali #AIDreams")[:2200]
+            # Persist before the non-idempotent API call.  If the process dies
+            # after Instagram accepts the post, startup recovery must not send
+            # it again merely because the media id was not saved locally.
+            diario.aggiorna_instagram(voce_id, status="publishing")
+            diario.save(DIARIO_FILE)
             result = connector_manager.execute("instagram_publish_image", {
                 "image_url": image_url, "caption": caption,
                 "alt_text": str(page.get("prompt") or "")[:1000]})
@@ -3495,8 +3501,7 @@ def _instagram_publish_latest() -> None:
     """On boot, publish only the newest completed dream or poem left behind."""
     time.sleep(10)
     for page in diario.list():
-        if (page.get("tipo") in ("sogno", "poesia") and page.get("file")
-                and page.get("instagram_status") != "published"):
+        if instagram_backfill_candidate(page):
             _instagram_publish_voce(str(page["id"]), str(page["file"]))
             return
 
@@ -3538,6 +3543,9 @@ def image_result():
                     push_log('feed', 'Pannello poesia non creato', detail=str(error)[:200],
                              source='post-loop', status='warn')
         if diario.aggiorna_file(voce_id, percorso):
+            page = diario.get(voce_id)
+            if page and page.get("tipo") in ("sogno", "poesia"):
+                diario.aggiorna_instagram(voce_id, status="pending")
             diario.save(DIARIO_FILE)
             push_log('feed', f'sketch nel diario', detail=f'voce={voce_id} file={percorso}',
                      source='post-loop', status='success')
