@@ -3506,6 +3506,24 @@ def _instagram_publish_latest() -> None:
             return
 
 
+def _percorso_disegno_servibile(percorso) -> str:
+    """Percorso relativo servibile per un disegno, oppure "" se non è servibile.
+
+    La rotta `/instagram/media/<token>/<path:nome>` serve `DIARIO_IMMAGINI_DIR`
+    con il percorso relativo *completo* (`HyperSpace/bridge_00048_.jpg`): qui si
+    verifica che il file esista davvero e che resti dentro il volume, così l'URL
+    dato a Instagram non è mai un 404.
+    """
+    rel = str(percorso or "").strip().lstrip("/")
+    if not rel:
+        return ""
+    radice = os.path.realpath(DIARIO_IMMAGINI_DIR)
+    pieno = os.path.realpath(os.path.join(radice, rel))
+    if not pieno.startswith(radice + os.sep) or not os.path.isfile(pieno):
+        return ""
+    return rel
+
+
 @app.route('/image/result', methods=['POST'])
 def image_result():
     """Il ponte riferisce com'è andata: è l'unico modo per saperlo."""
@@ -3557,9 +3575,10 @@ def image_result():
             and chiuso.get("destinazione") and esito.get("file")):
         public_base = os.getenv("INSTAGRAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
         media_token = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
-        if public_base and media_token:
+        disegno = _percorso_disegno_servibile(esito.get("file"))
+        if public_base and media_token and disegno:
             image_url = (f"{public_base}/instagram/media/{quote(media_token, safe='')}/"
-                         f"{quote(os.path.basename(str(esito['file'])), safe='')}")
+                         f"{quote(disegno, safe='/')}")
             sent = connector_manager.execute("instagram_send_image", {
                 "recipient_id": chiuso["destinazione"], "image_url": image_url})
             if str(sent).lstrip().startswith("{"):
@@ -3569,6 +3588,10 @@ def image_result():
             else:
                 push_log('instagram', 'Disegno VIP non consegnato',
                          detail=str(sent)[:200], status='warn')
+        elif public_base and media_token:
+            push_log('instagram', 'Disegno VIP non consegnato',
+                     detail=f"file non servibile: {str(esito.get('file'))[:120]}",
+                     status='warn')
     push_log('channel', 'Job immagine concluso',
              detail=(f"id={chiuso['id']} stato={chiuso['stato']} "
                      f"{esito.get('file') or esito.get('errore') or ''}")[:200],
