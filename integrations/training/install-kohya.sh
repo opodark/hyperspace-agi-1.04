@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 REPO="${HYPERSPACE_REPO:-/Users/opo/hyperspace-agi-1.04}"
