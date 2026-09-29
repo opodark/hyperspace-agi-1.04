@@ -43,7 +43,7 @@
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import os, threading, time, requests, json, uuid, gzip, hashlib, hmac, socket, re, ast
+import os, threading, time, requests, json, uuid, gzip, hashlib, hmac, socket, re, ast, shutil
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -57,6 +57,7 @@ faulthandler.enable()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
     BASE_DIR, "..", "data", "diario-immagini")
+TYPOGRAPHY_IMAGES_DIR = os.getenv("TYPOGRAPHY_IMAGES_DIR", "/app/data/typography-images")
 sys.path.insert(0, os.path.join(BASE_DIR, ".."))
 
 import shared.db as db
@@ -78,6 +79,7 @@ from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryClient, HermesMemoryError
 from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
 from shared import gpu_budget
+from shared.poetry_image import readable_excerpt, compose_readable
 from shared.web_node import (
     WebNodeError,
     WebNodeRegistry,
@@ -94,6 +96,7 @@ from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, Channe
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job
+from shared.image_memory_gate import ImageMemoryGate
 from shared.prompt_immagine import (chiama_ollama, configura_modello,
                                    prepara_prompt_canale, richiesta_immagine_smart)
 from shared.feed import Feed, nuovo_post
@@ -758,7 +761,7 @@ def _proponi_identita(prompt: str) -> str:
     base = advanced_config["ollama"]["url"].rstrip("/")
     try:
         if ollama_native.needs_native_path(payload):
-            risposta = requests.post(f"{base}/api/chat",
+            risposta = _local_model_post(f"{base}/api/chat",
                                      json=ollama_native.to_native_chat(payload),
                                      timeout=_inference_timeout(payload["model"]))
             risposta.raise_for_status()
@@ -973,10 +976,44 @@ channel_runtime = ChannelRuntime()
 #
 #     python scripts/channel_token.py comfy --write
 #
-# La coda vive in memoria: un job vecchio sparisce invece di eseguirsi tre ore
-# dopo, e un job preso e mai concluso torna disponibile (il ponte è morto a
-# metà, non il lavoro).
-image_queue = ImmagineQueue()
+# La coda sopravvive al riavvio del control-plane: il ponte del Mac puo' essere
+# spento per aggiornamento o standby. I claim tornano pending dopo il timeout.
+IMAGE_QUEUE_FILE = os.getenv("IMAGE_QUEUE_FILE", "").strip() or "/app/data/image-jobs.json"
+image_queue = ImmagineQueue(state_path=IMAGE_QUEUE_FILE)
+image_memory_gate = ImageMemoryGate()
+for _restored_image_job in image_queue.running_ids(FAMIGLIA_SDXL):
+    image_memory_gate.reserve_image(_restored_image_job, timeout=0)
+
+
+def _local_model_post(url: str, **kwargs):
+    """Count background Ollama calls too, including dream and post loops."""
+    if not image_memory_gate.enter_chat():
+        raise RuntimeError("Il Mac sta completando un'immagine")
+    try:
+        return requests.post(url, **kwargs)
+    finally:
+        image_memory_gate.leave_chat()
+
+
+@app.before_request
+def _chat_memory_entry():
+    if request.path != "/v1/chat/completions" or request.method == "OPTIONS":
+        return None
+    if not image_memory_gate.enter_chat():
+        return jsonify({"error": {"type": "image_memory_busy",
+                                  "message": "Il Mac sta completando un'immagine; riprova fra poco"}}), 503
+    request.environ["hyperspace.chat_memory_slot"] = True
+    return None
+
+
+@app.after_request
+def _chat_memory_exit(response):
+    if request.environ.pop("hyperspace.chat_memory_slot", False):
+        if response.is_streamed:
+            response.call_on_close(image_memory_gate.leave_chat)
+        else:
+            image_memory_gate.leave_chat()
+    return response
 INSTAGRAM_VIP_FILE = os.getenv("INSTAGRAM_VIP_FILE", "").strip() or os.path.join(
     BASE_DIR, "data", "instagram_vips.json")
 instagram_vips = InstagramVipStore(INSTAGRAM_VIP_FILE)
@@ -1332,7 +1369,7 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
             # content pur di non mostrare il vuoto). Per una battuta in chat
             # sarebbe testo sbagliato, quindi si parla nativo — la stessa
             # traduzione che usa il nodo.
-            risposta = requests.post(f"{base}/api/chat",
+            risposta = _local_model_post(f"{base}/api/chat",
                                      json=ollama_native.to_native_chat(payload),
                                      timeout=_inference_timeout(payload["model"]))
             risposta.raise_for_status()
@@ -2471,6 +2508,7 @@ def _execute_tool_call(tool_name: str, tool_args) -> str:
         # vive nell'host-agent, qui c'e' il percorso con token e audit.
         "shell_run":       _tool_shell_run,
         "shell_session":   _tool_shell_session,
+        "kali_scan":       _tool_kali_scan,
     }
     handler = handlers.get(tool_name)
     if handler:
@@ -3024,8 +3062,9 @@ def image_generate():
     dati = request.get_json(silent=True) or {}
     famiglia = str(dati.get("famiglia", "")).strip().lower()
     sdxl = famiglia == FAMIGLIA_SDXL
-    # Una scheda, un modello: prima di accodare si fa posto (vedi shared/gpu_budget.py).
-    scheda = _libera_scheda_per_immagine()
+    # Il Mac SDXL libera la memoria al claim del bridge; il percorso Qwen/Windows
+    # conserva lo scarico immediato della sua GPU dedicata.
+    scheda = "" if sdxl else _libera_scheda_per_immagine()
     try:
         job = nuovo_job(dati.get("prompt", ""),
                         negativo=dati.get("negativo", negativo_sketch() if sdxl else ""),
@@ -3065,7 +3104,21 @@ def image_jobs():
     job = image_queue.prossimo(capace_di=famiglia or None)
     if job is None:
         return ('', 204)
+    if job.get("famiglia") == FAMIGLIA_SDXL:
+        if not image_memory_gate.reserve_image(job["id"]):
+            image_queue.rinvia(job["id"])
+            return jsonify({"ok": False, "error": "memoria occupata: job rinviato"}), 503
     return jsonify({"ok": True, "job": job})
+
+
+@app.route('/image/defer', methods=['POST'])
+def image_defer():
+    errore = _channel_error()
+    if errore:
+        return errore
+    job_id = str((request.get_json(silent=True) or {}).get("id", ""))
+    image_memory_gate.release_image(job_id)
+    return jsonify({"ok": image_queue.rinvia(job_id)})
 
 
 _instagram_dream_publish_lock = threading.Lock()
@@ -3081,8 +3134,13 @@ def _instagram_publish_dream(voce_id: str, percorso: str) -> bool:
             return False
         try:
             from PIL import Image
-            source_root = os.path.realpath(DIARIO_IMMAGINI_DIR)
-            source = os.path.realpath(os.path.join(source_root, str(percorso or "")))
+            relative = str(percorso or "")
+            source_root = os.path.realpath(
+                TYPOGRAPHY_IMAGES_DIR if relative.startswith("typography/")
+                else DIARIO_IMMAGINI_DIR)
+            source = os.path.realpath(os.path.join(
+                source_root, relative.split("/", 1)[1] if relative.startswith("typography/")
+                else relative))
             if not source.startswith(source_root + os.sep) or not os.path.isfile(source):
                 raise RuntimeError("file del sogno non disponibile nel volume ComfyUI")
             media_dir = os.getenv("INSTAGRAM_MEDIA_DIR", "/app/data/instagram-media").strip()
@@ -3090,7 +3148,11 @@ def _instagram_publish_dream(voce_id: str, percorso: str) -> bool:
             jpeg_name = f"{voce_id}.jpg"
             jpeg_path = os.path.join(media_dir, jpeg_name)
             with Image.open(source) as image:
-                image.convert("RGB").save(jpeg_path, "JPEG", quality=92, optimize=True)
+                if image.format == "JPEG":
+                    shutil.copyfile(source, jpeg_path)
+                else:
+                    # Vecchie illustrazioni PNG restano pubblicabili.
+                    image.convert("RGB").save(jpeg_path, "JPEG", quality=92, optimize=True)
 
             public_base = os.getenv("INSTAGRAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
             media_token = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
@@ -3139,15 +3201,35 @@ def image_result():
     if errore:
         return errore
     dati = request.get_json(silent=True) or {}
+    image_memory_gate.release_image(str(dati.get("id", "")))
     chiuso = image_queue.concludi(str(dati.get("id", "")), bool(dati.get("ok")),
                                   file=dati.get("file", ""), errore=dati.get("errore", ""),
                                   durata_ms=dati.get("durata_ms", 0))
     if chiuso is None:
         return jsonify({"ok": False, "error": "job sconosciuto"}), 404
+    if chiuso.pop("_already_concluded", False):
+        return jsonify({"ok": True, "job": chiuso})
     esito = chiuso["esito"]
     fatto = file_da_job(chiuso)
     if fatto:
         voce_id, percorso = fatto
+        page = diario.get(voce_id)
+        if page:
+            excerpt = readable_excerpt(page.get("prompt", ""), page.get("testo", ""))
+            if excerpt:
+                try:
+                    root = os.path.realpath(DIARIO_IMMAGINI_DIR)
+                    source = os.path.realpath(os.path.join(root, percorso))
+                    if not source.startswith(root + os.sep) or not os.path.isfile(source):
+                        raise ValueError("immagine Comfy fuori dal volume consentito")
+                    name = f"{voce_id}.jpg"
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+\.jpg", name):
+                        raise ValueError("id voce non valido")
+                    compose_readable(source, os.path.join(TYPOGRAPHY_IMAGES_DIR, name), excerpt)
+                    percorso = "typography/" + name
+                except Exception as error:
+                    push_log('feed', 'Pannello poesia non creato', detail=str(error)[:200],
+                             source='post-loop', status='warn')
         if diario.aggiorna_file(voce_id, percorso):
             diario.save(DIARIO_FILE)
             push_log('feed', f'sketch nel diario', detail=f'voce={voce_id} file={percorso}',
@@ -3185,7 +3267,7 @@ def image_status():
     errore = _channel_error()
     if errore:
         return errore
-    return jsonify({"ok": True, **image_queue.stato()})
+    return jsonify({"ok": True, **image_queue.stato(), "memory_gate": image_memory_gate.status()})
 
 
 @app.route('/image/job/<job_id>')
@@ -3468,7 +3550,7 @@ def _genera_post(prompt: str) -> str:
     base = advanced_config["ollama"]["url"].rstrip("/")
     try:
         if ollama_native.needs_native_path(payload):
-            risposta = requests.post(f"{base}/api/chat",
+            risposta = _local_model_post(f"{base}/api/chat",
                                      json=ollama_native.to_native_chat(payload),
                                      timeout=_inference_timeout(payload["model"]))
             risposta.raise_for_status()
@@ -3864,7 +3946,7 @@ def _call_ollama_one(ollama_base: str, payload: dict, sign: bool = False, node_i
         r = requests.post(f"{ollama_base}/v1/chat/completions", data=body, headers=headers,
                           timeout=_inference_timeout(payload.get("model", "")))
     else:
-        r = requests.post(f"{ollama_base}/v1/chat/completions", json=payload,
+        r = _local_model_post(f"{ollama_base}/v1/chat/completions", json=payload,
                           timeout=_inference_timeout(payload.get("model", "")))
 
     if r.status_code == 503:
@@ -4544,7 +4626,7 @@ def v1_chat_completions():
                               "stream": False, "think": bool(stream_data.get("think", False))}
                     if stream_data.get("tools"):
                         native["tools"] = stream_data["tools"]
-                    native_resp = requests.post(f"{_inference_urls()[0]}/api/chat", json=native,
+                    native_resp = _local_model_post(f"{_inference_urls()[0]}/api/chat", json=native,
                                                 timeout=_inference_timeout(model))
                     native_resp.raise_for_status()
                     native_message = (native_resp.json().get("message") or {})
@@ -5882,6 +5964,64 @@ if shell_run_available():
     _sync_connector_tools()
 
 
+# ── kali_scan: Security Lab (Kali Linux in Docker, rete host) ──────────────
+# Il confine NON è la rete (Kali gira con network_mode: host + socket raw per
+# nmap -sS/ARP/sniffing): è KALI_TARGET_ALLOWLIST, verificata in hostctl prima
+# di ogni esecuzione. Il tool compare nel catalogo solo se l'operatore accende
+# KALI_ENABLED, dichiara almeno un target E l'host-agent è configurato.
+KALI_ENABLED = os.getenv("KALI_ENABLED", "false").strip().lower() == "true"
+KALI_TARGET_ALLOWLIST = os.getenv("KALI_TARGET_ALLOWLIST", "").strip()
+
+KALI_SCAN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "kali_scan",
+        "description": ("Esegue uno strumento di sicurezza (nmap, nikto, gobuster) dentro un "
+                        "container Kali Linux su rete host, SOLO su target dichiarati in "
+                        "KALI_TARGET_ALLOWLIST. Non scansionare host al di fuori di quella "
+                        "lista; per il codice non fidato resta code_sandbox, non questo tool."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string", "enum": ["nmap", "nikto", "gobuster"],
+                         "description": "Strumento da eseguire"},
+                "target": {"type": "string",
+                           "description": "Host o IP da testare (deve essere in KALI_TARGET_ALLOWLIST)"},
+                "args": {"type": "array", "items": {"type": "string"},
+                         "description": "Flag extra dello strumento (es. [\"-sT\", \"-p\", \"1-100\"])"},
+                "timeout": {"type": "integer", "description": "Secondi (il server applica il suo tetto)"},
+            },
+            "required": ["tool", "target"],
+        },
+    },
+}
+
+
+def kali_available() -> bool:
+    return KALI_ENABLED and _hostctl_configured() and bool(KALI_TARGET_ALLOWLIST)
+
+
+def _tool_kali_scan(args: dict) -> str:
+    if not KALI_ENABLED:
+        return "Kali error: Security Lab disabilitato (KALI_ENABLED=false)."
+    if not _hostctl_configured():
+        return "Kali error: host-agent non configurato (HOSTCTL_TOKEN assente o troppo corto)."
+    if not KALI_TARGET_ALLOWLIST:
+        return "Kali error: nessun target dichiarato (KALI_TARGET_ALLOWLIST vuoto)."
+    payload = {"action": "kali"}
+    for key in ("tool", "target", "args", "timeout"):
+        if key in args:
+            payload[key] = args[key]
+    return _host_action(payload, "Kali scan",
+                        log_detail={"tool": str(payload.get("tool", "")),
+                                    "target": str(payload.get("target", ""))})
+
+
+if kali_available():
+    _NATIVE_TOOLS.extend([KALI_SCAN_TOOL])
+    _sync_connector_tools()
+
+
 @app.route('/network/status')
 def network_status():
     auth_error = _network_admin_error()
@@ -7202,7 +7342,7 @@ def forge_generate():
                             {"role": "user", "content": description}],
                "options": {"temperature": 0.2, "num_predict": 1400, "num_ctx": 8192}}
     try:
-        response = requests.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=240)
+        response = _local_model_post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload, timeout=240)
         response.raise_for_status()
         source = response.json().get("message", {}).get("content", "").strip()
         source = re.sub(r"^```(?:python|markdown|md)?\s*|\s*```$", "", source,
@@ -8247,11 +8387,13 @@ def diario_immagine(nome):
     """Lo sketch disegnato dal Mac, dal volume delle immagini del diario.
 
     Il `file` di una voce del diario e' relativo alla cartella output di ComfyUI
-    (es. `HyperSpace/bridge_00001_.png`). Qui si serve dalla cartella che il
+    (es. `HyperSpace/bridge_00001_.jpg`; i vecchi PNG restano leggibili). Qui si serve dalla cartella che il
     control-plane vede (volume condiviso o copia): `DIARIO_IMMAGINI_DIR`,
     default `data/diario-immagini`. Se la cartella non esiste o il file manca,
     Flask risponde 404 e la UI mostra il segnaposto.
     """
+    if nome.startswith("typography/"):
+        return send_from_directory(TYPOGRAPHY_IMAGES_DIR, nome.split("/", 1)[1])
     base = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
         BASE_DIR, "..", "data", "diario-immagini")
     return send_from_directory(base, nome)

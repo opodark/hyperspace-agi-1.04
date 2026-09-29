@@ -20,6 +20,7 @@ class BuildDreamPromptTests(unittest.TestCase):
         self.assertIn("Anna", p)
         self.assertIn("SCENA", p)
         self.assertIn("DISEGNO", p)
+        self.assertIn("disegno tipografico", p)
 
     def test_il_feed_entra_nel_materiale(self):
         p = build_dream_prompt(SISTEMA, feed_recente=[{"author": "aurora", "caption": "x"}])

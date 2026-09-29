@@ -577,28 +577,29 @@ main,.panel,.card{min-width:0}
 <!-- TOOL & SKILL FORGE -->
 <div id="panel-forge" class="panel">
   <div class="sec-title">Tool &amp; Skill Forge</div>
-  <p class="hint">Il modello crea solo bozze inerti. Nessun sorgente viene importato o eseguito automaticamente.</p>
+  <p class="hint">Area di authoring controllata: il codice generato resta una <b>bozza inerte</b> finché non lo approvi. Flusso: scrivi/genera → valida → review → <b>approved</b> (serve il token) o <b>disabled</b>. Non viene mai eseguito o installato automaticamente.</p>
   <div class="forge-layout">
     <div class="card">
       <div class="card-title">Nuovo artefatto</div>
       <div class="setup-grid">
         <label class="fg">Nome<input id="forgeName" class="inp" placeholder="es. GitHub issue triage"/></label>
-        <label class="fg">Tipo<select id="forgeType" class="inp"><option value="skill">Skill Markdown</option><option value="tool">Tool Python</option><option value="patch">Patch sandbox</option></select></label>
+        <label class="fg" title="Il tipo determina la validazione statica applicata">Tipo<select id="forgeType" class="inp" title="skill = istruzioni Markdown riutilizzabili · tool = classe Python (Tools) per Open WebUI · patch = diff unificato dal sandbox"><option value="skill">Skill Markdown</option><option value="tool">Tool Python</option><option value="patch">Patch sandbox</option></select></label>
       </div>
       <label class="fg">Descrizione<textarea id="forgeDescription" class="inp" rows="4" placeholder="Cosa deve fare, input, output e vincoli"></textarea></label>
       <label class="fg">Sorgente<textarea id="forgeSource" class="inp forge-editor" placeholder="Genera con il modello oppure scrivi qui..."></textarea></label>
       <div class="row" style="gap:8px;flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="forgeGenerate()">&#10024; Genera draft</button>
-        <button class="btn btn-ghost" onclick="forgeSave()">Salva manualmente</button>
-        <button class="btn btn-ghost" onclick="forgeNew()">Nuovo</button>
-        <button class="btn btn-success" onclick="forgeOpenIde()">Apri IDE</button>
+        <button class="btn btn-primary" onclick="forgeGenerate()" title="Genera il sorgente con il modello coder (Ollama) e lo salva come draft inerte">&#10024; Genera draft</button>
+        <button class="btn btn-ghost" onclick="forgeSave()" title="Salva o aggiorna il draft: incrementa la versione e resetta l'approvazione">Salva manualmente</button>
+        <button class="btn btn-ghost" onclick="forgeNew()" title="Pulisci il form per un nuovo artefatto">Nuovo</button>
+        <button class="btn btn-success" onclick="forgeOpenIde()" title="Apri code-server (solo localhost): i sorgenti stanno in /home/coder/forge">Apri IDE</button>
       </div>
       <div class="diag-out" id="forgeOutput" style="margin-top:10px"></div>
     </div>
     <div class="card">
-      <div class="row" style="justify-content:space-between"><div class="card-title">Registry locale</div><button class="btn btn-ghost btn-sm" onclick="forgeLoad()">&#8634; Refresh</button></div>
-      <label class="fg">Token approvazione<input id="forgeToken" type="password" class="inp" autocomplete="off" placeholder="FORGE_ADMIN_TOKEN"/></label>
-      <button class="btn btn-ghost btn-sm" onclick="forgeImportEcc()">Importa skill ECC come draft</button>
+      <div class="row" style="justify-content:space-between"><div class="card-title">Registry locale</div><button class="btn btn-ghost btn-sm" onclick="forgeLoad()" title="Ricarica l'elenco degli artefatti">&#8634; Refresh</button></div>
+      <p class="hint" style="margin-top:6px">Stati artefatto: <b>draft</b> (bozza) → <b>review</b> (in revisione) → <b>approved</b> (approvata, usabile con <code>hyperspace_skills</code>) oppure <b>disabled</b>. Una modifica al sorgente resetta l'approvazione.</p>
+      <label class="fg" title="FORGE_ADMIN_TOKEN: serve solo per approvare/disabilitare e per importare ECC">Token approvazione<input id="forgeToken" type="password" class="inp" autocomplete="off" placeholder="FORGE_ADMIN_TOKEN"/></label>
+      <button class="btn btn-ghost btn-sm" onclick="forgeImportEcc()" title="Importa i workflow ECC (security-review, verification-loop) dal bundle locale pinnato, come draft">Importa skill ECC come draft</button>
       <div id="forgeList" class="forge-list"><div class="hint">Caricamento...</div></div>
     </div>
   </div>
@@ -607,13 +608,13 @@ main,.panel,.card{min-width:0}
 <!-- DEV SANDBOX -->
 <div id="panel-sandbox" class="panel">
   <div class="sec-title">Dev Sandbox</div>
-  <p class="hint">Modifica e verifica una copia usa-e-getta del repository. Le operazioni restano isolate finché non esporti il diff nel Forge.</p>
+  <p class="hint">Banco di lavoro isolato e offline su una copia usa-e-getta del repository. Scrivi, verifica (ruff/bandit/pytest/unittest/profile) e poi <b>Salva diff nel Forge</b> per revisionarlo. Nulla viene applicato al repo reale.</p>
   <div class="card">
     <div class="sandbox-toolbar">
-      <label class="fg">Etichetta workspace<input id="sandboxLabel" class="inp" value="dashboard-session" maxlength="120"/></label>
-      <button class="btn btn-primary" onclick="sandboxCreate()">Crea workspace</button>
-      <button class="btn btn-danger" id="sandboxDiscardButton" onclick="sandboxDiscard()" disabled>Elimina</button>
-      <button class="btn btn-ghost" onclick="sandboxLoad()">&#8634; Stato</button>
+      <label class="fg" title="Nome descrittivo per il workspace usa-e-getta">Etichetta workspace<input id="sandboxLabel" class="inp" value="dashboard-session" maxlength="120"/></label>
+      <button class="btn btn-primary" onclick="sandboxCreate()" title="Crea una copia pulita del repository (backend sbx o docker) e restituisce un workspace_id">Crea workspace</button>
+      <button class="btn btn-danger" id="sandboxDiscardButton" onclick="sandboxDiscard()" disabled title="Elimina definitivamente il workspace attivo">Elimina</button>
+      <button class="btn btn-ghost" onclick="sandboxLoad()" title="Ricarica lo stato del sandbox e del workspace">&#8634; Stato</button>
     </div>
     <div class="row" style="justify-content:space-between;gap:12px;flex-wrap:wrap">
       <span id="sandboxStatus" class="hint">Stato non caricato.</span>
@@ -624,8 +625,8 @@ main,.panel,.card{min-width:0}
     <div class="card">
       <div class="card-title">File</div>
       <div class="row" style="gap:6px">
-        <input id="sandboxPattern" class="inp inp-mono" value="*.py" aria-label="Pattern file"/>
-        <button class="btn btn-ghost btn-sm" onclick="sandboxRefreshFiles()">&#8634;</button>
+        <input id="sandboxPattern" class="inp inp-mono" value="*.py" aria-label="Pattern file" title="Glob per filtrare i file del workspace (es. *.py, src/*)"/>
+        <button class="btn btn-ghost btn-sm" onclick="sandboxRefreshFiles()" title="Rielenca i file del workspace">&#8634;</button>
       </div>
       <div id="sandboxFiles" class="sandbox-files"><div class="hint">Crea un workspace per esplorare i file.</div></div>
     </div>
@@ -633,8 +634,8 @@ main,.panel,.card{min-width:0}
       <div class="card">
         <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
           <label class="fg" style="flex:1">Percorso file<input id="sandboxPath" class="inp inp-mono" placeholder="es. scripts/model_bench.py"/></label>
-          <button class="btn btn-ghost" onclick="sandboxOpenPath()">Apri</button>
-          <button class="btn btn-primary" onclick="sandboxSave()">Salva</button>
+          <button class="btn btn-ghost" onclick="sandboxOpenPath()" title="Apri il file indicato nel percorso">Apri</button>
+          <button class="btn btn-primary" onclick="sandboxSave()" title="Scrivi il contenuto dell'editor nel file del workspace">Salva</button>
         </div>
         <textarea id="sandboxEditor" class="inp sandbox-editor" spellcheck="false" aria-label="Editor del file sandbox" placeholder="Seleziona un file oppure indica un nuovo percorso..."></textarea>
       </div>
@@ -642,11 +643,11 @@ main,.panel,.card{min-width:0}
         <div class="card-title">Ispezione e verifica</div>
         <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
           <label class="fg" style="flex:1;min-width:220px">Percorso da verificare<input id="sandboxCheckPath" class="inp inp-mono" value="."/></label>
-          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('ruff')">Ruff</button>
-          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('bandit')">Bandit</button>
-          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('pytest')">pytest</button>
-          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('unittest')">unittest</button>
-          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('profile')">Profile file</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('ruff')" title="Lint + formattazione (Ruff) sul percorso indicato">Ruff</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('bandit')" title="Analisi di sicurezza statica (Bandit)">Bandit</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('pytest')" title="Esegue la suite pytest">pytest</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('unittest')" title="Esegue i test unittest">unittest</button>
+          <button class="btn btn-ghost btn-sm" onclick="sandboxCheck('profile')" title="Profilatura cProfile del file indicato">Profile file</button>
         </div>
         <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:10px">
           <div class="sandbox-checks">
@@ -657,9 +658,9 @@ main,.panel,.card{min-width:0}
             <label><input id="sandboxVerifyUnittest" type="checkbox"/> unittest</label>
           </div>
           <div class="row" style="gap:6px;flex-wrap:wrap">
-            <button class="btn btn-success" onclick="sandboxVerify()">Esegui verify</button>
-            <button class="btn btn-ghost" onclick="sandboxDiff()">Mostra diff</button>
-            <button class="btn btn-warn" onclick="sandboxSaveDiffToForge()">Salva diff nel Forge</button>
+            <button class="btn btn-success" onclick="sandboxVerify()" title="Esegue il piano verify con i check selezionati qui sopra">Esegui verify</button>
+            <button class="btn btn-ghost" onclick="sandboxDiff()" title="Mostra i file modificati e la patch unificata del workspace">Mostra diff</button>
+            <button class="btn btn-warn" onclick="sandboxSaveDiffToForge()" title="Registra la patch come draft inerte .diff nel Forge (non modifica il checkout)">Salva diff nel Forge</button>
           </div>
         </div>
       </div>

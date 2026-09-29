@@ -15,14 +15,17 @@ mandare a ComfyUI — senza Flask, senza torch e senza rete: si testa da sola.
 from __future__ import annotations
 
 import re
+import json
+import os
 import threading
 import time
 import uuid
+import warnings
 
 STATI = ("pending", "running", "done", "failed")
 
-# Tetti espliciti, come per i canali: la coda è memoria del control-plane, non un
-# disco. I job sono pochi e piccoli (un prompt e quattro numeri).
+# Tetti espliciti, come per i canali: i job sono pochi e piccoli (un prompt e
+# quattro numeri), anche quando la coda e' salvata sul volume persistente.
 DEFAULT_MAX_JOBS = 8
 # I due tempi non sono decorativi e devono stare in quest'ordine:
 #   claim < esecuzione massima del ponte (900s)  -> il job verrebbe RIESEGUITO
@@ -32,7 +35,10 @@ DEFAULT_MAX_JOBS = 8
 # superato i 600s, il claim è scaduto, il job è tornato "pending" mentre ComfyUI
 # stava ancora campionando. Con 313s di misura "libera" e 700s su scheda occupata,
 # i valori vecchi (900/600) erano tarati sul caso migliore.
-DEFAULT_JOB_TTL_S = 3600.0
+# Il ponte del Mac puo' restare spento per qualche ora (notte, update, laptop
+# chiuso). Dodici ore conservano il lavoro fino al mattino senza trasformare la
+# coda in un archivio di richieste vecchie.
+DEFAULT_JOB_TTL_S = 43200.0
 DEFAULT_CLAIM_TTL_S = 1800.0
 
 # Limiti del grafo: la scheda di win11 ha 8 GB e un text encoder da 8B. Un tetto
@@ -183,7 +189,8 @@ class ImmagineQueue:
 
     def __init__(self, *, clock=time.time, max_jobs: int = DEFAULT_MAX_JOBS,
                  ttl_s: float = DEFAULT_JOB_TTL_S,
-                 claim_ttl_s: float = DEFAULT_CLAIM_TTL_S):
+                 claim_ttl_s: float = DEFAULT_CLAIM_TTL_S,
+                 state_path: str = ""):
         self.clock = clock
         self.max_jobs = max(1, int(max_jobs))
         self.ttl_s = max(30.0, float(ttl_s))
@@ -191,6 +198,8 @@ class ImmagineQueue:
         self._lock = threading.Lock()
         self._job: dict = {}
         self._storico: list = []
+        self.state_path = str(state_path or "")
+        self._restore()
 
     def accoda(self, job: dict) -> dict:
         """Mette in coda un job e pota i vecchi (scaduti o conclusi)."""
@@ -200,6 +209,7 @@ class ImmagineQueue:
             if len(attivi) >= self.max_jobs:
                 raise RuntimeError(f"coda piena ({self.max_jobs} job in attesa o in corso)")
             self._job[job["id"]] = dict(job)
+            self._save_locked()
             return dict(self._job[job["id"]])
 
     def prossimo(self, capace_di: str | None = None) -> dict | None:
@@ -220,6 +230,7 @@ class ImmagineQueue:
             job = candidati[0]
             job["stato"] = "running"
             job["preso_ts"] = self.clock()
+            self._save_locked()
             return dict(job)
 
     def concludi(self, job_id: str, ok: bool, *, file: str = "", errore: str = "",
@@ -229,18 +240,39 @@ class ImmagineQueue:
             job = self._job.get(str(job_id or ""))
             if job is None:
                 return None
+            if job["stato"] in ("done", "failed"):
+                return {**job, "_already_concluded": True}
             job["stato"] = "done" if ok else "failed"
             job["esito"] = {"file": str(file or ""),
                             "errore": str(errore or "")[:400],
                             "durata_ms": int(durata_ms or 0), "ts": self.clock()}
             self._storico.append(dict(job))
             self._storico = self._storico[-20:]
+            self._save_locked()
             return dict(job)
+
+    def rinvia(self, job_id: str) -> bool:
+        """Return a claimed job to the queue after temporary host pressure."""
+        with self._lock:
+            job = self._job.get(str(job_id or ""))
+            if not job or job["stato"] != "running":
+                return False
+            job["stato"] = "pending"
+            job["preso_ts"] = 0.0
+            self._save_locked()
+            return True
 
     def job(self, job_id: str) -> dict | None:
         with self._lock:
             trovato = self._job.get(str(job_id or ""))
             return dict(trovato) if trovato else None
+
+    def running_ids(self, famiglia: str = "") -> list[str]:
+        with self._lock:
+            self._pota_locked()
+            return [j["id"] for j in self._job.values()
+                    if j["stato"] == "running"
+                    and (not famiglia or j.get("famiglia") == famiglia)]
 
     def da_consegnare(self, canale: str) -> list:
         """Le immagini PRONTE da consegnare a questo canale, non ancora consegnate.
@@ -271,6 +303,7 @@ class ImmagineQueue:
             if job is None or job["stato"] != "done":
                 return False
             job["consegnato"] = True
+            self._save_locked()
             return True
 
     def stato(self) -> dict:
@@ -299,17 +332,69 @@ class ImmagineQueue:
     def _pota_locked(self) -> None:
         """Toglie i job scaduti e libera i claim morti. Chiamata con il lock."""
         adesso = self.clock()
+        changed = False
         for chiave, job in list(self._job.items()):
             eta = adesso - job["creato_ts"]
             if job["stato"] in ("pending", "running") and eta > self.ttl_s:
                 del self._job[chiave]
+                changed = True
                 continue
             if (job["stato"] == "running"
                     and adesso - job["preso_ts"] > self.claim_ttl_s):
                 job["stato"] = "pending"
                 job["preso_ts"] = 0.0
+                changed = True
             if job["stato"] in ("done", "failed") and eta > self.ttl_s:
                 del self._job[chiave]
+                changed = True
+        if changed:
+            self._save_locked()
+
+    def _restore(self) -> None:
+        """Restore jobs; keep live claims until their lease expires.
+
+        A bridge can still be rendering while the control-plane restarts. Its
+        result must be accepted before the job can be offered a second time.
+        """
+        if not self.state_path:
+            return
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            jobs = saved.get("jobs", {})
+            history = saved.get("history", [])
+            if not isinstance(jobs, dict) or not isinstance(history, list):
+                return
+            self._job = {str(key): dict(value) for key, value in jobs.items()
+                         if isinstance(value, dict) and value.get("id")}
+            self._storico = [dict(value) for value in history if isinstance(value, dict)][-20:]
+            with self._lock:
+                self._pota_locked()
+                self._save_locked()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            # Una coda corrotta non deve impedire l'avvio del control-plane.
+            self._job = {}
+            self._storico = []
+
+    def _save_locked(self) -> None:
+        """Scrittura atomica: un kill del container non lascia mezzo JSON."""
+        if not self.state_path:
+            return
+        directory = os.path.dirname(os.path.abspath(self.state_path))
+        try:
+            os.makedirs(directory, exist_ok=True)
+            temporary = self.state_path + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump({"version": 1, "jobs": self._job, "history": self._storico},
+                          handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.state_path)
+        except OSError as error:
+            # La coda in memoria resta utilizzabile, ma il mancato salvataggio
+            # deve comparire nei log: altrimenti il prossimo restart perde job.
+            warnings.warn(f"coda immagini non salvata in {self.state_path}: {error}",
+                          RuntimeWarning, stacklevel=2)
 
 
 # ── Il grafo da mandare a ComfyUI ────────────────────────────────────────────
@@ -353,8 +438,17 @@ MODELLO_SDXL = {
 }
 
 
+def _save_node(prefisso: str, jpeg: bool) -> dict:
+    if jpeg:
+        return {"class_type": "HyperSpaceSaveJPEG",
+                "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso),
+                           "quality": 92}}
+    return {"class_type": "SaveImage",
+            "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso)}}
+
+
 def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSpace",
-             risoluzione: int | None = None) -> dict:
+             risoluzione: int | None = None, jpeg: bool = True) -> dict:
     """Il grafo ComfyUI per un job, scelto dalla sua famiglia di modello.
 
     `modello` sovrascrive i file (un'altra macchina avrà altri nomi) e il job può
@@ -362,7 +456,7 @@ def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSp
     (GGUF + text encoder su CPU, default) oppure SDXL-Turbo (per il Mac).
     """
     if (job or {}).get("famiglia") == FAMIGLIA_SDXL:
-        return workflow_sdxl(job, modello=modello, prefisso=prefisso)
+        return workflow_sdxl(job, modello=modello, prefisso=prefisso, jpeg=jpeg)
     scelte = {**MODELLO_DEFAULT, **(modello or {})}
     if str(job.get("modello") or "").strip():
         scelte["unet"] = str(job["modello"]).strip()
@@ -390,13 +484,12 @@ def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSp
                            "scheduler": scelte["scheduler"], "denoise": 1.0}},
         "457": {"class_type": "VAEDecode",
                 "inputs": {"samples": ["458", 0], "vae": ["454", 0]}},
-        "470": {"class_type": "SaveImage",
-                "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso)}},
+        "470": _save_node(prefisso, jpeg),
     }
 
 
 def workflow_sdxl(job: dict, *, modello: dict | None = None,
-                  prefisso: str = "HyperSpace") -> dict:
+                  prefisso: str = "HyperSpace", jpeg: bool = True) -> dict:
     """Il grafo SDXL/RealVisXL: checkpoint unico, CFG 7 e sampler DPM++ 2M.
 
     A differenza di Qwen, SDXL usa il negativo (non le istruzioni dentro il
@@ -426,8 +519,7 @@ def workflow_sdxl(job: dict, *, modello: dict | None = None,
                            "scheduler": scelte["scheduler"], "denoise": 1.0}},
         "457": {"class_type": "VAEDecode",
                 "inputs": {"samples": ["458", 0], "vae": ["451", 2]}},
-        "470": {"class_type": "SaveImage",
-                "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso)}},
+        "470": _save_node(prefisso, jpeg),
     }
 
 
@@ -446,4 +538,3 @@ def immagini_da_history(run: dict) -> list:
             cartella = str(immagine.get("subfolder") or "").strip("/")
             file.append(f"{cartella}/{nome}".lstrip("/"))
     return file
-

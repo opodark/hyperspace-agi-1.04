@@ -776,6 +776,76 @@ def action_shell_session(params: dict) -> dict:
     raise ValueError("operazione non supportata: usa open, run, read, close o list")
 
 
+# ── kali: Security Lab (Kali Linux in Docker, rete host) ────────────────────
+# Il confine NON è la rete (Kali gira con network_mode: host + socket raw per
+# nmap -sS/ARP/sniffing): è KALI_TARGET_ALLOWLIST, verificata qui prima di ogni
+# esecuzione, più l'allowlist degli eseguibili. Senza target dichiarati resta
+# chiusa (fail-closed).
+_KALI_ALLOWED_EXECUTABLES = {"nmap", "nikto", "gobuster"}
+_KALI_CONTAINER = "hyperspace_kali"
+
+
+def _kali_target_allowlist() -> list[str]:
+    raw = config_value("KALI_TARGET_ALLOWLIST", "")
+    return [item.strip().lower() for item in raw.split(",") if item.strip()]
+
+
+def _kali_target_allowed(target: str) -> bool:
+    """True solo se `target` è dichiarato: hostname esatto, IP esatto o IP in una CIDR."""
+    target = target.strip().lower()
+    if not target:
+        return False
+    try:
+        address = ipaddress.ip_address(target)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    for entry in _kali_target_allowlist():
+        if "/" in entry:
+            try:
+                network = ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                continue
+            if is_ip and address in network:
+                return True
+        elif is_ip and target == entry:
+            return True
+        elif not is_ip and target == entry:
+            return True
+    return False
+
+
+def _docker_exec_kali(argv: list[str], timeout: int) -> dict:
+    command = ["docker", "exec", _KALI_CONTAINER, *argv]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
+                "stdout": proc.stdout[-262144:], "stderr": proc.stderr[-262144:],
+                "output": (proc.stdout + proc.stderr)[-262144:],
+                "truncated": len(proc.stdout) + len(proc.stderr) > 262144}
+    except subprocess.TimeoutExpired as error:
+        output = ((error.stdout or "") + (error.stderr or ""))[-262144:]
+        return {"ok": False, "error": "kali command timed out", "output": output}
+    except FileNotFoundError:
+        return {"ok": False, "error": "docker CLI non trovato sull'host"}
+
+
+def action_kali(params: dict) -> dict:
+    """Esegue nmap/nikto/gobuster SOLO su target dichiarati in KALI_TARGET_ALLOWLIST."""
+    tool = str(params.get("tool", "")).strip().lower()
+    if tool not in _KALI_ALLOWED_EXECUTABLES:
+        raise ValueError(f"kali tool non consentito: {tool!r}")
+    target = str(params.get("target", "")).strip()
+    if not _kali_target_allowed(target):
+        raise ValueError("target non in KALI_TARGET_ALLOWLIST")
+    extra = params.get("args") or []
+    if not isinstance(extra, list) or len(extra) > 16:
+        raise ValueError("args deve essere una lista di massimo 16 elementi")
+    argv = [str(item)[:200] for item in extra]
+    timeout = max(10, min(int(params.get("timeout", 120)), 600))
+    return _docker_exec_kali([tool, *argv, target], timeout)
+
+
 ACTIONS = {
     "ngrok_status": action_ngrok_status,
     "ngrok_start": action_ngrok_start,
@@ -790,6 +860,7 @@ ACTIONS = {
     "sbx_sandbox": action_sbx_sandbox,
     "shell_run": action_shell_run,
     "shell_session": action_shell_session,
+    "kali": action_kali,
 }
 
 # Sola lettura = osserva e basta. `shell_run` NON e' qui: esegue comandi con i

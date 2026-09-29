@@ -37,7 +37,10 @@ def build_dream_prompt(sistema: str, *, memorie=(), feed_recente=()) -> str:
              "",
              "Di notte sogni. Scrivi UN sogno breve per il tuo diario:",
              "una scena onirica in una o due frasi, e un'idea per il disegno",
-             "che la illustra (uno schizzo, non una fotografia)."]
+             "che la illustra (uno schizzo, non una fotografia).",
+             "Puoi immaginare anche un disegno tipografico o una poesia illustrata:",
+             "in quel caso scrivi i versi esatti nella SCENA e riportali tra virgolette",
+             "nel DISEGNO, brevi; evita di affidare al disegno parole non presenti nella SCENA."]
     if memorie:
         righe += ["", "Echi anonimi delle conversazioni recenti:",
                   *[f"- {m}" for m in memorie[:5]]]

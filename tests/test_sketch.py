@@ -28,6 +28,11 @@ class PromptSketchTests(unittest.TestCase):
         p = prompt_sketch("  torre   bianca  ")
         self.assertIn("torre bianca", p)
 
+    def test_una_poesia_puo_diventare_immagine(self):
+        job = job_sketch("una poesia scritta su un foglio")
+        self.assertIn("una poesia scritta su un foglio", job["prompt"])
+        self.assertNotIn("text", job["negativo"])
+
 
 class JobSketchTests(unittest.TestCase):
     def test_il_job_e_leggero_e_per_il_feed(self):

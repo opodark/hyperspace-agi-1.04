@@ -56,12 +56,15 @@ nuovi entrano in `queue_pending` e non partono mai. Da fuori non si ripara: va
 riavviato ComfyUI. Riconoscerlo è facile: `comfy_bridge.py --check` lo dice, e
 `/queue` mostra `pending` che non scende.
 
-Da qui **una scheda, un modello**, che è una decisione dichiarata e non una speranza:
-prima di accodare un'immagine il control-plane chiede a Ollama di scaricare
-`CHANNEL_MODEL` (`keep_alive: 0`) — `shared/gpu_budget.py` decide, `/image/generate`
-esegue, e l'esito compare nella risposta (`scheda`) e nei log. Ollama ricarica il
-modello alla prima richiesta: si paga qualche secondo al primo messaggio dopo
-un'immagine, non si paga un crash. Si spegne con `IMAGE_FREE_GPU=false`.
+Sul Mac il control-plane prenota la memoria quando il bridge ritira un job SDXL,
+indipendentemente da chi lo ha accodato (chat, post, sogno o Instagram). Attende
+le chat gia' attive e fa aspettare le nuove richieste di inferenza locale. Il
+bridge scarica i modelli Ollama residenti (`keep_alive: 0`), libera la cache
+ComfyUI se serve e avvia la generazione solo quando la memoria libera raggiunge
+`BRIDGE_MIN_FREE_GB` (4 GB per default). Se
+non ci riesce, rinvia il job nella coda persistente. Al termine libera la
+prenotazione; Ollama si ricarica alla prima richiesta successiva. La prenotazione
+scade automaticamente se il bridge muore. La coda vive in `/app/data/image-jobs.json`.
 
 E una misura che vale più di un tetto: con la scheda occupata la stessa generazione
 è passata da 313s a oltre 700s. Il claim della coda è stato tarato di conseguenza
@@ -111,6 +114,16 @@ python integrations\comfyui\comfy_bridge.py --check   # non genera nulla
 python integrations\comfyui\comfy_bridge.py --once    # un job ed esce
 python integrations\comfyui\comfy_bridge.py           # in attesa, in ciclo
 ```
+
+Per salvare JPG direttamente da ComfyUI, installa il nodo del progetto
+`integrations/comfyui/custom_nodes/hyperspace_save_jpeg.py` nella cartella
+`custom_nodes` dell'installazione che esegue il job e riavvia ComfyUI. Sul Mac
+la copia installata e' un link al file del repository. Il bridge verifica
+`/object_info/HyperSpaceSaveJPEG` a ogni job: se il nodo e' disponibile manda
+un workflow JPG (qualita' 92); altrimenti usa temporaneamente il `SaveImage`
+PNG standard. I vecchi PNG del diario restano leggibili e pubblicabili.
+Su Windows puoi usare `integrations\comfyui\install-jpeg-node.ps1` (oppure
+`-CustomNodes <percorso>` se ci sono piu' installazioni), poi riavviare ComfyUI.
 
 In ciclo il ponte prende un lucchetto (`data/comfy-bridge.lock`, vedi
 `shared/single_instance.py`): un **secondo** ponte non parte e lo scrive nel log.

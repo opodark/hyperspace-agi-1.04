@@ -7,6 +7,7 @@ negative dentro il prompt). Questi test difendono quelle scelte: se qualcuno le
 toglie, l'immagine smette di uscire o la VRAM non basta piu'.
 """
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -122,12 +123,45 @@ class CodaTests(unittest.TestCase):
         self.assertEqual(chiuso["esito"]["file"], "HyperSpace/x.png")
         self.assertIsNone(self.coda.concludi("non-esiste", True))
 
+    def test_un_risultato_ripetuto_non_cambia_il_job(self):
+        job = self._job()
+        self.coda.concludi(job["id"], True, file="HyperSpace/x.png")
+        repeated = self.coda.concludi(job["id"], False, errore="timeout")
+        self.assertTrue(repeated["_already_concluded"])
+        self.assertEqual(repeated["stato"], "done")
+        self.assertEqual(repeated["esito"]["file"], "HyperSpace/x.png")
+
     def test_lo_stato_racconta_cosa_sta_succedendo(self):
         job = self._job()
         self.coda.prossimo()
         self.assertEqual(self.coda.stato()["in_esecuzione"], 1)
         self.coda.concludi(job["id"], False, errore="scheda piena")
         self.assertEqual(self.coda.stato()["ultimi"][0]["esito"]["errore"], "scheda piena")
+
+    def test_riprende_un_job_pending_dopo_il_riavvio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            percorso = str(Path(directory) / "image-jobs.json")
+            creatrice = ImmagineQueue(clock=self.orologio, state_path=percorso)
+            job = creatrice.accoda(nuovo_job("un faro", adesso=self.orologio()))
+            ripresa = ImmagineQueue(clock=self.orologio, state_path=percorso)
+            self.assertEqual(ripresa.prossimo()["id"], job["id"])
+
+    def test_un_job_running_torna_pending_dopo_scadenza_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            percorso = str(Path(directory) / "image-jobs.json")
+            creatrice = ImmagineQueue(clock=self.orologio, state_path=percorso)
+            job = creatrice.accoda(nuovo_job("un faro", adesso=self.orologio()))
+            creatrice.prossimo()
+            ripresa = ImmagineQueue(clock=self.orologio, state_path=percorso)
+            self.assertIsNone(ripresa.prossimo())
+            self.orologio.avanza(DEFAULT_CLAIM_TTL_S + 1)
+            self.assertEqual(ripresa.prossimo()["id"], job["id"])
+
+    def test_un_job_rinviato_resta_disponibile(self):
+        job = self._job()
+        self.coda.prossimo()
+        self.assertTrue(self.coda.rinvia(job["id"]))
+        self.assertEqual(self.coda.prossimo()["id"], job["id"])
 
 
 class ConsegnaTests(unittest.TestCase):
@@ -224,6 +258,13 @@ class GrafoTests(unittest.TestCase):
         self.assertEqual(grafo["457"]["inputs"]["samples"], ["458", 0])
         self.assertEqual(grafo["470"]["inputs"]["images"], ["457", 0])
 
+    def test_il_salvataggio_preferito_e_jpeg_con_fallback_png(self):
+        jpeg = workflow(self.job)["470"]
+        png = workflow(self.job, jpeg=False)["470"]
+        self.assertEqual(jpeg["class_type"], "HyperSpaceSaveJPEG")
+        self.assertEqual(jpeg["inputs"]["quality"], 92)
+        self.assertEqual(png["class_type"], "SaveImage")
+
 
 class FamigliaTests(unittest.TestCase):
     def test_una_famiglia_sconosciuta_cade_sul_default(self):
@@ -289,9 +330,9 @@ class AffinitaTests(unittest.TestCase):
 class HistoryTests(unittest.TestCase):
     def test_i_file_si_leggono_anche_dalle_sottocartelle(self):
         run = {"outputs": {"470": {"images": [
-            {"filename": "a.png", "subfolder": "HyperSpace", "type": "output"},
+            {"filename": "a.jpg", "subfolder": "HyperSpace", "type": "output"},
             {"filename": "b.png", "subfolder": "", "type": "output"}]}}}
-        self.assertEqual(immagini_da_history(run), ["HyperSpace/a.png", "b.png"])
+        self.assertEqual(immagini_da_history(run), ["HyperSpace/a.jpg", "b.png"])
 
     def test_una_run_senza_immagini_non_e_un_errore(self):
         self.assertEqual(immagini_da_history({}), [])

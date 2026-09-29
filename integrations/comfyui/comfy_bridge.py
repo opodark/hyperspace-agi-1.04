@@ -21,6 +21,8 @@ Config (variabili d'ambiente):
                   (es. sdxl-turbo per il Mac); vuoto = qualunque job
   BRIDGE_POLL_S   intervallo fra due giri a vuoto (default 5 s)
   BRIDGE_TIMEOUT_S  tetto di attesa di UNA generazione (default 900 s)
+  BRIDGE_OLLAMA_URL  Ollama locale da liberare prima degli sketch sul Mac
+  BRIDGE_MIN_FREE_GB memoria libera richiesta prima di avviare ComfyUI (default 4)
 
 Uso:
   python integrations/comfyui/comfy_bridge.py --check    # non genera nulla
@@ -64,7 +66,7 @@ def _output_default() -> str:
     Su Windows (LOCALAPPDATA presente) è quella dell'app desktop: il driver
     Telegram usa lì il percorso ASSOLUTO per consegnare il file. Altrove (es. il
     Mac) è vuota, così il ponte riferisce il percorso RELATIVO
-    (HyperSpace/bridge_...png) e /diario/immagini lo serve dal volume montato
+    (HyperSpace/bridge_...jpg, o .png su host legacy) e /diario/immagini lo serve dal volume montato
     (DIARIO_IMMAGINI_DIR) — un percorso assoluto del Mac non sarebbe leggibile
     dal control-plane in container.
     """
@@ -177,7 +179,14 @@ def esegui_job(job: dict, *, comfy_url: str = COMFY_DEFAULT, output_dir: str = "
     Non solleva: chi chiama deve poter RIFERIRE un fallimento al control-plane,
     non morire con lui.
     """
-    grafo = workflow(job, prefisso=prefisso)
+    # The project node saves JPEG directly. Hosts not yet updated continue to
+    # work with ComfyUI's built-in PNG saver until the node is installed.
+    node_status, node_info = _richiesta(
+        f"{comfy_url}/object_info/HyperSpaceSaveJPEG", timeout=10)
+    jpeg = node_status == 200 and "HyperSpaceSaveJPEG" in node_info
+    grafo = workflow(job, prefisso=prefisso, jpeg=jpeg)
+    if not jpeg:
+        log("HyperSpaceSaveJPEG assente: uso PNG finché il nodo non è installato")
     stato, dati = _richiesta(f"{comfy_url}/prompt",
                              payload={"prompt": grafo, "client_id": "hyperspace-bridge"},
                              timeout=30)
@@ -209,6 +218,42 @@ def esegui_job(job: dict, *, comfy_url: str = COMFY_DEFAULT, output_dir: str = "
     return False, "", f"nessuna immagine entro {int(timeout_s)}s"
 
 
+def prepara_memoria_mac(comfy_url: str, ollama_url: str, *, min_free_gb: float = 4,
+                        timeout_s: float = 90) -> tuple[bool, str]:
+    """Unload locally resident Ollama models, then check actual free unified RAM."""
+    base = ollama_url.rstrip("/")
+    stato, dati = _richiesta(f"{base}/api/ps", timeout=10)
+    if stato != 200:
+        return False, f"Ollama non raggiungibile per liberare memoria (HTTP {stato})"
+    for model in dati.get("models") or []:
+        name = str(model.get("name") or model.get("model") or "")
+        if not name:
+            continue
+        stato, _ = _richiesta(f"{base}/api/generate",
+                              payload={"model": name, "keep_alive": 0, "stream": False},
+                              timeout=30)
+        if stato != 200:
+            return False, f"impossibile scaricare {name} da Ollama (HTTP {stato})"
+        log(f"modello Ollama scaricato: {name}")
+    deadline = time.monotonic() + timeout_s
+    cache_released = False
+    while time.monotonic() < deadline:
+        stato, stats = _richiesta(f"{comfy_url}/system_stats", timeout=10)
+        if stato != 200:
+            return False, f"ComfyUI non raggiungibile (HTTP {stato})"
+        free = int(((stats.get("devices") or [{}])[0]).get("vram_free") or 0)
+        if free >= min_free_gb * 1073741824:
+            return True, ""
+        if not cache_released:
+            # ComfyUI can retain the previous checkpoint in unified memory.
+            # Ask its local worker to release it before retrying the measurement.
+            _richiesta(f"{comfy_url}/free",
+                       payload={"unload_models": True, "free_memory": True}, timeout=10)
+            cache_released = True
+        time.sleep(3)
+    return False, f"memoria libera sotto {min_free_gb:g} GB"
+
+
 def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -226,6 +271,7 @@ def main(argv=None) -> int:
     parser.add_argument("--poll", type=float, default=float(os.getenv("BRIDGE_POLL_S", "5")))
     parser.add_argument("--timeout", type=float,
                         default=float(os.getenv("BRIDGE_TIMEOUT_S", "900")))
+    parser.add_argument("--ollama", default=os.getenv("BRIDGE_OLLAMA_URL", "http://127.0.0.1:11434"))
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
     intestazioni = {"X-Hyperspace-Channel-Token": args.token} if args.token else {}
@@ -284,13 +330,33 @@ def main(argv=None) -> int:
         iniziato = time.monotonic()
         log(f"job {job['id']}: {job['larghezza']}x{job['altezza']} passi={job['passi']} "
             f"seed={job['seed']} da={job['richiedente'] or '?'}")
+        if args.model == "sdxl-turbo":
+            ready, reason = prepara_memoria_mac(
+                args.comfy, args.ollama,
+                min_free_gb=float(os.getenv("BRIDGE_MIN_FREE_GB", "4")))
+            if not ready:
+                log(f"job {job['id']} rinviato: {reason}")
+                _richiesta(f"{base}/image/defer", payload={"id": job["id"]},
+                           timeout=20, headers=intestazioni)
+                if args.once:
+                    return 1
+                time.sleep(max(10.0, args.poll))
+                continue
         ok, percorso, errore = esegui_job(job, comfy_url=args.comfy,
                                           output_dir=args.output, timeout_s=args.timeout)
         durata = int((time.monotonic() - iniziato) * 1000)
-        _richiesta(f"{base}/image/result",
-                   payload={"id": job["id"], "ok": ok, "file": percorso,
-                            "errore": errore, "durata_ms": durata},
-                   timeout=20, headers=intestazioni)
+        result = {"id": job["id"], "ok": ok, "file": percorso,
+                  "errore": errore, "durata_ms": durata}
+        while True:
+            reported, reply = _richiesta(f"{base}/image/result", payload=result,
+                                         timeout=20, headers=intestazioni)
+            if reported == 200:
+                break
+            if reported in (401, 403, 404):
+                log(f"risultato job {job['id']} rifiutato: HTTP {reported} {reply}")
+                break
+            log(f"control-plane non disponibile per il risultato di {job['id']}; riprovo")
+            time.sleep(max(5.0, args.poll))
         log(f"{'fatto' if ok else 'fallito'} in {durata / 1000:.1f}s: "
             f"{percorso or errore}")
         if args.once:
@@ -299,4 +365,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

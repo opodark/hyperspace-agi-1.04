@@ -19,6 +19,7 @@ class BuildPromptTests(unittest.TestCase):
         self.assertIn("Anna", p)
         self.assertIn("DIDASCALIA", p)
         self.assertIn("IMMAGINE", p)
+        self.assertIn("anche tipografica", p)
 
     def test_la_reazione_nomina_il_post_a_cui_risponde(self):
         p = build_post_prompt(SISTEMA, replica_a={"author": "aurora", "caption": "ciao"})

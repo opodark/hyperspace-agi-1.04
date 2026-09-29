@@ -410,6 +410,22 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Security Lab: Kali Linux su rete host. Il confine NON è la rete (socket raw
+  # + rete host per nmap -sS/ARP/sniffing), ma KALI_TARGET_ALLOWLIST verificata
+  # in hostctl prima di ogni esecuzione. Profilo "security": si avvia solo con
+  # `docker compose --profile security up -d --build kali`.
+  kali:
+    build:
+      context: .
+      dockerfile: kali/Dockerfile
+    container_name: hyperspace_kali
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    restart: "no"
+    profiles: ["security"]
+
   control-plane:
     build:
       context: .

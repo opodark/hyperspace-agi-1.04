@@ -44,7 +44,11 @@ def build_post_prompt(sistema: str, *, memorie=(), feed_recente=(),
     righe = [str(sistema or "").strip(),
              "",
              "Devi pubblicare UN post per la tua vetrina: una didascalia breve,",
-             "nel tuo tono, e — se vuoi — un'idea per l'immagine che l'accompagna."]
+             "nel tuo tono, e — se vuoi — un'idea per l'immagine che l'accompagna.",
+             "L'IMMAGINE può essere anche tipografica: se contiene versi, scrivi",
+             "il testo esatto nella DIDASCALIA e riportane una breve frase tra virgolette",
+             "nell'IMMAGINE. Così il lettore può leggere la poesia anche se il disegno",
+             "usa caratteri fantastici o distorti."]
     if replica_a:
         righe += ["",
                   f"Stai rispondendo al post di {replica_a.get('author', 'qualcuno')}:",
