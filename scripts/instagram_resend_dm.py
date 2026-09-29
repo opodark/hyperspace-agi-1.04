@@ -17,6 +17,11 @@ consegna al control-plane (`POST /channel/outbox/ack`), così la coda non mente.
 
 L'URL usa il percorso relativo *completo* (`HyperSpace/bridge_00048_.jpg`): è
 quello che serve `GET /instagram/media/<token>/<path:nome>`.
+
+Attenzione: Meta rifiuta gli allegati serviti da host dietro Cloudflare
+(`error_subcode=2018007`) senza nemmeno scaricarli, quindi finché
+`INSTAGRAM_PUBLIC_BASE_URL` punta al tunnel questo script non può consegnare.
+Dettagli, prove e alternative in `docs/instagram-dm-media.md`.
 """
 from __future__ import annotations
 
