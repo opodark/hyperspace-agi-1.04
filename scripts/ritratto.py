@@ -155,6 +155,12 @@ def divergenze_documenti(percorsi) -> list[str]:
     avviso che suona sempre. Il 2026-09-23 i due documenti erano a versioni diverse,
     uno con la vetrina e uno senza, e nessuno se ne sarebbe accorto fino a un
     ritratto con la faccia sbagliata: ecco perché il controllo esiste.
+
+    E si confrontano solo documenti della **stessa identità** (2026-09-30): Aurora e
+    Anna sono due persone, e `PERSONA_CANDIDATI` elenca solo i documenti di Aurora —
+    così `--persona data/persona-anna.json` stampava sette avvisi (uno per sezione)
+    a ogni esecuzione. Un avviso che suona sempre è un avviso che non si legge: due
+    identità diverse non sono una divergenza, sono due identità.
     """
     documenti = []
     for percorso in percorsi:
@@ -166,8 +172,11 @@ def divergenze_documenti(percorsi) -> list[str]:
     if len(documenti) < 2:
         return []
     riferimento_percorso, riferimento = documenti[0]
+    identita = str(riferimento.get("name") or "")
     avvisi: list[str] = []
     for percorso, documento in documenti[1:]:
+        if str(documento.get("name") or "") != identita:
+            continue
         for sezione in SEZIONI_DI_IDENTITA:
             primo = json.dumps(riferimento.get(sezione), sort_keys=True, ensure_ascii=False)
             secondo = json.dumps(documento.get(sezione), sort_keys=True, ensure_ascii=False)
@@ -189,9 +198,17 @@ def accoda_ritratto(base: str, token: str, vetrina: dict, *, scena: str = "",
         "larghezza": int(vetrina["larghezza"]),
         "altezza": int(vetrina["altezza"]),
         "passi": int(vetrina["passi"]),
+        # Il secondo passaggio (0 = uno solo): lo dichiara la vetrina, perché la
+        # misura del ritratto è una sua scelta — 512×768 + fix dà il 2:3 dei demo
+        # del modello, 768×768 con il fix sarebbe 1536×1536 (fuori misura).
+        "fix": int(vetrina.get("fix") or 0),
         "seed": int(vetrina["seed"] if seed is None else seed),
         "richiedente": "ritratto",
         "destinazione": destinazione.strip(),
+        # Con chi è disegnato il volto: se il documento non lo dichiara resta vuoto,
+        # e il job cade sulla famiglia di default della coda come è sempre stato.
+        "famiglia": str(vetrina.get("famiglia") or ""),
+        "modello": str(vetrina.get("modello") or ""),
     }
     return chiama(f"{base}/image/generate", token, metodo="post", payload=payload)
 
@@ -261,6 +278,11 @@ def main(argv=None) -> int:
           f"{vetrina['passi']} passi · stile "
           + ("dal documento" if stile_dichiarato else "default del modulo (dichiaralo "
              "in `vetrina` per cambiarlo)"))
+    # Con cosa è disegnato il volto. Vuoto = famiglia di default della coda: senza
+    # questa riga, sapere che un ritratto è uscito da un modello invece che da un
+    # altro vorrebbe dire leggere il job dopo.
+    print("modello:   " + (vetrina.get("famiglia") or "(famiglia di default della coda)")
+          + (f" · {vetrina['modello']}" if vetrina.get("modello") else ""))
     altri_documenti = [p for p in PERSONA_CANDIDATI if p != percorso and p.is_file()]
     for avviso in divergenze_documenti([percorso] + altri_documenti):
         print(f"ATTENZIONE: due documenti di identità divergono — {avviso}")
@@ -313,6 +335,12 @@ def main(argv=None) -> int:
         print(f"  {dati['scheda']}")
     print(f"job {job['id']}: {job['larghezza']}x{job['altezza']} passi={job['passi']} "
           f"seed={job['seed']}")
+    if int(job.get("fix") or 0) > 1:
+        # La misura del job è quella del PRIMO passaggio: il file esce al doppio,
+        # e va detto prima di aspettare il fix (che sulla Mac costa minuti).
+        fattore = int(job["fix"])
+        print(f"  fix {fattore}×: il file esce a "
+              f"{job['larghezza'] * fattore}x{job['altezza'] * fattore}")
     if args.chat:
         print(f"consegna: il driver manderà il file in {args.chat} appena è pronto")
     print(f"il ponte lo esegue (misura tipica ~5 minuti): aspetto fino a {int(args.attesa)}s")

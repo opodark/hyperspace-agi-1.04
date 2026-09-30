@@ -15,9 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from shared.image_jobs import (DEFAULT_CLAIM_TTL_S, DEFAULT_JOB_TTL_S,  # noqa: E402
-                               LIMITE_LATO, ImmagineQueue,
-                               immagini_da_history, nuovo_job,
-                               scegli_pose_preset, workflow)
+                               FAMIGLIA_SD15, FAMIGLIE, FAMIGLIE_CHECKPOINT,
+                               FIX_UPSCALER, LIMITE_LATO, MODELLO_SD15, ImmagineQueue,
+                               famiglie_capaci, immagini_da_history, nuovo_job,
+                               scegli_pose_preset, usa_checkpoint, workflow)
 
 
 class OrologioFinto:
@@ -48,6 +49,23 @@ class TempiTests(unittest.TestCase):
         self.assertGreater(
             DEFAULT_CLAIM_TTL_S, timeout_ponte,
             "un claim più corto del timeout del ponte fa rieseguire un job vivo")
+
+    def test_il_tetto_del_ponte_copre_la_ricetta_dei_demo(self):
+        """Il tetto si misura sulla variante più lenta, non sul caso medio.
+
+        Il 2026-09-30, con la ricetta dei demo (512×768 + `fix: 2` + 30 passi),
+        `bridge_00085_` è uscita in 902,0 s di job: 2 s **dopo** un tetto da
+        900 s. Il ponte ha riferito «nessuna immagine entro 900s» mentre ComfyUI
+        stava finendo di scrivere il JPEG, e la variante è risultata fallita pur
+        essendo buona. Con 40 passi la stessa ricetta renderebbe in ~1190 s:
+        il tetto deve stare sopra la misura con margine, non addosso.
+        """
+        from integrations.comfyui.comfy_bridge import esegui_job
+        import inspect
+        timeout_ponte = float(inspect.signature(esegui_job).parameters["timeout_s"].default)
+        self.assertGreaterEqual(
+            timeout_ponte, 1200.0,
+            "900 s è la durata della variante, non il tetto: serve margine")
 
     def test_il_job_sopravvive_al_suo_claim(self):
         self.assertGreater(DEFAULT_JOB_TTL_S, DEFAULT_CLAIM_TTL_S,
@@ -276,6 +294,47 @@ class FamigliaTests(unittest.TestCase):
         job = nuovo_job("x", famiglia="sdxl-turbo")
         self.assertEqual(job["famiglia"], "sdxl-turbo")
 
+    def test_la_famiglia_sd15_e_una_famiglia_vera(self):
+        """SD 1.5 (ChickMixFlat) e' la famiglia del volto di Anna: se sparisse
+        dall'elenco, `nuovo_job` la farebbe cadere su Qwen-Image — in silenzio, e
+        il ritratto uscirebbe da un altro modello.
+        """
+        job = nuovo_job("una ragazza illustrata", famiglia=FAMIGLIA_SD15)
+        self.assertIn(FAMIGLIA_SD15, FAMIGLIE)
+        self.assertEqual(job["famiglia"], FAMIGLIA_SD15)
+        self.assertEqual(job["modello_effettivo"], "chickmixflat_v10.ckpt")
+
+    def test_usa_checkpoint_distingue_i_checkpoint_da_qwen(self):
+        """Il controllo era `famiglia == FAMIGLIA_SDXL` in cinque punti, e in tutti
+        e cinque significava \"questo e' un checkpoint, non Qwen\". Con una seconda
+        famiglia di checkpoint quelle condizioni sarebbero diventate cinque bug.
+        """
+        self.assertTrue(usa_checkpoint("sdxl-turbo"))
+        self.assertTrue(usa_checkpoint(FAMIGLIA_SD15))
+        self.assertFalse(usa_checkpoint("qwen-image-2.1"))
+        self.assertFalse(usa_checkpoint(""))
+        self.assertEqual(FAMIGLIE_CHECKPOINT, ("sdxl-turbo", FAMIGLIA_SD15))
+
+    def test_il_nome_del_modello_non_puo_essere_un_percorso(self):
+        """Da quando la vetrina di Anna puo' dichiarare il modello, quel nome
+        arriva da un DOCUMENTO e finisce in `CheckpointLoaderSimple.ckpt_name`:
+        vale la stessa regola di pose_image e lora_name.
+        """
+        for brutto in ("/etc/passwd", "../x.ckpt", "https://example.test/x.ckpt"):
+            with self.subTest(modello=brutto):
+                with self.assertRaises(ValueError):
+                    nuovo_job("x", modello=brutto)
+
+    def test_le_famiglie_di_un_ponte_si_possono_elencare(self):
+        """Un ponte solo, due famiglie: e' il caso del Mac, che serve Pony per gli
+        sketch e ChickMixFlat per il ritratto di Anna.
+        """
+        self.assertEqual(famiglie_capaci("sdxl-turbo,sd15"), ("sdxl-turbo", "sd15"))
+        self.assertEqual(famiglie_capaci(" sd15 "), ("sd15",))
+        self.assertEqual(famiglie_capaci(("sd15",)), ("sd15",))
+        self.assertEqual(famiglie_capaci(""), ())
+        self.assertEqual(famiglie_capaci(None), ())
+
 
 class GrafoSdxlTests(unittest.TestCase):
     @classmethod
@@ -409,6 +468,155 @@ class HistoryTests(unittest.TestCase):
     def test_una_run_senza_immagini_non_e_un_errore(self):
         self.assertEqual(immagini_da_history({}), [])
         self.assertEqual(immagini_da_history({"outputs": {"9": {}}}), [])
+
+
+class GrafoSd15Tests(unittest.TestCase):
+    """Il volto virtuale di Anna: ChickMixFlat (SD 1.5), non il Pony.
+
+    Perche' una classe a parte: SD 1.5 e SDXL condividono il GRAFO (checkpoint
+    unico, un CLIP per lato) ma non i numeri. Servito dalla ricetta del Pony, un
+    job SD 1.5 non fallisce: esce un'immagine sbagliata — a 1024 px SD 1.5 ripete
+    l'anatomia, a CFG 5 resta tiepido. E' il tipo di errore che si scopre solo
+    guardando il ritratto, quindi si difende qui.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.job = nuovo_job("una ragazza illustrata", famiglia=FAMIGLIA_SD15,
+                            negativo="no photo", larghezza=768, altezza=768,
+                            passi=30, seed=20260930)
+
+    def test_sceglie_il_checkpoint_di_anna(self):
+        grafo = workflow(self.job)
+        self.assertEqual(grafo["451"]["class_type"], "CheckpointLoaderSimple")
+        self.assertEqual(grafo["451"]["inputs"]["ckpt_name"], MODELLO_SD15["ckpt"])
+
+    def test_i_numeri_sono_quelli_di_sd15_non_del_pony(self):
+        grafo = workflow(self.job)
+        self.assertEqual(grafo["458"]["inputs"]["cfg"], 7.0)
+        self.assertEqual(grafo["458"]["inputs"]["sampler_name"], "dpmpp_sde")
+        self.assertEqual(grafo["458"]["inputs"]["scheduler"], "karras")
+        self.assertEqual(grafo["459"]["class_type"], "CLIPSetLastLayer")
+        self.assertEqual(grafo["459"]["inputs"]["stop_at_clip_layer"], -2)
+        self.assertEqual(grafo["456"]["inputs"]["width"], 768)
+
+    def test_il_negativo_arriva_al_clip_negativo(self):
+        self.assertEqual(workflow(self.job)["453"]["inputs"]["text"], "no photo")
+
+    def test_il_job_puo_imporre_un_altro_checkpoint(self):
+        job = nuovo_job("x", famiglia=FAMIGLIA_SD15, modello="mio.safetensors")
+        self.assertEqual(workflow(job)["451"]["inputs"]["ckpt_name"], "mio.safetensors")
+
+    def test_la_famiglia_nuova_non_sposta_i_numeri_del_pony(self):
+        pony = workflow(nuovo_job("x", famiglia="sdxl-turbo", larghezza=1024, altezza=1024))
+        self.assertEqual(pony["451"]["inputs"]["ckpt_name"],
+                         "CyberRealisticPony_V18.0_F16.safetensors")
+        self.assertEqual(pony["458"]["inputs"]["cfg"], 5.0)
+
+    def test_la_posa_non_si_deduce_da_sola(self):
+        """Il ControlNet openpose e' per famiglia di modello: quello di SDXL non
+        capisce i latenti di SD 1.5. Quindi per sd15 non si sceglie una posa da
+        soli, e una posa dichiarata si FERMA invece di essere ignorata in silenzio
+        (un job che riesce con l'immagine sbagliata e' peggio di un job fallito).
+        """
+        automatico = nuovo_job("a woman sitting on a chair", famiglia=FAMIGLIA_SD15)
+        self.assertEqual(automatico["pose_preset"], "")
+        dichiarato = nuovo_job("x", famiglia=FAMIGLIA_SD15, pose_preset="seated")
+        with self.assertRaises(ValueError):
+            workflow(dichiarato)
+
+    def test_la_posa_del_pony_funziona_ancora(self):
+        job = nuovo_job("x", famiglia="sdxl-turbo", pose_preset="seated",
+                        larghezza=512, altezza=512)
+        self.assertEqual(workflow(job)["464"]["class_type"], "HyperSpacePosePreset")
+
+
+class GrafoFixTests(unittest.TestCase):
+    """Il fix R-ESRGAN, spento per default.
+
+    Misurato il 2026-09-30 su questa macchina, stesso seed: 172s il primo
+    passaggio a 512×768 e 1510s il vecchio fix a 1024×1536 (memoria sotto pressione).
+    Il fix leggero decodifica il primo passaggio e lo ingrandisce con R-ESRGAN,
+    senza ricampionarlo e senza ingrandire il latente: quello, misurato sulla serie a 2×
+    (`bridge_00081_`–`_083_`), esce con aloni cromatici su ogni contorno, bianchi
+    bruciati e la composizione rifatta. Vedi docs/comfyui.md.
+    """
+
+    def setUp(self):
+        self.base = dict(prompt="una ragazza illustrata", famiglia=FAMIGLIA_SD15,
+                         negativo="no photo", larghezza=512, altezza=768,
+                         passi=30, seed=20260930)
+
+    def job(self, **extra):
+        return nuovo_job(**{**self.base, **extra})
+
+    def test_senza_fix_il_grafo_e_quello_di_prima(self):
+        """Il default non cambia niente: chi non chiede il fix non lo riceve."""
+        grafo = workflow(self.job())
+        self.assertEqual(grafo["470"]["inputs"]["images"], ["457", 0])
+        for nodo in ("471", "472", "473", "474", "475", "476", "477"):
+            self.assertNotIn(nodo, grafo)
+
+    def test_il_fix_ingrandisce_con_il_modello_senza_ricampionare(self):
+        grafo = workflow(self.job(fix=2))
+        self.assertNotIn("471", grafo,
+                         "l'ingrandimento del LATENTE (`LatentUpscale`) è quello "
+                         "che ha prodotto gli aloni cromatici: non si usa più")
+        self.assertEqual(grafo["474"]["class_type"], "UpscaleModelLoader")
+        self.assertEqual(grafo["474"]["inputs"]["model_name"], FIX_UPSCALER)
+        self.assertEqual(grafo["475"]["class_type"], "ImageUpscaleWithModel")
+        self.assertEqual(grafo["475"]["inputs"]["image"], ["457", 0],
+                         "si ingrandisce l'IMMAGINE del primo passaggio")
+        self.assertEqual(grafo["476"]["class_type"], "ImageScale")
+        misure = (grafo["476"]["inputs"]["width"], grafo["476"]["inputs"]["height"])
+        self.assertEqual(misure, (1024, 1536),
+                         "il 4× dell'ingranditore non è la misura del fix")
+        for nodo in ("472", "473", "477"):
+            self.assertNotIn(nodo, grafo,
+                             "nessun secondo sampling ad alta risoluzione nel fix leggero")
+        self.assertEqual(grafo["470"]["inputs"]["images"], ["476", 0],
+                         "si salva l'upscale neurale, non il primo passaggio")
+
+    def test_il_fix_e_a_due_o_non_c_e(self):
+        """Un fattore 1 sarebbe un giro di denoise senza ingrandire: non è un
+        fix. Come gli altri numeri del job si limita invece di rifiutare."""
+        for chiesto, atteso in ((0, 0), (1, 0), (2, 2), (3, 2), ("2", 2),
+                                ("", 0), (None, 0)):
+            with self.subTest(chiesto=chiesto):
+                self.assertEqual(nuovo_job("x", fix=chiesto)["fix"], atteso)
+
+
+class CodaFamiglieTests(unittest.TestCase):
+    """Con piu' famiglie il criterio non cambia: esce sempre il piu' vecchio."""
+
+    def setUp(self):
+        self.orologio = OrologioFinto()
+        self.coda = ImmagineQueue(clock=self.orologio, max_jobs=4, ttl_s=60.0,
+                                  claim_ttl_s=30.0)
+
+    def test_un_ponte_con_due_famiglie_prende_entrambe(self):
+        anna = self.coda.accoda(nuovo_job("ritratto", famiglia=FAMIGLIA_SD15,
+                                          adesso=self.orologio()))
+        self.orologio.avanza(1)
+        pony = self.coda.accoda(nuovo_job("sketch", famiglia="sdxl-turbo",
+                                          adesso=self.orologio()))
+        self.assertEqual(self.coda.prossimo(capace_di="sdxl-turbo,sd15")["id"], anna["id"])
+        self.assertEqual(self.coda.prossimo(capace_di="sdxl-turbo,sd15")["id"], pony["id"])
+
+    def test_una_famiglia_sola_non_prende_i_job_dell_altra(self):
+        self.coda.accoda(nuovo_job("ritratto", famiglia=FAMIGLIA_SD15,
+                                   adesso=self.orologio()))
+        self.assertIsNone(self.coda.prossimo(capace_di="sdxl-turbo"))
+
+    def test_i_claim_ritrovati_includono_le_due_famiglie(self):
+        """Dopo un riavvio del control-plane il gate della memoria deve ritrovare i
+        job del Mac: erano due famiglie anche prima, ora sono tre `if` in meno.
+        """
+        self.coda.accoda(nuovo_job("ritratto", famiglia=FAMIGLIA_SD15,
+                                   adesso=self.orologio()))
+        self.coda.prossimo(capace_di=FAMIGLIA_SD15)
+        self.assertEqual(len(self.coda.running_ids(FAMIGLIE_CHECKPOINT)), 1)
+        self.assertEqual(self.coda.running_ids("qwen-image-2.1"), [])
 
 
 if __name__ == "__main__":

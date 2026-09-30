@@ -9,7 +9,8 @@ il prompt, non giudica l'immagine, non parla nel canale: prende un job, esegue i
 grafo, riferisce. Chi decide è il control-plane, e resta lì.
 
 Questo file vive sulla macchina che esegue ComfyUI: win11 (Qwen-Image) o il Mac
-(SDXL-Turbo per gli sketch). BRIDGE_MODEL dice quale famiglia esegue.
+(checkpoint per gli sketch e per il volto virtuale di Anna). BRIDGE_MODEL dice
+quali famiglie esegue, e possono essere più di una: `sdxl-turbo,sd15`.
 
 Config (variabili d'ambiente):
   CHANNEL_URL     base del control-plane (default http://127.0.0.1:8085)
@@ -20,7 +21,10 @@ Config (variabili d'ambiente):
   BRIDGE_MODEL    famiglia di modello che questo ponte sa eseguire
                   (es. sdxl-turbo per il Mac); vuoto = qualunque job
   BRIDGE_POLL_S   intervallo fra due giri a vuoto (default 5 s)
-  BRIDGE_TIMEOUT_S  tetto di attesa di UNA generazione (default 900 s)
+  BRIDGE_TIMEOUT_S  tetto di attesa di UNA generazione (default 1800 s: con
+                  `fix: 2` una variante di Anna rende in ~900 s, e a 900 s il
+                  ponte si arrendeva 2 s prima che il file uscisse — 2026-09-30,
+                  job 89602917b708 -> bridge_00085_)
   BRIDGE_OLLAMA_URL  Ollama locale da liberare prima degli sketch sul Mac
   BRIDGE_MIN_FREE_GB memoria libera richiesta prima di avviare ComfyUI (default 4)
 
@@ -44,7 +48,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from shared.image_jobs import immagini_da_history, workflow  # noqa: E402
+from shared.image_jobs import (FAMIGLIA_DEFAULT, FAMIGLIA_SD15, FAMIGLIE,  # noqa: E402
+                               FIX_UPSCALER, MODELLO_DEFAULT,
+                               RICETTE_CHECKPOINT, famiglie_capaci,
+                               immagini_da_history, usa_checkpoint, workflow)
 from shared.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
 
 # Il lucchetto dell'istanza singola: si può puntare altrove con
@@ -108,6 +115,67 @@ def _richiesta(url: str, *, payload=None, timeout: float = 30.0,
         return 0, {"errore": f"connessione interrotta: {errore}"}
 
 
+def _file_attesi(modello: str) -> list[tuple[str, str, str]]:
+    """I file che devono esistere in ComfyUI perché i job di questo ponte riescano.
+
+    Ritorna triple (nodo, campo, nome file). Perché non basta "ComfyUI dichiara
+    almeno un file": un checkpoint mancante passava quel controllo, il ponte
+    diceva «pronto» e ogni job di quella famiglia falliva — con l'errore vero
+    dentro ComfyUI, invisibile da fuori. Con una seconda famiglia di checkpoint
+    (`sd15`, il volto di Anna) quel buco diventerebbe il modo normale di scoprire
+    che il modello non è stato scaricato.
+
+    I nodi dipendono dalla famiglia: i checkpoint usano `CheckpointLoaderSimple`
+    (UNet + CLIP + VAE in un file solo), Qwen-Image usa `UnetLoaderGGUF` +
+    `CLIPLoader` + `VAELoader`. Un ponte con più famiglie (`sdxl-turbo,sd15`) le
+    verifica tutte, perché è l'elenco dei file a decidere se un job riesce.
+
+    Anna (`sd15`) ne ha due: il checkpoint e l'ingranditore del fix, che è il
+    formato dei suoi ritratti (512×768 + ingranditore neurale → 1024×1536). Un
+    `fix: 2` chiesto su un'altra famiglia userebbe lo stesso file, ma non è il
+    formato dichiarato di nessuno: qui non si pretende e resta scoperto — il job
+    fallirebbe dentro ComfyUI.
+    """
+    famiglie = famiglie_capaci(modello) or FAMIGLIE
+    attesi: list[tuple[str, str, str]] = []
+    for famiglia in famiglie:
+        ricetta = RICETTE_CHECKPOINT.get(famiglia)
+        if ricetta:
+            attesi.append(("CheckpointLoaderSimple", "ckpt_name", ricetta["ckpt"]))
+            if famiglia == FAMIGLIA_SD15:
+                # `model_name`: il campo d'ingresso di UpscaleModelLoader, non
+                # `upscale_model` (che è il nome del suo OUTPUT, e chiederlo
+                # faceva dire al preflight «ComfyUI non dichiara nessun file»).
+                attesi.append(("UpscaleModelLoader", "model_name", FIX_UPSCALER))
+        elif famiglia == FAMIGLIA_DEFAULT:
+            attesi.append(("UnetLoaderGGUF", "unet_name", MODELLO_DEFAULT["unet"]))
+            attesi.append(("CLIPLoader", "clip_name", MODELLO_DEFAULT["clip"]))
+            attesi.append(("VAELoader", "vae_name", MODELLO_DEFAULT["vae"]))
+    return attesi
+
+
+def _elenco_file(scelte) -> list:
+    """I nomi che ComfyUI dichiara per un input a elenco, in entrambe le forme.
+
+    ComfyUI dichiara le scelte di un input in due modi, e convivono: la forma
+    storica mette la lista al primo posto (`[["a.ckpt", "b.ckpt"], {...}]`), quella
+    nuova mette un sentinella `COMBO` con le opzioni dentro il secondo
+    (`["COMBO", {"options": ["x.pth"]}]` — è così che si dichiara
+    `UpscaleModelLoader` su ComfyUI 0.37.4). Leggere solo la prima fa dire al
+    preflight «ComfyUI non dichiara nessun file» **con i file presenti**: misurato
+    il 2026-09-30 sui due R-ESRGAN appena installati. E non è un avviso: un file
+    che risulta assente ferma l'avvio del ponte.
+    """
+    if not scelte:
+        return []
+    prima = scelte[0]
+    if isinstance(prima, list):
+        return list(prima)
+    if prima == "COMBO" and len(scelte) > 1 and isinstance(scelte[1], dict):
+        return list(scelte[1].get("options") or [])
+    return []
+
+
 def _verifiche(comfy_url: str, output_dir: str, modello: str = "") -> list:
     """Cosa manca perché una generazione possa riuscire. Vuoto = si può fare."""
     problemi = []
@@ -120,24 +188,32 @@ def _verifiche(comfy_url: str, output_dir: str, modello: str = "") -> list:
     dispositivo = ((dati or {}).get("devices") or [{}])[0]
     log(f"ComfyUI {sistema.get('comfyui_version', '?')} | {dispositivo.get('name', '?')} "
         f"| VRAM libera {round((dispositivo.get('vram_free') or 0) / 1073741824, 2)} GB")
+    # Una famiglia scritta male (BRIDGE_MODEL=sd-15) non fa fallire niente: il
+    # control-plane non offre mai job di quella famiglia, quindi il ponte resta
+    # in attesa per sempre e sembra che non ci sia lavoro. Un errore di battitura
+    # deve dire di essere un errore di battitura.
+    for famiglia in famiglie_capaci(modello):
+        if famiglia not in FAMIGLIE:
+            problemi.append(f"BRIDGE_MODEL={famiglia}: famiglia sconosciuta (una di: "
+                            f"{', '.join(FAMIGLIE)}) — nessun job la userà mai")
     # I file dichiarati nel grafo devono ESSERE lì: si chiede a ComfyUI l'elenco
-    # delle sue scelte, che è la stessa cosa che vede il grafo. I nodi dipendono
-    # dalla famiglia: SDXL-Turbo usa CheckpointLoaderSimple (checkpoint unico),
-    # Qwen-Image usa UnetLoaderGGUF + CLIPLoader + VAELoader.
-    if modello == "sdxl-turbo":
-        nodi = (("CheckpointLoaderSimple", "ckpt_name"),)
-    else:
-        nodi = (("UnetLoaderGGUF", "unet_name"), ("CLIPLoader", "clip_name"),
-                ("VAELoader", "vae_name"))
-    for nodo, campo in nodi:
-        stato, info = _richiesta(f"{comfy_url}/object_info/{nodo}", timeout=10)
-        nodo_info = ((info or {}).get(nodo) or {})
-        scelte = (((nodo_info.get("input") or {}).get("required") or {}).get(campo) or [])
-        disponibili = scelte[0] if scelte and isinstance(scelte[0], list) else []
-        if not disponibili:
-            problemi.append(f"{nodo}.{campo}: ComfyUI non dichiara nessun file")
-        else:
-            log(f"{nodo}.{campo}: {len(disponibili)} file disponibili")
+    # delle sue scelte, che è la stessa cosa che vede il grafo.
+    disponibili_per_nodo: dict = {}
+    for nodo, campo, nome in _file_attesi(modello):
+        if (nodo, campo) not in disponibili_per_nodo:
+            stato, info = _richiesta(f"{comfy_url}/object_info/{nodo}", timeout=10)
+            nodo_info = ((info or {}).get(nodo) or {})
+            scelte = (((nodo_info.get("input") or {}).get("required") or {}).get(campo) or [])
+            disponibili_per_nodo[(nodo, campo)] = _elenco_file(scelte)
+            if not disponibili_per_nodo[(nodo, campo)]:
+                problemi.append(f"{nodo}.{campo}: ComfyUI non dichiara nessun file")
+            else:
+                log(f"{nodo}.{campo}: {len(disponibili_per_nodo[(nodo, campo)])} file disponibili")
+        disponibili = disponibili_per_nodo[(nodo, campo)]
+        if disponibili and nome not in disponibili:
+            problemi.append(f"{nodo}.{campo}: manca «{nome}» — installalo con "
+                            "integrations/comfyui/install-model.sh (su Windows: "
+                            "install-model.ps1)")
     if output_dir and not Path(output_dir).is_dir():
         problemi.append(f"cartella di output non trovata: {output_dir}")
     return problemi
@@ -151,11 +227,22 @@ def motivo_fallimento(messaggi) -> str:
     fallito con `CUDA error: unknown error` e quello che è arrivato al control-plane
     era `'execution_start' | 'execution_cached' | 'execution_error', {'prompt_i…`:
     il motivo vero non c'era più.
+
+    E c'è un caso che *non* è un guasto: `execution_interrupted`. Il 2026-09-30, mentre
+    si tarava il sampler sui numeri dei demo, cinque job sono stati annullati dalla coda
+    di ComfyUI e il control-plane ha registrato cinque volte il dump troncato — cioè un
+    errore del grafo che non esisteva. Chi legge deve poter distinguere «rilancia» da
+    «ripara»: l'annullamento ha una frase sua, il dump resta il ripiego per ciò che non
+    sappiamo leggere.
     """
     for messaggio in messaggi or []:
         if not isinstance(messaggio, (list, tuple)) or len(messaggio) < 2:
             continue
-        if str(messaggio[0]) != "execution_error" or not isinstance(messaggio[1], dict):
+        tipo_messaggio = str(messaggio[0])
+        if tipo_messaggio == "execution_interrupted":
+            return ("annullato da fuori: qualcuno ha interrotto il job in ComfyUI (coda o "
+                    "interfaccia) — non è un guasto del grafo, il job si può rilanciare")[:280]
+        if tipo_messaggio != "execution_error" or not isinstance(messaggio[1], dict):
             continue
         dettaglio = messaggio[1]
         tipo = str(dettaglio.get("exception_type") or "errore")
@@ -173,7 +260,7 @@ def motivo_fallimento(messaggi) -> str:
 
 
 def esegui_job(job: dict, *, comfy_url: str = COMFY_DEFAULT, output_dir: str = "",
-               timeout_s: float = 900.0, prefisso: str = PREFISSO) -> tuple:
+               timeout_s: float = 1800.0, prefisso: str = PREFISSO) -> tuple:
     """Esegue UN job su ComfyUI. Ritorna (ok, percorso_file, errore).
 
     Non solleva: chi chiama deve poter RIFERIRE un fallimento al control-plane,
@@ -224,7 +311,10 @@ def prepara_memoria_mac(comfy_url: str, ollama_url: str, *, min_free_gb: float =
     base = ollama_url.rstrip("/")
     stato, dati = _richiesta(f"{base}/api/ps", timeout=10)
     if stato != 200:
-        return False, f"Ollama non raggiungibile per liberare memoria (HTTP {stato})"
+        # Ollama spento e' precisamente lo stato desiderato mentre ComfyUI usa
+        # la memoria unificata. La verifica decisiva resta system_stats sotto.
+        log(f"Ollama non raggiungibile (HTTP {stato}): verifico direttamente la memoria ComfyUI")
+        dati = {"models": []}
     for model in dati.get("models") or []:
         name = str(model.get("name") or model.get("model") or "")
         if not name:
@@ -266,11 +356,19 @@ def main(argv=None) -> int:
     parser.add_argument("--output",
                         default=os.getenv("COMFY_OUTPUT_DIR") or _output_default())
     parser.add_argument("--model", default=os.getenv("BRIDGE_MODEL", ""),
-                        help="famiglia di modello che questo ponte sa eseguire "
-                             "(es. sdxl-turbo per il Mac); vuoto = qualunque job")
+                        help="famiglie di modello che questo ponte sa eseguire, "
+                             "separate da virgola (es. «sdxl-turbo,sd15» per il Mac: "
+                             "Pony per gli sketch e ChickMixFlat per il volto di "
+                             "Anna); vuoto = qualunque job")
     parser.add_argument("--poll", type=float, default=float(os.getenv("BRIDGE_POLL_S", "5")))
+    # 1800 e non 900: la ricetta dei demo (512×768 + fix 2× + 30 passi) rende in
+    # ~900 s, quindi un tetto da 900 s dichiara fallito un job 2 s prima che il
+    # file esca — e quel file, che è buono, resta senza nessuno che lo riferisca
+    # (2026-09-30, job 89602917b708 -> bridge_00085_). Il claim del
+    # control-plane deve restare più lungo: `DEFAULT_CLAIM_TTL_S` in
+    # shared/image_jobs.py, che un test lega a questo valore.
     parser.add_argument("--timeout", type=float,
-                        default=float(os.getenv("BRIDGE_TIMEOUT_S", "900")))
+                        default=float(os.getenv("BRIDGE_TIMEOUT_S", "1800")))
     parser.add_argument("--ollama", default=os.getenv("BRIDGE_OLLAMA_URL", "http://127.0.0.1:11434"))
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
@@ -291,6 +389,11 @@ def main(argv=None) -> int:
     else:
         problemi.append(f"control-plane non raggiungibile su {base}: HTTP {stato} "
                         f"{salute.get('errore', '')}")
+
+    # Il tetto si legge all'avvio, non si deduce: quando è troppo corto il ponte
+    # riferisce fallito un job che ComfyUI sta finendo di scrivere, e nel diario
+    # resta "nessuna immagine entro Ns" — che sembra un guasto del modello.
+    log(f"tetto di attesa per una generazione: {args.timeout:g}s")
 
     if problemi:
         log("PROBLEMI:")
@@ -330,7 +433,7 @@ def main(argv=None) -> int:
         iniziato = time.monotonic()
         log(f"job {job['id']}: {job['larghezza']}x{job['altezza']} passi={job['passi']} "
             f"seed={job['seed']} da={job['richiedente'] or '?'}")
-        if args.model == "sdxl-turbo":
+        if any(usa_checkpoint(famiglia) for famiglia in famiglie_capaci(args.model)):
             ready, reason = prepara_memoria_mac(
                 args.comfy, args.ollama,
                 min_free_gb=float(os.getenv("BRIDGE_MIN_FREE_GB", "4")))

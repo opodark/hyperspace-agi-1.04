@@ -43,6 +43,17 @@ class ImageMemoryGateTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["keep_alive"], 0)
         self.assertTrue(calls[2][0].endswith("/system_stats"))
 
+    def test_bridge_allows_an_offline_ollama_when_comfy_has_memory(self):
+        def request(url, *, payload=None, timeout=10):
+            if url.endswith("/api/ps"):
+                return 0, {}
+            return 200, {"devices": [{"vram_free": 6 * 1073741824}]}
+
+        with mock.patch.object(comfy_bridge, "_richiesta", side_effect=request):
+            ready, reason = comfy_bridge.prepara_memoria_mac(
+                "http://comfy", "http://ollama", timeout_s=1)
+        self.assertTrue(ready, reason)
+
     def test_abandoned_image_lease_expires(self):
         now = [100.0]
         gate = ImageMemoryGate(clock=lambda: now[0], lease_s=10)
@@ -50,6 +61,23 @@ class ImageMemoryGateTests(unittest.TestCase):
         now[0] += 11
         self.assertTrue(gate.enter_chat(timeout=0.01))
         gate.leave_chat()
+
+    def test_queue_keeps_the_memory_between_two_checkpoint_jobs(self):
+        gate = ImageMemoryGate()
+        self.assertTrue(gate.reserve_image("image-1"))
+        self.assertTrue(gate.continue_image_queue("image-1"))
+        self.assertFalse(gate.enter_chat(timeout=0.01))
+        self.assertTrue(gate.reserve_image("image-2"))
+        self.assertEqual(gate.status()["image_job"], "image-2")
+        gate.release_image("image-2")
+        self.assertTrue(gate.enter_chat(timeout=0.01))
+        gate.leave_chat()
+
+    def test_reclaim_of_the_same_job_is_not_a_memory_conflict(self):
+        gate = ImageMemoryGate()
+        self.assertTrue(gate.reserve_image("image-1"))
+        self.assertTrue(gate.reserve_image("image-1"))
+        self.assertEqual(gate.status()["image_job"], "image-1")
 
 
 if __name__ == "__main__":

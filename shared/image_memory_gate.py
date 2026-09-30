@@ -8,6 +8,10 @@ import time
 
 
 class ImageMemoryGate:
+    # Il bridge termina un job e ne reclama subito un altro con due HTTP
+    # distinti. Questo proprietario transitorio conserva la RAM a ComfyUI in
+    # quell'intervallo: una chat non puo' ricaricare Ollama tra due immagini.
+    _CODA_IMMAGINI = "__checkpoint_queue__"
     def __init__(self, *, clock=time.monotonic, lease_s: float = 1200):
         self.clock = clock
         self.lease_s = lease_s
@@ -44,7 +48,13 @@ class ImageMemoryGate:
         deadline = self.clock() + timeout
         with self._condition:
             self._expire_locked()
-            if self._owner:
+            # Dopo un riavvio il job puo' essere ritornato pending mentre il
+            # bridge conserva ancora la sua prenotazione. E' lo stesso lavoro,
+            # non una contesa: consentire il reclaim evita un ciclo di 503.
+            if self._owner == job_id:
+                self._expires = self.clock() + self.lease_s
+                return True
+            if self._owner and self._owner != self._CODA_IMMAGINI:
                 return False
             self._owner = job_id
             self._expires = self.clock() + self.lease_s
@@ -56,6 +66,17 @@ class ImageMemoryGate:
                     self._condition.notify_all()
                     return False
                 self._condition.wait(remaining)
+            return True
+
+    def continue_image_queue(self, job_id: str) -> bool:
+        """Mantiene la prenotazione se il ponte ha un altro checkpoint in coda."""
+        with self._condition:
+            self._expire_locked()
+            if self._owner != job_id:
+                return False
+            self._owner = self._CODA_IMMAGINI
+            self._expires = self.clock() + self.lease_s
+            self._condition.notify_all()
             return True
 
     def release_image(self, job_id: str):

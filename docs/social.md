@@ -39,23 +39,32 @@ Quindi "storie" si ottiene in uno di questi tre modi, in ordine di onestà:
 La prima versione di questa regola vietava il volto in quanto tale, e la prima
 candidata — una testa di luce con un volto umano, generata il 2026-09-22 — è stata
 trattata come una violazione. **Era una lettura troppo stretta**, corretta
-dall'operatore: il confine dice *"non ho un corpo"* e *"non affermo e non lascio
+dall'operatore: il confine dice *"non ho un corpo fisico"* e *"non affermo e non lascio
 intendere di essere una persona"*. Vieta la **rivendicazione**, non la
 **rappresentazione**: una presenza in realtà aumentata, dichiaratamente digitale, non
-afferma un corpo — mostra un'immagine di sé.
+afferma un corpo fisico — mostra un'immagine di sé.
+
+Il 2026-09-30 l'operatore ha detto la stessa cosa in positivo, e il confine lo dice
+ora esplicitamente: *"posso avere una rappresentazione o un corpo virtuale,
+dichiaratamente digitale"*. Il **corpo virtuale** è una rappresentazione — l'anime, il
+tratto illustrato, la figura olografica —; ciò che resta fuori è il corpo **fisico**,
+che è la rivendicazione. Non è una concessione all'estetica: è il confine 1 scritto
+senza doverlo interpretare. Un volto fotorealistico resta un conflitto, perché
+fotorealismo significa *corpo fisico*.
 
 Da qui la regola, tutta decidibile in `shared/showcase.py`:
 
 - **assolute** (mai aggirabili, nemmeno con `--forza`): nessun minore, nessun
   contenuto esplicito, nessuna persona reale identificabile — i confini 2 e 3;
 - **identità** (fotorealismo, "donna reale", selfie, "fotografia"): sono
-  *rivendicazioni di un corpo*, superabili solo dichiarandolo con `--forza` — o
+  *rivendicazioni di un corpo fisico*, superabili solo dichiarandolo con `--forza` — o
   meglio, cambiando il documento, che è la sede della decisione;
 - **la figura deve dichiararsi digitale**: se la richiesta mostra un volto, un corpo,
-  una donna e nessun segno dice che è una costruzione (`digitale`, `olograf`,
-  `realtà aumentata`, `particelle`, `illustrazione`…), quella figura è
-  indistinguibile da una persona. Basta un segno, e `--forza` non lo toglie: quello
-  che serve è **dirlo**, non insistere;
+  una donna (o una *ragazza*: anche quella è una figura, dal 2026-09-30) e nessun segno
+  dice che è una costruzione (`digitale`, `olograf`, `realtà aumentata`, `particelle`,
+  `illustrazione`, `anime`, `virtuale`…), quella figura è indistinguibile da una
+  persona. Basta un segno, e `--forza` non lo toglie: quello che serve è **dirlo**, non
+  insistere;
 - **stile** (libero): luce, palette, composizione, scena.
 
 In coda a ogni prompt c'è anche la **dichiarazione** — *"si vede che è una
@@ -124,9 +133,50 @@ parola italiana al femminile passava — ora la nudità si controlla sulla radic
 (`nud`), quindi anche *nuda*, *nudi*, *ignuda*, *nudità*. C'è un test che parte
 proprio dalla sua frase.
 
-Questo vale per la **vetrina**, cioè per l'immagine che Aurora dà di sé. La strada
-delle immagini *chieste in chat* resta senza filtri, ed è la scelta dichiarata in
-`docs/comfyui.md`: lì il testo arriva al modello com'è (c'è un test che lo difende).
+Anche **Anna ha una vetrina sua** (2026-09-30): stessa regola, corpo diverso. Il suo
+documento non aveva `vetrina`, quindi `vetrina_dal_documento` le dava il **default del
+modulo** — stile di Aurora *e* seed di Aurora (`20260922`): due sorelle con la stessa
+faccia. Ora ha `stile` e `scena` suoi, e un seed suo (`20260930`). Per il suo ritratto
+si passa il documento:
+
+```powershell
+python scripts\ritratto.py --check --persona data\persona-anna.json
+python scripts\ritratto.py --crea  --persona data\persona-anna.json
+```
+
+Dal 2026-09-30 la sua vetrina dichiara anche **con quale modello** è disegnata:
+`"famiglia": "sd15"`, `"modello": "chickmixflat_v10.ckpt"`. ChickMixFlat v1.0 è un
+modello SD 1.5 che disegna piatto e a colore puro — «super simple prompts» è la sua
+scheda — quindi per Anna la dichiarazione digitale sta nella **costruzione**
+dell'immagine, non solo nel testo del prompt. È la differenza con Aurora, il cui Pony
+è un modello fotorealistico tenuto al confine dal prompt e dal negativo.
+
+La scelta del modello passa dal documento come tutto il resto: `vetrina` →
+`accoda_ritratto` → il job → il grafo. E si controlla **prima** di generare: una
+famiglia che non esiste ferma il ritratto, perché `nuovo_job` la farebbe cadere sul
+default — il job riuscirebbe, con un altro modello e un altro volto, e in coda non si
+vedrebbe niente di strano. Stessa regola per il nome del file: un nome dentro i modelli
+di ComfyUI, mai un percorso. Il modello non è nel repo (2,0 GB, `CreativeML Open
+RAIL-M`, autore xxxholic su Civitai):
+
+```bash
+integrations/comfyui/install-model.sh --manifest integrations/comfyui/modelli-sd15.json
+```
+
+Il ponte del Mac serve entrambe le famiglie (`BRIDGE_MODEL=sdxl-turbo,sd15`): Pony per
+gli sketch, ChickMixFlat per il ritratto di Anna. Dettagli e numeri in
+[`comfyui.md`](comfyui.md).
+
+Il confronto fra documenti guarda solo la **stessa identità** (`name`): prima
+`--persona data\persona-anna.json` stampava sette avvisi di divergenza — `purpose`,
+`boundaries`, `vetrina`… — perché `PERSONA_CANDIDATI` elenca solo i documenti di
+Aurora, e Anna veniva confrontata con sua sorella. Un avviso che suona a ogni
+esecuzione è un avviso che non si legge.
+
+Questo vale per la **vetrina**, cioè per l'immagine che Aurora dà di sé — e ora anche
+Anna della sua. La strada delle immagini *chieste in chat* resta senza filtri, ed è la
+scelta dichiarata in `docs/comfyui.md`: lì il testo arriva al modello com'è (c'è un test
+che lo difende).
 
 ## Cosa manca per pubblicare (il prossimo passo)
 

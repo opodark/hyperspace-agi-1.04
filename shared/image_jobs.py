@@ -28,18 +28,25 @@ STATI = ("pending", "running", "done", "failed")
 # quattro numeri), anche quando la coda e' salvata sul volume persistente.
 DEFAULT_MAX_JOBS = 8
 # I due tempi non sono decorativi e devono stare in quest'ordine:
-#   claim < esecuzione massima del ponte (900s)  -> il job verrebbe RIESEGUITO
+#   claim > esecuzione massima del ponte (1800s) -> altrimenti il job verrebbe
+#                                                   RIESEGUITO mentre è vivo
 #   job   < claim + margine                      -> il risultato arriverebbe dopo la
 #                                                   potatura, e andrebbe perso
 # Il 2026-09-22 è successo esattamente questo: un ritratto su scheda carica ha
 # superato i 600s, il claim è scaduto, il job è tornato "pending" mentre ComfyUI
 # stava ancora campionando. Con 313s di misura "libera" e 700s su scheda occupata,
 # i valori vecchi (900/600) erano tarati sul caso migliore.
+# Il 2026-09-30 l'errore simmetrico, dal lato del ponte: con `fix: 2` e 30 passi una
+# variante di Anna rende in ~900 s (890,2 s il 00084, 902,0 s il 00085), quindi un
+# tetto da 900 s dichiarava fallito un job 2 s prima che il file uscisse — e quel
+# file, che è buono, restava senza nessuno che lo riferisse. Tetto del ponte 1800,
+# claim il doppio (3600): lo stesso rapporto del 2026-09-22, tarato sulla ricetta
+# dei demo invece che sul caso migliore.
 # Il ponte del Mac puo' restare spento per qualche ora (notte, update, laptop
 # chiuso). Dodici ore conservano il lavoro fino al mattino senza trasformare la
 # coda in un archivio di richieste vecchie.
 DEFAULT_JOB_TTL_S = 43200.0
-DEFAULT_CLAIM_TTL_S = 1800.0
+DEFAULT_CLAIM_TTL_S = 3600.0
 
 # Limiti del grafo: la scheda di win11 ha 8 GB e un text encoder da 8B. Un tetto
 # dichiarato è meglio di un OOM che si porta dietro anche il modello caricato.
@@ -52,7 +59,63 @@ LIMITE_PASSI = 60
 # Qwen-Image 2.1, quella che gira sulla scheda di win11.
 FAMIGLIA_DEFAULT = "qwen-image-2.1"
 FAMIGLIA_SDXL = "sdxl-turbo"
-FAMIGLIE = (FAMIGLIA_DEFAULT, FAMIGLIA_SDXL)
+# SD 1.5 (2026-09-30), il modello del volto di Anna: ChickMixFlat v1.0.
+# Perché è una famiglia e non un semplice `modello` dentro sdxl-turbo: il grafo
+# è lo stesso (checkpoint unico, come SDXL), ma i NUMERI no. SDXL/Pony rende a
+# 1024 e CFG 5; SD 1.5 rende a 512-768 e CFG 7, e a 1024 raddoppia l'anatomia
+# invece di disegnarla. Un job SD 1.5 servito dalla ricetta Pony non fallisce:
+# produce un'immagine sbagliata, che è peggio.
+#
+# Il resto del perché sta in docs/comfyui.md: 1,99 GiB contro 6,9 GB è la
+# differenza fra stare e non stare su una scheda da 8 GB, e "flat, pure color,
+# 2.5D" è dichiaratamente un disegno — il confine 1 di `shared/showcase.py` lo
+# rispetta il modello stesso, non solo il prompt.
+FAMIGLIA_SD15 = "sd15"
+# Le famiglie che sono UN checkpoint unico caricato da CheckpointLoaderSimple
+# (UNet + CLIP + VAE insieme): cambiano i numeri, non i nodi. Qwen-Image invece è
+# GGUF + text encoder + VAE separati.
+FAMIGLIE_CHECKPOINT = (FAMIGLIA_SDXL, FAMIGLIA_SD15)
+FAMIGLIE = (FAMIGLIA_DEFAULT, *FAMIGLIE_CHECKPOINT)
+
+
+def usa_checkpoint(famiglia: str) -> bool:
+    """True se la famiglia è un checkpoint unico (CheckpointLoaderSimple).
+
+    Il controllo era scritto cinque volte come `famiglia == FAMIGLIA_SDXL`, e
+    ogni volta significava "questo è un checkpoint, non Qwen" — non "questo è
+    SDXL". Con una seconda famiglia di checkpoint quelle cinque condizioni
+    sarebbero diventate cinque bug silenziosi: il ponte che verifica i nodi
+    sbagliati, il control-plane che non prenota la memoria del Mac. Una funzione
+    con un nome dice cosa si sta davvero chiedendo.
+    """
+    return str(famiglia or "").strip().lower() in FAMIGLIE_CHECKPOINT
+
+
+def famiglie_capaci(capace_di) -> tuple[str, ...]:
+    """Le famiglie che un ponte sa eseguire, da una stringa o da una sequenza.
+
+    La firma storica era una stringa sola (`?famiglia=sdxl-turbo`). Il Mac ha due
+    famiglie di checkpoint — Pony per gli sketch, ChickMixFlat per il ritratto di
+    Anna — e un ponte solo: `--model sdxl-turbo,sd15` dice entrambe. Due ponti
+    sulla stessa ComfyUI non si possono avviare (il lucchetto di istanza singola
+    li ferma: la scheda è una), quindi la lista è l'unico modo di servire
+    entrambe senza spegnere il feed.
+    """
+    if not capace_di:
+        return ()
+    pezzi = capace_di.split(",") if isinstance(capace_di, str) else capace_di
+    return tuple(str(p).strip().lower() for p in pezzi if str(p).strip())
+
+
+def _modello_famiglia(famiglia: str) -> str:
+    """Il nome del file che la famiglia carica se il job non ne impone uno.
+
+    Serve a `modello_effettivo`, cioè a ciò che si legge DOPO per capire con cosa
+    è stata generata un'immagine. Un nome sbagliato qui non rompe niente e non si
+    vede: è il tipo di errore che si scopre guardando un ritratto.
+    """
+    ricetta = RICETTE_CHECKPOINT.get(str(famiglia or "").strip().lower())
+    return ricetta["ckpt"] if ricetta else MODELLO_DEFAULT["unet"]
 
 POSE_PRESET = ("standing", "arms_open", "seated", "kneeling", "lying", "walking", "dancing")
 _POSE_REGOLE = (
@@ -80,6 +143,7 @@ def scegli_pose_preset(prompt: str) -> str:
 
 def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
               altezza: int = 768, passi: int = 25, seed: int = 0,
+              fix: int = 0,
               richiedente: str = "", canale: str = "", modello: str = "",
               destinazione: str = "", famiglia: str = "",
               pose_image: str = "", pose_preset: str = "", pose_strength: float = 1.0,
@@ -89,6 +153,11 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
 
     I numeri si limitano invece di essere rifiutati: chi chiede 4096 px ha chiesto
     qualcosa di impossibile, non di sbagliato, e il tetto si vede nel job.
+
+    `fix` è il secondo passaggio del grafo: 0 (default, un passaggio solo) o 2
+    (il doppio del lato, come i demo del modello). Un fattore 1 non è un fix —
+    è un giro di denoise senza ingrandire — quindi cade su 0 come un 3 cade
+    su 2: si limita, non si rifiuta.
 
     `destinazione` è DOVE va consegnata l'immagine finita (l'id della chat): il
     control-plane non sa parlare con Telegram, sa solo che quel file è per quella
@@ -114,9 +183,21 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         raise ValueError("pose_preset sconosciuto")
     if famiglia == FAMIGLIA_SDXL and not pose_image and not pose_preset:
         pose_preset = scegli_pose_preset(testo)
+    # Per SD 1.5 la posa NON si deduce da sola: il ControlNet openpose di SDXL
+    # (`xinsir-controlnet-openpose-sdxl-1.0`) non è quello di SD 1.5, e un preset
+    # senza il suo ControlNet non farebbe una posa — farebbe un'immagine diversa.
+    # Una posa dichiarata a mano arriva al grafo e lì `workflow_checkpoint`
+    # solleva: meglio un job fallito e visibile che un ritratto sbagliato.
     lora_name = str(lora_name or "").strip().replace("\\", "/")
     if lora_name.startswith("/") or ".." in lora_name.split("/") or "://" in lora_name:
         raise ValueError("lora_name deve essere un nome relativo dentro ComfyUI/models/loras")
+    # `modello` finisce in `CheckpointLoaderSimple.ckpt_name`: è un input di
+    # percorso, come pose_image e lora_name. Dall'uscita della vetrina di Anna
+    # (2026-09-30) quel nome può arrivare da un DOCUMENTO, quindi vale la stessa
+    # regola: un nome dentro i modelli di ComfyUI, non un percorso.
+    modello = str(modello or "").strip().replace("\\", "/")
+    if modello.startswith("/") or ".." in modello.split("/") or "://" in modello:
+        raise ValueError("modello deve essere un nome relativo dentro i modelli di ComfyUI")
     return {
         "id": uuid.uuid4().hex[:12],
         "prompt": testo[:2000],
@@ -124,12 +205,12 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         "larghezza": max(64, min(int(larghezza), LIMITE_LATO)),
         "altezza": max(64, min(int(altezza), LIMITE_LATO)),
         "passi": max(1, min(int(passi), LIMITE_PASSI)),
+        "fix": FIX_FATTORE if int(fix or 0) >= FIX_FATTORE else 0,
         "seed": int(seed),
         "richiedente": str(richiedente or "")[:64],
         "canale": str(canale or "")[:32],
-        "modello": str(modello or "")[:120],
-        "modello_effettivo": str(modello or "")[:120] or (
-            MODELLO_SDXL["ckpt"] if famiglia == FAMIGLIA_SDXL else MODELLO_DEFAULT["unet"]),
+        "modello": modello[:120],
+        "modello_effettivo": modello[:120] or _modello_famiglia(famiglia),
         "famiglia": famiglia,
         "pose_image": pose_image[:240],
         "pose_preset": pose_preset,
@@ -255,18 +336,22 @@ class ImmagineQueue:
             self._save_locked()
             return dict(self._job[job["id"]])
 
-    def prossimo(self, capace_di: str | None = None) -> dict | None:
+    def prossimo(self, capace_di: str | tuple | None = None) -> dict | None:
         """Il job più vecchio da eseguire, marcato `running` (claim).
 
         `capace_di` limita ai job di una famiglia di modello: un ponte che sa
         eseguire solo SDXL-Turbo (il Mac) non deve prendere un job Qwen-Image.
+        Può essere una stringa o una lista separata da virgole quando il ponte ne
+        esegue più di una (`sdxl-turbo,sd15`): il vecchio job più vecchio resta il
+        criterio, la famiglia non riordina la coda.
         """
         with self._lock:
             self._pota_locked()
             candidati = [j for j in self._job.values() if j["stato"] == "pending"]
-            if capace_di:
+            capaci = famiglie_capaci(capace_di)
+            if capaci:
                 candidati = [j for j in candidati
-                             if j.get("famiglia", FAMIGLIA_DEFAULT) == capace_di]
+                             if j.get("famiglia", FAMIGLIA_DEFAULT) in capaci]
             candidati.sort(key=lambda j: j["creato_ts"])
             if not candidati:
                 return None
@@ -313,9 +398,19 @@ class ImmagineQueue:
     def running_ids(self, famiglia: str = "") -> list[str]:
         with self._lock:
             self._pota_locked()
+            capaci = famiglie_capaci(famiglia)
             return [j["id"] for j in self._job.values()
                     if j["stato"] == "running"
-                    and (not famiglia or j.get("famiglia") == famiglia)]
+                    and (not capaci or j.get("famiglia") in capaci)]
+
+    def ha_in_coda(self, famiglia: str = "") -> bool:
+        """True se resta un job pending per una delle famiglie richieste."""
+        with self._lock:
+            self._pota_locked()
+            capaci = famiglie_capaci(famiglia)
+            return any(j["stato"] == "pending"
+                       and (not capaci or j.get("famiglia") in capaci)
+                       for j in self._job.values())
 
     def da_consegnare(self, canale: str) -> list:
         """Le immagini PRONTE da consegnare a questo canale, non ancora consegnate.
@@ -483,26 +578,84 @@ MODELLO_SDXL = {
     "lora_strength": float(os.getenv("SDXL_LORA_STRENGTH", "0.8")),
 }
 
+# La ricetta ChickMixFlat v1.0 (SD 1.5): il volto di Anna. Stesso grafo del Pony
+# — checkpoint unico, un CLIP per lato — con i numeri di SD 1.5: CFG 7 (a 5 il
+# modello resta tiepido), Clip Skip 2, DPM++ SDE Karras: è la coppia dichiarata
+# dai demo di ChickMixFlat che l'operatore ha scelto come default di Anna. Il file
+# lo dichiara la vetrina di Anna (`modello`), ma il default
+# della famiglia è qui: due posti che dicono lo stesso nome, tenuti allineati dal
+# test del manifest, come per il Pony.
+#
+# Niente `controlnet_openpose`: quello di SDXL non è compatibile con SD 1.5, e un
+# ControlNet sbagliato deforma invece di posare. Finché non c'è il file giusto la
+# famiglia non fa pose, e lo dice (vedi il controllo in `workflow_checkpoint`).
+MODELLO_SD15 = {
+    "ckpt": "chickmixflat_v10.ckpt",
+    "cfg": 7.0,
+    "clip_skip": -2,
+    "sampler": "dpmpp_sde",
+    "scheduler": "karras",
+    "lora": os.getenv("SD15_LORA_NAME", "").strip(),
+    "lora_strength": float(os.getenv("SD15_LORA_STRENGTH", "0.8")),
+}
 
-def _save_node(prefisso: str, jpeg: bool) -> dict:
+# Il lato con cui ogni famiglia rende bene. Non è un limite (LIMITE_LATO lo è) ed
+# è la ragione per cui la famiglia non può essere solo un nome di file: SD 1.5
+# nasce a 512 e a 1024 ripete l'anatomia; SDXL/Pony è addestrato a 1024.
+MISURA_SD15 = 768
+LATO_CONSIGLIATO = {FAMIGLIA_SDXL: 1024, FAMIGLIA_SD15: MISURA_SD15}
+
+# La ricetta di ogni famiglia di checkpoint, in un posto solo: la usano il grafo
+# (per costruirlo) e `_modello_famiglia` (per dire con cosa è stata generata
+# un'immagine). Una famiglia nuova si aggiunge qui, non in tre `if`.
+RICETTE_CHECKPOINT = {FAMIGLIA_SDXL: MODELLO_SDXL, FAMIGLIA_SD15: MODELLO_SD15}
+
+# Il "fix" è l'ingranditore dei demo di ChickMixFlat. I demo dichiarano
+# `hires 2× R-ESRGAN 4x+`; qui si decodifica il primo passaggio e lo si
+# ingrandisce con quel modello neurale, senza un secondo sampling. Ingrandire il
+# *latente* (`LatentUpscale` `bislerp`)
+# NON è la stessa cosa, ed è stato misurato il 2026-09-30: la serie a 2×
+# (`bridge_00081_`–`_083_`, 40 passi) esce con aloni cromatici su ogni contorno,
+# bianchi bruciati e la composizione rifatta, perché a 1024×1536 il checkpoint —
+# SD 1.5, nativa 512, quindi 4× i pixel — disegna da capo quello che non sa
+# invece di rifinire qualcosa che c'è. Il difetto c'era già a 30 passi
+# (`anna_due_00001_`). Un ingranditore neurale è la differenza fra i due grafi:
+# senza il modello installato il fix non si costruisce, e lo dice ComfyUI —
+# meglio un errore del nodo che un'immagine che sembra buona e non lo è.
+FIX_UPSCALER = os.getenv("FIX_UPSCALER", "RealESRGAN_x4plus.pth")
+#
+# Il fix è a 2× o non c'è: un fattore 1 sarebbe un giro di denoise senza
+# ingrandire, cioè un'altra cosa (rifinitura), e non si chiama fix.
+FIX_FATTORE = 2
+
+
+def _save_node(prefisso: str, jpeg: bool, sorgente: str = "457") -> dict:
+    """Il nodo di salvataggio, puntato sulla decodifica giusta.
+
+    `sorgente` è `457` (primo passaggio) o `476` (dopo il fix): col fix acceso
+    il file da salvare è il secondo, non il primo — altrimenti uscirebbe
+    l'immagine della misura chiesta e il fix sarebbe solo tempo perso.
+    """
     if jpeg:
         return {"class_type": "HyperSpaceSaveJPEG",
-                "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso),
+                "inputs": {"images": [sorgente, 0], "filename_prefix": str(prefisso),
                            "quality": 92}}
     return {"class_type": "SaveImage",
-            "inputs": {"images": ["457", 0], "filename_prefix": str(prefisso)}}
+            "inputs": {"images": [sorgente, 0], "filename_prefix": str(prefisso)}}
 
 
 def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSpace",
              risoluzione: int | None = None, jpeg: bool = True) -> dict:
     """Il grafo ComfyUI per un job, scelto dalla sua famiglia di modello.
 
-    `modello` sovrascrive i file (un'altra macchina avrà altri nomi) e il job può
-    indicare un `modello` suo. La famiglia decide QUALE grafo: Qwen-Image 2.1
-    (GGUF + text encoder su CPU, default) oppure SDXL-Turbo (per il Mac).
+    ``modello`` sovrascrive i file (un'altra macchina avrà altri nomi) e il job può
+    indicare un ``modello`` suo. La famiglia decide QUALE grafo: Qwen-Image 2.1
+    (GGUF + text encoder su CPU, default) oppure un checkpoint unico — SDXL/Pony
+    (``sdxl-turbo``) o SD 1.5 (``sd15``), che condividono il grafo e cambiano solo
+    i numeri della ricetta.
     """
-    if (job or {}).get("famiglia") == FAMIGLIA_SDXL:
-        return workflow_sdxl(job, modello=modello, prefisso=prefisso, jpeg=jpeg)
+    if usa_checkpoint((job or {}).get("famiglia")):
+        return workflow_checkpoint(job, modello=modello, prefisso=prefisso, jpeg=jpeg)
     scelte = {**MODELLO_DEFAULT, **(modello or {})}
     if str(job.get("modello") or "").strip():
         scelte["unet"] = str(job["modello"]).strip()
@@ -534,15 +687,25 @@ def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSp
     }
 
 
-def workflow_sdxl(job: dict, *, modello: dict | None = None,
-                  prefisso: str = "HyperSpace", jpeg: bool = True) -> dict:
-    """Il grafo CyberRealistic Pony: checkpoint unico, CFG 5 e Clip Skip 2.
+def workflow_checkpoint(job: dict, *, modello: dict | None = None,
+                        prefisso: str = "HyperSpace", jpeg: bool = True,
+                        famiglia: str = "") -> dict:
+    """Il grafo di un checkpoint unico: Pony (SDXL) o ChickMixFlat (SD 1.5).
 
-    A differenza di Qwen, SDXL usa il negativo (non le istruzioni dentro il
-    prompt) e un `CLIPTextEncode` per lato. Gli id dei nodi sono gli stessi del
-    grafo Qwen, così `immagini_da_history` e il ponte non cambiano.
+    Un grafo per entrambe, perché ``CheckpointLoaderSimple`` porta con sé UNet,
+    CLIP e VAE: quello che cambia è la RICETTA della famiglia (CFG, Clip Skip,
+    sampler, scheduler), non la forma del grafo. Gli id dei nodi sono gli stessi
+    del grafo Qwen, così ``immagini_da_history`` e il ponte non cambiano.
+
+    A differenza di Qwen, un checkpoint usa il negativo (non le istruzioni dentro
+    il prompt) e un ``CLIPTextEncode`` per lato.
+
+    Con ``job["fix"]`` a 2 il grafo ingrandisce l'immagine decodificata con
+    R-ESRGAN e la porta al doppio del lato, senza ricampionarla: il risultato
+    conserva posa e silhouette del primo passaggio e resta leggero sul Mac.
     """
-    scelte = {**MODELLO_SDXL, **(modello or {})}
+    famiglia = str(famiglia or job.get("famiglia") or FAMIGLIA_SDXL).strip().lower()
+    scelte = {**RICETTE_CHECKPOINT.get(famiglia, MODELLO_SDXL), **(modello or {})}
     if str(job.get("modello") or "").strip():
         scelte["ckpt"] = str(job["modello"]).strip()
     lora_name = str(job.get("lora_name") or scelte.get("lora") or "").strip()
@@ -584,6 +747,14 @@ def workflow_sdxl(job: dict, *, modello: dict | None = None,
         grafo["458"]["inputs"]["model"] = modello_ref
     pose_image = str(job.get("pose_image") or "").strip()
     pose_preset = str(job.get("pose_preset") or "").strip()
+    if (pose_image or pose_preset) and not scelte.get("controlnet_openpose"):
+        # Il ControlNet openpose è per famiglia di modello: quello di SDXL non
+        # capisce i latenti di SD 1.5 e viceversa. Con la famiglia giusta mancante
+        # il grafo non si costruisce: senza questo controllo la posa verrebbe
+        # ignorata in silenzio, e il job tornerebbe "done" con l'immagine sbagliata.
+        raise ValueError(
+            f"posa richiesta per la famiglia {famiglia!r}, che non ha un ControlNet "
+            "openpose dichiarato in shared/image_jobs.py")
     if pose_image or pose_preset:
         # La foto di riferimento resta un input locale di ComfyUI. DWPose ne
         # estrae lo scheletro; ControlNet vincola la geometria senza copiare
@@ -618,7 +789,40 @@ def workflow_sdxl(job: dict, *, modello: dict | None = None,
                 "height": int(job["altezza"])}}
         grafo["458"]["inputs"]["positive"] = ["463", 0]
         grafo["458"]["inputs"]["negative"] = ["463", 1]
+    fattore = int(job.get("fix") or 0)
+    if fattore > 1:
+        # L'R-ESRGAN genera il dettaglio del fix; ricampionare a 1024×1536 con
+        # SD 1.5 richiedeva 20–40 minuti e tendeva a ridisegnare un bordo bianco
+        # attorno alla figura. Il fix finisce quindi qui, senza un secondo KSampler.
+        grafo["474"] = {"class_type": "UpscaleModelLoader",
+                        "inputs": {"model_name": FIX_UPSCALER}}
+        grafo["475"] = {"class_type": "ImageUpscaleWithModel",
+                        "inputs": {"upscale_model": ["474", 0], "image": ["457", 0]}}
+        grafo["476"] = {"class_type": "ImageScale", "inputs": {
+            "image": ["475", 0], "upscale_method": "lanczos",
+            "width": int(job["larghezza"]) * fattore,
+            "height": int(job["altezza"]) * fattore, "crop": "disabled"}}
+        grafo["470"]["inputs"]["images"] = ["476", 0]
     return grafo
+
+
+def workflow_sdxl(job: dict, *, modello: dict | None = None,
+                  prefisso: str = "HyperSpace", jpeg: bool = True) -> dict:
+    """Il grafo CyberRealistic Pony (SDXL/Pony): CFG 5, Clip Skip 2, 1024.
+
+    Resta come nome proprio — è la ricetta del Mac per gli sketch — ma il grafo
+    lo costruisce `workflow_checkpoint`: due funzioni che disegnano lo stesso
+    grafo sarebbero due grafi da tenere allineati a mano.
+    """
+    return workflow_checkpoint(job, modello=modello, prefisso=prefisso, jpeg=jpeg,
+                               famiglia=FAMIGLIA_SDXL)
+
+
+def workflow_sd15(job: dict, *, modello: dict | None = None,
+                  prefisso: str = "HyperSpace", jpeg: bool = True) -> dict:
+    """Il grafo ChickMixFlat (SD 1.5): CFG 7, Clip Skip 2, 768, niente pose."""
+    return workflow_checkpoint(job, modello=modello, prefisso=prefisso, jpeg=jpeg,
+                               famiglia=FAMIGLIA_SD15)
 
 
 def immagini_da_history(run: dict) -> list:

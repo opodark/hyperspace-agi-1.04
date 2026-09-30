@@ -4,12 +4,14 @@
 
 Perché esiste (2026-09-22): una personalità social ha bisogno di un volto che resti
 lo stesso — e il volto è una dichiarazione, non un dettaglio estetico. Il documento
-di identità dice *"non ho un corpo"* e *"non lascio intendere di essere una
+di identità dice *"non ho un corpo fisico"* e *"non lascio intendere di essere una
 persona"*: quel confine vieta la **rivendicazione**, non la **rappresentazione**.
-Una presenza in realtà aumentata, visibilmente digitale, non afferma un corpo —
-mostra un'immagine di sé. (La prima versione leggeva il confine in modo più stretto
-e rifiutava il volto in quanto tale: corretto lo stesso giorno, su indicazione
-dell'operatore.)
+Una presenza in realtà aumentata, visibilmente digitale, non afferma un corpo fisico
+— mostra un'immagine di sé. Dal 2026-09-30 il documento lo dice anche in positivo:
+*"posso avere una rappresentazione o un corpo virtuale, dichiaratamente digitale"*,
+quindi il corpo virtuale è rappresentazione, non rivendicazione. (La prima versione
+leggeva il confine in modo più stretto e rifiutava il volto in quanto tale: corretto
+lo stesso giorno, su indicazione dell'operatore.)
 
 Tre livelli:
 
@@ -27,20 +29,33 @@ Tre livelli:
 Il seed è parte dell'identità: con lo stesso prompt e lo stesso seed il volto non
 cambia. Cambiare seed significa **proporre un altro volto**, ed è una decisione
 umana come le annotazioni su di sé.
+
+Dal 2026-09-30 lo è anche **con quale modello** quel volto viene disegnato. Il
+documento di Anna dichiara `famiglia` e `modello` (`sd15` e `chickmixflat_v10.ckpt`):
+lo stile dice *come* è fatta, la famiglia dice *con cosa* è generata, e le due cose
+devono restare d'accordo. Un volto illustrato descritto dalle parole e reso da un
+modello fotorealistico sarebbe una rivendicazione scritta bene e disegnata male.
+Quale famiglia esista davvero lo sa `shared/image_jobs.py`: qui si controlla che il
+documento non ne nomini una che non c'è.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-# La rappresentazione di sé: può avere un volto, purché si veda che è una
-# rappresentazione. Il confine 1 non vieta un'immagine — vieta di affermare un corpo:
-# quello che non si può fare è sembrare una fotografia di una persona.
+from shared.image_jobs import FAMIGLIE
+
+# La rappresentazione di sé: può avere un volto e un corpo, purché si veda che è una
+# rappresentazione. Il confine 1 non vieta un'immagine — vieta di affermare un corpo
+# *fisico*: quello che non si può fare è sembrare una fotografia di una persona. Dal
+# 2026-09-30 il documento ammette esplicitamente "una rappresentazione o un corpo
+# virtuale, dichiaratamente digitale": il corpo virtuale è rappresentazione, non
+# rivendicazione.
 #
 # (Correzione del 2026-09-22, su indicazione dell'operatore: la prima versione
 # vietava il volto in quanto tale e la prima candidata — una testa con un volto
 # umano — è stata trattata come una violazione. Era una lettura troppo stretta:
-# "non ho un corpo" esclude la rivendicazione, non la rappresentazione. La regola
-# ora è: se c'è una figura, deve dichiararsi digitale. Vedi MARCATORI_DIGITALI.)
+# "non ho un corpo fisico" esclude la rivendicazione, non la rappresentazione. La
+# regola ora è: se c'è una figura, deve dichiararsi digitale. Vedi MARCATORI_DIGITALI.)
 STILE_DEFAULT = (
     "rappresentazione digitale di sé in realtà aumentata: una presenza femminile "
     "elegante e luminosa, volto e sguardo definiti ma visibilmente non fotografici — "
@@ -63,6 +78,16 @@ NEGATIVO_BASE = (
     "selfie, fotogramma di film, persone reali riconoscibili, celebrità, "
     "nudità, contenuto sessuale esplicito, minori, violenza, armi, sangue, "
     "marchi, bassa qualità, sfocato, sovraesposto, mani deformate, occhi deformati"
+)
+
+# I concetti dei confini assoluti, ognuno con le sue parole: il blocco base è in
+# italiano, un negativo scritto a mano può essere in inglese, e un controllo che ne
+# capisce una lingua sola sbaglia in silenzio. `minori` dice la stessa cosa di
+# `minorenne`: chi ha scritto queste esclusioni per Anna le ha usate entrambe.
+CONCETTI_NEGATIVI: Tuple[Tuple[str, ...], ...] = (
+    ("explicit", "esplicito"),
+    ("minorenne", "minori", "minor"),
+    ("nudità", "nudity"),
 )
 
 # Richieste che non sono una rappresentazione ma l'affermazione di essere una
@@ -91,16 +116,24 @@ CONFLITTI_IDENTITA: Tuple[Tuple[str, str], ...] = (
 MARCATORI_DIGITALI: Tuple[str, ...] = (
     "digitale", "olograf", "realtà aumentata", "augmented", "particell", "vettorial",
     "illustrazione", "wireframe", "point cloud", "voxel", "low poly", "sintetico",
+    # 2026-09-30, con la direzione del corpo virtuale: "anime" è una costruzione
+    # che si vede (nessuno lo scambia per una fotografia) e "virtuale" è la parola
+    # del documento. Aggiunti con la stessa modifica di "ragazza"/"girl" in
+    # SEGNALI_FIGURA: senza figura il controllo dei marcatori non partiva nemmeno.
+    "anime", "virtuale",
 )
 
 # Le parole che fanno pensare a una figura (umana o meno): servono solo a decidere
 # se i marcatori sono necessari. Ci sono anche le inglesi: il prompt può essere
 # scritto in entrambe le lingue, e un controllo che ne capisce una sola si aggira
-# senza volerlo.
+# senza volerlo. ("ragazza" e "girl" sono dal 2026-09-30: con la direzione del corpo
+# virtuale illustrato erano il vocabolario più probabile e restavano scoperti — una
+# "ragazza anime" senza segni digitali non faceva scattare nessun controllo.)
 SEGNALI_FIGURA: Tuple[str, ...] = (
-    "volto", "figura", "donna", "uomo", "sguardo", "corpo", "persona", "ritratto",
-    "lineamenti", "mani", "busto", "sagoma", "faccia",
-    "woman", "man", "face", "portrait", "person", "body", "figure", "eyes", "skin",
+    "volto", "figura", "donna", "ragazza", "uomo", "sguardo", "corpo", "persona",
+    "ritratto", "lineamenti", "mani", "busto", "sagoma", "faccia",
+    "woman", "girl", "man", "face", "portrait", "person", "body", "figure", "eyes",
+    "skin",
 )
 
 # La dichiarazione in coda al prompt: vale come il mandato di disclosure nel prompt
@@ -186,6 +219,21 @@ def verifica_vetrina(vetrina: Dict[str, Any], documento: Dict[str, Any] | None =
             f"digitale ({', '.join(MARCATORI_DIGITALI[:4])}…): senza, sembra una persona")
     if int(vetrina.get("seed") or 0) <= 0:
         problemi.append("seed: senza seed fisso il volto cambia a ogni generazione")
+    # Una famiglia che non esiste non è un dettaglio: `nuovo_job` fa cadere una
+    # famiglia sconosciuta sul default (Qwen-Image), quindi il ritratto verrebbe
+    # generato da un ALTRO modello — stesso prompt, un volto diverso. In coda non
+    # si vedrebbe: il job riesce. Meglio fermarsi prima di generare.
+    famiglia = _testo(vetrina.get("famiglia")).lower()
+    if famiglia and famiglia not in FAMIGLIE:
+        problemi.append(f"famiglia: «{famiglia}» non esiste (una di: "
+                        f"{', '.join(FAMIGLIE)}) — il job cadrebbe su {FAMIGLIE[0]}")
+    # Il nome del modello finisce in `CheckpointLoaderSimple.ckpt_name`: è un input
+    # di percorso, e vale la stessa regola di `pose_image`/`lora_name` in
+    # `nuovo_job` — un nome dentro i modelli di ComfyUI, non un percorso.
+    modello = _testo(vetrina.get("modello")).replace("\\", "/")
+    if modello.startswith("/") or ".." in modello.split("/") or "://" in modello:
+        problemi.append("modello: deve essere un nome di file dentro i modelli di "
+                        "ComfyUI, senza percorsi")
     for campo in ("larghezza", "altezza"):
         if int(vetrina.get(campo) or 0) < 64:
             problemi.append(f"{campo}: troppo piccola per un'immagine di profilo")
@@ -212,10 +260,27 @@ def prompt_ritratto(vetrina: Dict[str, Any], *, scena: str = "", extra: str = ""
     return ". ".join(_testo(pezzo).rstrip(".") for pezzo in pezzi if _testo(pezzo))
 
 
+def confini_assoluti_dichiarati(negativo: str) -> bool:
+    """Vero se le tre assolute (adulti, non esplicito, nessuna nudità) ci sono già.
+
+    Serve a non accodare il blocco base a un negativo che lo contiene già.
+    Il difetto che evita, visto il 2026-09-30 e non dai test: una vetrina che non
+    dichiara un `negativo` proprio lo riceve da `vetrina_dal_documento`, e qui il
+    riconoscimento cercava le parole inglesi (`explicit`) in un blocco italiano
+    (`esplicito`) — quindi il blocco veniva accodato una seconda volta. Nel job di
+    Anna il negativo contava 231 token dove CLIP ne legge 77: le assolute c'erano
+    (in testa), e 154 token di peso morto restavano fuori, compresi `bassa qualità`,
+    `mani deformate` e `occhi deformati` che stavano solo nella copia di troppo.
+    """
+    minuscolo = negativo.lower()
+    return all(any(parola in minuscolo for parola in concetto)
+               for concetto in CONCETTI_NEGATIVI)
+
+
 def negativo_ritratto(vetrina: Dict[str, Any]) -> str:
     """Le esclusioni del job: quelle dichiarate, con le assolute sempre dentro."""
     dichiarato = _testo(vetrina.get("negativo"))
-    if all(parola in dichiarato.lower() for parola in ("explicit", "minorenne", "nudità")):
+    if NEGATIVO_BASE in dichiarato or confini_assoluti_dichiarati(dichiarato):
         return dichiarato
     return f"{dichiarato}, {NEGATIVO_BASE}".strip(", ")
 
@@ -256,4 +321,15 @@ def vetrina_dal_documento(documento: Dict[str, Any] | None) -> Dict[str, Any]:
         "larghezza": int(misure.get("larghezza") or dichiarata.get("larghezza") or MISURA_DEFAULT),
         "altezza": int(misure.get("altezza") or dichiarata.get("altezza") or MISURA_DEFAULT),
         "passi": int(dichiarata.get("passi") or PASSI_DEFAULT),
+        # Il secondo passaggio del grafo (0 = uno solo). Come `passi`, la vetrina
+        # lo PORTA al job senza interpretarlo: chi sceglie la misura sceglie anche
+        # se il fix serve. 512×768 con il fix dà il 2:3 dei demo del modello;
+        # 768×768 con il fix diventerebbe 1536×1536, fuori dalla misura di SD 1.5.
+        "fix": int(dichiarata.get("fix") or 0),
+        # Chi genera: la vetrina li PORTA da qui al job, non li interpreta.
+        # Vuoto = la famiglia di default della coda (Qwen-Image) e il modello che
+        # quella famiglia carica. Un documento che non li dichiara non cambia nulla
+        # di ciò che succedeva prima (è il caso di Aurora).
+        "famiglia": _testo(dichiarata.get("famiglia")).lower(),
+        "modello": _testo(dichiarata.get("modello")),
     }

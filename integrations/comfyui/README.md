@@ -162,6 +162,16 @@ funzionato su questa macchina — Qwen-Image 2.1 GGUF (variante `-UC`, non
 censurata) con il text encoder da 8B **sulla CPU**, che è ciò che lascia VRAM al
 diffusion. I pesi si installano con `install-model.ps1` (sezione precedente).
 
+Lo stesso ponte è anche quello del Mac, dove le famiglie servite sono due —
+`BRIDGE_MODEL=sdxl-turbo,sd15`: CyberRealistic Pony (SDXL) per gli sketch del feed
+e ChickMixFlat v1.0 (SD 1.5, 1,99 GiB) per il volto virtuale di Anna. Sono due
+**checkpoint unici**: stesso grafo, ricette diverse (1024 px / CFG 5 e 768 px /
+CFG 7), dichiarate in `RICETTE_CHECKPOINT` e allineate ai manifest
+`modelli-sdxl.json` e `modelli-sd15.json` dai test. Sul Mac i pesi si installano
+con lo script bash: `integrations/comfyui/install-model.sh --manifest
+integrations/comfyui/modelli-sd15.json`. `--check` verifica i file di ogni
+famiglia dichiarata **per nome** e dice quale manca.
+
 ```powershell
 python scripts\channel_token.py comfy --write     # una volta: crea il canale del ponte
 $env:CHANNEL_TOKEN = "<token comfy>"

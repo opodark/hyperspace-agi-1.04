@@ -86,5 +86,25 @@ dal loader come contesto separato. Nessun hook o runtime ECC è incluso.
   `integrations/comfyui/install-model.ps1` lo scarica da Hugging Face e confronta
   l'impronta SHA-256 con `integrations/comfyui/modelli.json` — la verifica e' del
   *file*, non una dichiarazione di licenza, che resta di chi lo scarica.
+  I due checkpoint del Mac seguono la stessa regola, con un manifest ciascuno:
+  `integrations/comfyui/modelli-sdxl.json` (`cyberdelia/CyberRealisticPony`,
+  revisione `bf85880a58614199d0391c93151211be2832bb8c`) e
+  `integrations/comfyui/modelli-sd15.json` (ChickMixFlat v1.0, autore `xxxholic`,
+  versione v1.0 del 2023-05-10). Entrambi sono **CreativeML Open RAIL-M**: una
+  licenza che ammette l'uso commerciale con restrizioni d'uso (niente contenuti
+  illeciti o dannosi) e che resta dell'autore dei pesi. Due differenze da sapere,
+  e sono scritte nel manifest invece che qui: ChickMixFlat e' un upload **Civitai**
+  — non c'e' un repository con revisioni, quindi il pin e' l'impronta SHA-256 — e
+  Civitai non dichiara per esso un permesso di uso commerciale esplicito: il dato
+  certo e' la licenza del modello. Il file e' inoltre un **PickleTensor** (Civitai
+  non ne offre la variante SafeTensor): lo scan di Civitai lo dichiara senza
+  import di pickle, ma la fiducia in quel formato sta li' e non in noi.
+  Un terzo file, dal 2026-09-30, e' l'ingranditore del fix dei ritratti di Anna:
+  `integrations/comfyui/modelli-upscaler.json` (Real-ESRGAN 4x+, autore Xintao
+  Wang, release v0.1.0) sotto **BSD 3-Clause** — una licenza di software, non d'uso
+  dei pesi: e' il file che A1111 chiama «R-ESRGAN 4x+» nei metadati dei demo di
+  ChickMixFlat, e senza di lui il secondo passaggio del fix non si costruisce.
+  Anche qui il pin e' l'impronta SHA-256, e anche qui i pesi non sono distribuiti
+  con HyperSpace.
 - **Le dipendenze di sviluppo** (vitest, typescript nel web-node; pytest nella
   sandbox): presenti solo negli ambienti di test, non nelle immagini di servizio.

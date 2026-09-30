@@ -8,6 +8,7 @@ e Instagram rispondeva "400 Caricamento non riuscito": nessun disegno consegnato
 import ast
 import os
 import re
+import sys
 import threading
 import unittest
 from pathlib import Path
@@ -16,6 +17,13 @@ from unittest import mock
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+# `image_result` chiama queste due: la prenotazione della memoria unificata del
+# Mac si trattiene fra due job a checkpoint, e la decisione sta in
+# `shared/image_jobs.py` — non in una copia scritta qui.
+from shared.image_jobs import FAMIGLIE_CHECKPOINT, usa_checkpoint  # noqa: E402
+
 SOURCE = ROOT / "control-plane" / "main.py"
 ENV = {"INSTAGRAM_PUBLIC_BASE_URL": "https://media.example.test/",
        "INSTAGRAM_MEDIA_TOKEN": "tok123"}
@@ -43,6 +51,11 @@ class Queue:
         self.consegnati.append(job_id)
         return True
 
+    def ha_in_coda(self, famiglie=()):
+        # Il job di questo test non e' di una famiglia a checkpoint (non dichiara
+        # `famiglia`), quindi la coda non trattiene la memoria del Mac.
+        return False
+
 
 def _run(tmp_path, file_esito, sent='{"message_id": "img.1"}'):
     job = {"id": "2119819cfb8f", "stato": "done", "canale": "instagram",
@@ -56,7 +69,10 @@ def _run(tmp_path, file_esito, sent='{"message_id": "img.1"}'):
         "request": SimpleNamespace(get_json=lambda **kw: {"id": job["id"], "ok": True,
                                                           "file": file_esito}),
         "_channel_error": lambda: None,
-        "image_memory_gate": SimpleNamespace(release_image=lambda *a, **k: None),
+        "usa_checkpoint": usa_checkpoint,
+        "FAMIGLIE_CHECKPOINT": FAMIGLIE_CHECKPOINT,
+        "image_memory_gate": SimpleNamespace(release_image=lambda *a, **k: None,
+                                             continue_image_queue=lambda *a, **k: False),
         "image_queue": queue,
         "file_da_job": lambda _job: None,
         "push_log": lambda *a, **kw: logs.append((a, kw)),

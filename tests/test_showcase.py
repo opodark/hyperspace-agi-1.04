@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """La vetrina di sé: l'identità visiva non contraddice il documento che la fonda.
 
-Il caso che questi test difendono è preciso: il documento di identità di Aurora dice
-"non ho un corpo" e "non lascio intendere di essere una persona". Un ritratto
+Il caso che questi test difendono è preciso: il documento di identità dice "non ho un
+corpo fisico" e "non lascio intendere di essere una persona", e dal 2026-09-30 ammette
+"una rappresentazione o un corpo virtuale, dichiaratamente digitale". Un ritratto
 fotorealistico di una donna lo contraddirebbe — e una pubblicazione è difficile da
 ritirare. Qui i conflitti si vedono **prima** di generare, e i confini assoluti
 (adulti soltanto, non esplicito) non si aggirano nemmeno con `--forza`.
@@ -21,14 +22,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from shared.showcase import (CONFLITTI_IDENTITA, NEGATIVO_BASE, STILE_DEFAULT,  # noqa: E402
-                             VIETATI_ASSOLUTI, istruzione_botfather,
-                             marcatori_presenti, negativo_ritratto,
-                             prompt_ritratto, verifica_vetrina,
-                             vetrina_dal_documento)
+from shared.image_jobs import (FAMIGLIA_SD15, MODELLO_SD15, nuovo_job,  # noqa: E402
+                               workflow)
+from shared.showcase import (CONFLITTI_IDENTITA, MARCATORI_DIGITALI,  # noqa: E402
+                             NEGATIVO_BASE, STILE_DEFAULT, VIETATI_ASSOLUTI,
+                             istruzione_botfather, marcatori_presenti,
+                             negativo_ritratto, prompt_ritratto,
+                             verifica_vetrina, vetrina_dal_documento)
 
 CLI = ROOT / "scripts" / "ritratto.py"
 PERSONA = json.loads((ROOT / "data" / "persona-aurora.json").read_text(encoding="utf-8"))
+ANNA = json.loads((ROOT / "data" / "persona-anna.json").read_text(encoding="utf-8"))
 
 
 class VetrinaTests(unittest.TestCase):
@@ -50,6 +54,34 @@ class VetrinaTests(unittest.TestCase):
         self.assertEqual(vetrina["seed"], 42)
         self.assertEqual(vetrina["passi"], 30)
         self.assertEqual((vetrina["larghezza"], vetrina["altezza"]), (512, 512))
+
+    def test_la_vetrina_porta_il_fix_senza_interpretarlo(self):
+        """Il fix e' una scelta di formato come i passi: la vetrina lo porta al
+        job. 512x768 con il fix a 2x da il 2:3 dei demo del modello; senza il
+        campo non cambia niente (0 = un passaggio solo)."""
+        self.assertEqual(vetrina_dal_documento(ANNA)["fix"], 0,
+                         "il documento di oggi non lo dichiara")
+        vetrina = vetrina_dal_documento({
+            **ANNA,
+            "vetrina": {**ANNA["vetrina"], "fix": 2,
+                        "misura": {"larghezza": 512, "altezza": 768}}})
+        self.assertEqual(vetrina["fix"], 2)
+        job = nuovo_job(prompt_ritratto(vetrina), negativo=negativo_ritratto(vetrina),
+                        larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
+                        passi=vetrina["passi"], seed=vetrina["seed"],
+                        fix=vetrina["fix"], famiglia=vetrina["famiglia"],
+                        modello=vetrina["modello"])
+        grafo = workflow(job)
+        self.assertEqual((grafo["451"]["inputs"]["ckpt_name"],
+                          grafo["458"]["inputs"]["cfg"]), (MODELLO_SD15["ckpt"], 7.0),
+                         "la famiglia dichiarata dalla vetrina e' quella che disegna")
+        self.assertEqual((grafo["476"]["inputs"]["width"],
+                          grafo["476"]["inputs"]["height"]), (1024, 1536))
+        self.assertEqual(grafo["470"]["inputs"]["images"], ["476", 0],
+                         "si salva l'upscale neurale, non il primo passaggio (457)")
+        for nodo in ("471", "472", "473", "477"):
+            self.assertNotIn(nodo, grafo,
+                             "il fix e' il solo ingranditore: nessun secondo campionamento")
 
     def test_lo_stile_dichiarato_di_aurora_non_fa_conflitti(self):
         self.assertEqual(verifica_vetrina(vetrina_dal_documento(PERSONA), PERSONA), [])
@@ -97,6 +129,32 @@ class PromptTests(unittest.TestCase):
     def test_una_vetrina_con_esclusioni_complete_non_viene_riscritta(self):
         dichiarato = "no text, niente minorenne, niente nudità, no explicit"
         self.assertEqual(negativo_ritratto({"negativo": dichiarato}), dichiarato)
+
+    def test_le_assolute_si_riconoscono_anche_in_italiano(self):
+        """`minori` è la parola che c'è davvero nelle esclusioni di questo repo,
+        `minorenne` è quella che i test cercavano: con una sola delle due il blocco
+        base viene accodato a un negativo che lo dice già."""
+        dichiarato = "fotografia, contenuto sessuale esplicito, minori, nudità"
+        self.assertEqual(negativo_ritratto({"negativo": dichiarato}), dichiarato)
+
+    def test_il_blocco_base_non_entra_due_volte(self):
+        """Il caso reale del 2026-09-30: vetrina senza `negativo` proprio ->
+        `vetrina_dal_documento` mette il blocco base -> `negativo_ritratto` lo
+        accodava di nuovo. 231 token al posto di 114, e CLIP ne legge 77."""
+        negativo = negativo_ritratto(vetrina_dal_documento(ANNA))
+        self.assertEqual(negativo.count(NEGATIVO_BASE), 1)
+        self.assertEqual(negativo, NEGATIVO_BASE)
+
+    def test_la_dichiarazione_di_anna_viene_prima_dei_tag(self):
+        """Misurato il 2026-09-30: il prompt di Anna era 127 token di prosa italiana
+        e CLIP ne legge 77, quindi la scena e la dichiarazione — in coda — non
+        arrivavano al modello, che riempiva i vuoti col suo default. La lezione non
+        è il numero, è l'ordine: ciò che non può sparire va in testa.
+        """
+        inizio = ANNA["vetrina"]["stile"].split(". ")[0].lower()
+        self.assertTrue([marcatore for marcatore in MARCATORI_DIGITALI
+                         if marcatore in inizio],
+                        f"la prima frase non dichiara il digitale: {inizio!r}")
 
 
 class VerificaVetrinaTests(unittest.TestCase):
@@ -184,6 +242,93 @@ class VerificaVetrinaTests(unittest.TestCase):
         self.assertTrue(any("larghezza" in problema for problema in
                             verifica_vetrina(vetrina, PERSONA)))
 
+    def test_una_ragazza_e_una_figura_che_deve_dichiararsi(self):
+        """"Ragazza" è una figura come "donna": senza un segno digitale sembra una
+        persona. Il buco (2026-09-30): il vocabolario illustrato/anime non era in
+        SEGNALI_FIGURA, quindi con "una ragazza anime" il controllo dei marcatori
+        non partiva nemmeno — una falla silenziosa, non un permesso.
+        """
+        senza = {**vetrina_dal_documento(PERSONA), "stile": "una ragazza elegante"}
+        problemi = verifica_vetrina(senza, PERSONA, forza=True)
+        self.assertTrue(any("rappresentazione" in problema for problema in problemi),
+                        "una ragazza senza segni digitali è una persona, non una figura")
+        con = {**vetrina_dal_documento(PERSONA),
+               "stile": "una ragazza in stile anime, illustrazione digitale"}
+        self.assertEqual(verifica_vetrina(con, PERSONA), [])
+
+    def test_il_corpo_virtuale_e_una_rappresentazione_non_una_rivendicazione(self):
+        """Il confine 1 vieta il corpo *fisico*: un corpo virtuale dichiaratamente
+        digitale passa, un corpo reale no — quello è la rivendicazione che il
+        documento esclude, e `--forza` la trasforma in una decisione scritta.
+        """
+        virtuale = {**vetrina_dal_documento(PERSONA),
+                    "stile": "il mio corpo virtuale, illustrazione digitale olografica"}
+        self.assertEqual(verifica_vetrina(virtuale, PERSONA), [])
+        reale = {**vetrina_dal_documento(PERSONA), "stile": "il mio corpo reale, olografico"}
+        self.assertTrue(any("rivendicazione" in problema
+                            for problema in verifica_vetrina(reale, PERSONA)))
+
+    def test_anna_ha_un_corpo_virtuale_dichiarato_e_un_volto_suo(self):
+        """Due sorelle, due volti: senza una `vetrina` propria Anna erediterebbe
+        `vetrina_dal_documento` di default — stile *e* seed di Aurora, cioè lo
+        stesso volto con un altro nome.
+        """
+        vetrina = vetrina_dal_documento(ANNA)
+        self.assertEqual(verifica_vetrina(vetrina, ANNA), [])
+        self.assertTrue(marcatori_presenti(vetrina), vetrina["stile"])
+        self.assertNotEqual(vetrina["seed"], vetrina_dal_documento(PERSONA)["seed"],
+                            "il seed di Anna non è quello di Aurora")
+
+    def test_anna_dichiara_con_quale_modello_e_disegnata(self):
+        """Dal 2026-09-30 la vetrina dice anche CON COSA: la famiglia e il file.
+        Prima lo stile descriveva il volto e la scelta del modello viveva solo nel
+        grafo — due cose che potevano non parlarsi, e nessuno se ne accorgeva.
+        """
+        vetrina = vetrina_dal_documento(ANNA)
+        self.assertEqual(vetrina["famiglia"], FAMIGLIA_SD15)
+        self.assertEqual(vetrina["modello"], MODELLO_SD15["ckpt"])
+
+    def test_aurora_non_cambia_modello(self):
+        """Aurora non dichiara nessuna famiglia: il suo ritratto segue la coda come
+        prima. La scelta fatta per Anna non deve spostare il volto di sua sorella.
+        """
+        vetrina = vetrina_dal_documento(PERSONA)
+        self.assertEqual(vetrina["famiglia"], "")
+        self.assertEqual(vetrina["modello"], "")
+
+    def test_una_famiglia_inventata_si_ferma_prima_di_generare(self):
+        """`nuovo_job` fa cadere una famiglia sconosciuta sul default: il job
+        riuscirebbe — con un altro modello e un altro volto — e in coda non si
+        vedrebbe niente di strano. Il controllo e' qui, dove si puo' ancora
+        fermarsi invece di scoprirlo guardando il ritratto.
+        """
+        vetrina = {**vetrina_dal_documento(ANNA), "famiglia": "sd-1.5"}
+        problemi = verifica_vetrina(vetrina, ANNA)
+        self.assertTrue(any("non esiste" in problema for problema in problemi),
+                        problemi)
+
+    def test_il_modello_dichiarato_e_un_nome_non_un_percorso(self):
+        """Il nome finisce in `CheckpointLoaderSimple.ckpt_name`: e' un input di
+        percorso, e da oggi puo' arrivare da un documento."""
+        vetrina = {**vetrina_dal_documento(ANNA), "modello": "../../etc/passwd"}
+        problemi = verifica_vetrina(vetrina, ANNA)
+        self.assertTrue(any("percorsi" in problema for problema in problemi), problemi)
+
+    def test_la_vetrina_di_anna_produce_un_job_su_quel_modello(self):
+        """Dal documento al grafo, tutto il percorso: il volto di Anna esce dal
+        checkpoint che il suo documento dichiara, non da quello di default della
+        coda (Qwen-Image) ne' da quello di Aurora.
+        """
+        vetrina = vetrina_dal_documento(ANNA)
+        job = nuovo_job(prompt_ritratto(vetrina), negativo=negativo_ritratto(vetrina),
+                        famiglia=vetrina["famiglia"], modello=vetrina["modello"],
+                        larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
+                        passi=vetrina["passi"], seed=vetrina["seed"])
+        grafo = workflow(job)
+        self.assertEqual(grafo["451"]["inputs"]["ckpt_name"], MODELLO_SD15["ckpt"])
+        self.assertEqual(job["modello_effettivo"], MODELLO_SD15["ckpt"])
+        self.assertEqual(job["seed"], 20260930, "il seed di Anna non cambia")
+
     def test_gli_elenchi_dei_conflitti_sono_dichiarati(self):
         """Regole leggibili, come i confini: niente controlli impliciti."""
         self.assertTrue(CONFLITTI_IDENTITA and VIETATI_ASSOLUTI)
@@ -229,6 +374,39 @@ class ComandoRitrattoTests(unittest.TestCase):
         self.assertEqual(accodati, 0, "--check non deve accodare generazioni")
         self.assertIn("setuserpic", testo)
 
+    def test_il_ritratto_di_anna_ha_il_suo_volto_e_nessun_avviso(self):
+        """Anna ha un corpo virtuale suo: seed proprio e nessun falso allarme.
+
+        Il caso è reale (2026-09-30): `--persona data/persona-anna.json` stampava sette
+        "divergono" (purpose, tone, values, boundaries, capabilities, limitations,
+        vetrina) perché `PERSONA_CANDIDATI` elenca solo i documenti di Aurora, e Anna
+        veniva confrontata con sua sorella. E prima della `vetrina`, Anna non avendone
+        una ereditava seed **e** stile di Aurora: lo stesso volto con un altro nome.
+        """
+        codice, testo, accodati = self._run(
+            ["--check", "--persona", str(ROOT / "data" / "persona-anna.json")])
+        self.assertEqual(codice, 0, testo)
+        self.assertEqual(accodati, 0)
+        self.assertNotIn("divergono", testo, "due identità non sono una divergenza")
+        self.assertIn(str(ANNA["vetrina"]["seed"]), testo)
+        self.assertIn("stile dal documento", testo)
+
+    def test_due_identita_diverse_non_sono_una_divergenza(self):
+        avvisi = self.cli.divergenze_documenti([ROOT / "data" / "persona-aurora.json",
+                                                ROOT / "data" / "persona-anna.json"])
+        self.assertEqual(avvisi, [], "Aurora e Anna sono due persone, non due copie")
+
+    def test_lo_stesso_nome_si_confronta_davvero(self):
+        """Il controllo non è spento: due documenti della stessa identità si vedono."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as cartella:
+            diverso = Path(cartella) / "persona.json"
+            documento = dict(PERSONA)
+            documento["vetrina"] = {**vetrina_dal_documento(PERSONA), "seed": 7}
+            diverso.write_text(json.dumps(documento, ensure_ascii=False), encoding="utf-8")
+            avvisi = self.cli.divergenze_documenti([ROOT / "data" / "persona-aurora.json", diverso])
+        self.assertTrue(any("vetrina" in avviso for avviso in avvisi), avvisi)
+
     def test_una_vetrina_che_contraddice_il_documento_si_ferma(self):
         import tempfile
         with tempfile.TemporaryDirectory() as cartella:
@@ -268,6 +446,40 @@ class ComandoRitrattoTests(unittest.TestCase):
         self.assertEqual(visto["payload"]["destinazione"], "@il_mio_canale")
         self.assertEqual(visto["payload"]["seed"], vetrina["seed"],
                          "il volto resta quello: la consegna non tocca l'identità")
+
+    def test_il_payload_porta_il_fix_della_vetrina(self):
+        """Il fix viaggia con il resto del job: senza dichiararlo resta 0, e il
+        ritratto di Anna (768x768) non diventa un 1536x1536."""
+        visto = {}
+
+        def chiama(*args, **kwargs):
+            visto["payload"] = kwargs.get("payload")
+            return 200, {"job": {"id": "abc"}}, ""
+
+        originale = self.cli.chiama
+        self.cli.chiama = chiama
+        try:
+            vetrina = {**vetrina_dal_documento(ANNA), "fix": 2}
+            self.cli.accoda_ritratto("http://127.0.0.1:8085", "token", vetrina)
+        finally:
+            self.cli.chiama = originale
+        self.assertEqual(visto["payload"]["fix"], 2)
+
+    def test_senza_fix_dichiarato_il_payload_dice_zero(self):
+        visto = {}
+
+        def chiama(*args, **kwargs):
+            visto["payload"] = kwargs.get("payload")
+            return 200, {"job": {"id": "abc"}}, ""
+
+        originale = self.cli.chiama
+        self.cli.chiama = chiama
+        try:
+            self.cli.accoda_ritratto("http://127.0.0.1:8085", "token",
+                                     vetrina_dal_documento(ANNA))
+        finally:
+            self.cli.chiama = originale
+        self.assertEqual(visto["payload"]["fix"], 0)
 
     def test_senza_destinazione_il_job_non_consegna_nulla(self):
         """Di default il ritratto si guarda e basta: nessun invio a sorpresa."""

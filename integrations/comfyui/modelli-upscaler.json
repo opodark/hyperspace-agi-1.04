@@ -1,0 +1,26 @@
+{
+  "$commento": [
+    "Manifest di Real-ESRGAN x4plus: l'ingranditore del fix dei ritratti di Anna.",
+    "Stessa disciplina di modelli-sd15.json — nome del file, impronta SHA-256 e",
+    "dimensione in un posto solo, il grafo (shared/image_jobs.py FIX_UPSCALER)",
+    "dall'altro, con un test che li confronta.",
+    "E' il file che A1111 chiama «R-ESRGAN 4x+»: i metadati dei demo di ChickMixFlat",
+    "dichiarano `hires 2x R-ESRGAN 4x+ denoise 0.35`, ed e' quello che il 2026-09-30",
+    "ha separato bridge_00084_ (pulita, 890 s) da bridge_00081_ (aloni cromatici su",
+    "ogni contorno, col solo ingrandimento del latente). Vedi docs/comfyui.md.",
+    "La dimensione e' quella dell'asset della release: il pin e' l'impronta SHA-256,",
+    "che install-model.sh ricalcola prima di dare il nome vero al file."
+  ],
+  "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+  "sorgente": "Real-ESRGAN — release v0.1.0, asset ufficiale (autore Xintao Wang)",
+  "pagina": "https://github.com/xinntao/Real-ESRGAN",
+  "modello_base": "Real-ESRGAN 4x+ (RRDBNet, ingranditore 4x)",
+  "licenza": "BSD 3-Clause",
+  "nota_licenza": "I pesi NON sono distribuiti con HyperSpace: si scaricano a parte e conservano la licenza del proprio autore (THIRD-PARTY-NOTICES.md). Il file e' un .pth, cioe' un pickle di tensori, caricato da ComfyUI con un nodo nativo (UpscaleModelLoader): vale la stessa avvertenza dei checkpoint di terzi, e la fonte qui e' la release ufficiale dell'autore. Sul Mac c'e' anche `RealESRGAN_x4plus_anime_6B.pth` (release v0.2.2.4, 17 938 799 byte, SHA-256 f872d837d3c9…): e' la variante per il disegno, installata per confronto e NON dichiarata al grafo — il fix usa il file 4x+ dei demo.",
+  "checkpoint": {
+    "destinazione": "upscale_models",
+    "file": "RealESRGAN_x4plus.pth",
+    "sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+    "byte": 67040989
+  }
+}

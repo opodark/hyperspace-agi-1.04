@@ -286,9 +286,21 @@ class PonteResilienteTests(unittest.TestCase):
         self.assertNotIn("execution_start", motivo, "il dump non è il motivo")
         self.assertLessEqual(len(motivo), 280)
 
-    def test_senza_eccezione_resta_il_dump(self):
+    def test_un_job_annullato_da_fuori_non_e_un_guasto_del_grafo(self):
+        """`execution_interrupted` non è un errore del modello: è un annullamento.
+
+        Caso vero (2026-09-30): cinque job annullati dalla coda di ComfyUI mentre si
+        tarava il sampler, e al control-plane è arrivato cinque volte il dump dei
+        messaggi — da cui non si distingue «rilancia» da «ripara».
+        """
         motivo = self.ponte.motivo_fallimento([["execution_interrupted", {"x": 1}]])
-        self.assertIn("execution_interrupted", motivo)
+        self.assertIn("annullato da fuori", motivo)
+        self.assertNotIn("execution_interrupted", motivo, "il dump non è il motivo")
+        self.assertLessEqual(len(motivo), 280)
+
+    def test_senza_eccezione_e_senza_annullamento_resta_il_dump(self):
+        motivo = self.ponte.motivo_fallimento([["execution_start", {"prompt_id": "abc"}]])
+        self.assertIn("execution_start", motivo)
 
     def test_esegui_job_usa_il_motivo_leggibile(self):
         sorgente = inspect.getsource(self.ponte.esegui_job)

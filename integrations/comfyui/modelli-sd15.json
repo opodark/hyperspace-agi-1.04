@@ -1,0 +1,27 @@
+{
+  "$commento": [
+    "Manifest del checkpoint ChickMixFlat v1.0 (SD 1.5): il volto virtuale di Anna.",
+    "Stessa disciplina di modelli-sdxl.json — nome del file, impronta SHA-256 e",
+    "dimensione in un posto solo, il grafo (shared/image_jobs.py MODELLO_SD15) e il",
+    "download (install-model.sh) dall'altro, con un test che li confronta.",
+    "Una differenza: il Pony viene da un repository Hugging Face con revisioni,",
+    "questo e' un upload Civitai — non esiste un commit a cui pinnarsi. Al posto di",
+    "`repo`/`revisione` ci sono l'URL di download e l'impronta SHA-256 come la",
+    "dichiara l'API di Civitai (letti e verificati il 2026-09-30): l'impronta resta",
+    "il pin, ed e' quella che install-model.sh ricalcola prima di dare il nome vero",
+    "al file."
+  ],
+  "url": "https://civitai.com/api/download/models/67206?fileId=47032",
+  "sorgente": "Civitai — modello 62638 «ChickMixFlat», versione v1.0, autore xxxholic",
+  "pagina": "https://civitai.com/models/62638/chickmixflat",
+  "modello_base": "SD 1.5",
+  "licenza": "CreativeML Open RAIL-M",
+  "nota_licenza": "I pesi NON sono distribuiti con HyperSpace: si scaricano a parte e conservano la licenza del proprio autore (THIRD-PARTY-NOTICES.md). La pagina Civitai non dichiara un permesso di uso commerciale esplicito: la licenza del modello e' la CreativeML Open RAIL-M, la stessa di CyberRealisticPony. Il modello dichiara «wide nsfw content Support» e l'autore elenca un embedding di negativo per le mani; l'utente resta responsabile di generare esclusivamente contenuti leciti e consensuali tra adulti.",
+  "checkpoint": {
+    "destinazione": "checkpoints",
+    "file": "chickmixflat_v10.ckpt",
+    "sha256": "c7bf573453ba790b59c243d7ba07e846cc39ad9e6ade378bbc58b9b73eae827f",
+    "byte": 2132857134,
+    "formato": "PickleTensor (fp16, pruned). Civitai non offre la variante SafeTensor: il file e' un pickle, quindi va scaricato SOLO da questo URL e con l'impronta verificata. Lo scan di Civitai del 2023-05-10 dice `pickleScanResult: Success` / `No Pickle imports`, cioe' un pickle di soli tensori e nessun codice da eseguire; non e' una garanzia nostra, e' un dato di terzi riportato qui perche' si sappia su cosa ci si basa."
+  }
+}

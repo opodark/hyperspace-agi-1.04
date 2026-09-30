@@ -325,7 +325,8 @@ def main(argv=None) -> int:
     parser.add_argument("--comfy", default=os.getenv("COMFY_URL", COMFY_DEFAULT))
     parser.add_argument("--ollama", default=os.getenv("OLLAMA_RAW_BASE_URL", OLLAMA_DEFAULT))
     parser.add_argument("--modello", default=os.getenv("WEBUI_GATEWAY_MODEL", FAMIGLIA_SDXL),
-                        help="famiglia di modello da verificare (default sdxl-turbo)")
+                        help="famiglie di modello da verificare, separate da virgola "
+                             "(default sdxl-turbo; il Mac serve anche sd15)")
     parser.add_argument("--host", default=os.getenv("WEBUI_GATEWAY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int,
                         default=int(os.getenv("WEBUI_GATEWAY_PORT", str(PORT_DEFAULT))))

@@ -97,7 +97,8 @@ from shared.persona_dream import PersonaDream
 from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
-from shared.image_jobs import FAMIGLIA_SDXL, ImmagineQueue, nuovo_job
+from shared.image_jobs import (FAMIGLIA_SDXL, FAMIGLIE_CHECKPOINT, ImmagineQueue,
+                               LATO_CONSIGLIATO, nuovo_job, usa_checkpoint)
 from shared.image_memory_gate import ImageMemoryGate
 from shared.prompt_immagine import (chiama_ollama, configura_modello,
                                    prepara_prompt_canale, richiesta_immagine_smart)
@@ -997,7 +998,9 @@ channel_runtime = ChannelRuntime()
 IMAGE_QUEUE_FILE = os.getenv("IMAGE_QUEUE_FILE", "").strip() or "/app/data/image-jobs.json"
 image_queue = ImmagineQueue(state_path=IMAGE_QUEUE_FILE)
 image_memory_gate = ImageMemoryGate()
-for _restored_image_job in image_queue.running_ids(FAMIGLIA_SDXL):
+# Le famiglie a checkpoint unico girano sul Mac e la loro memoria la prenota il
+# gate: i claim ritrovati dopo un riavvio sono job che il ponte stava eseguendo.
+for _restored_image_job in image_queue.running_ids(FAMIGLIE_CHECKPOINT):
     image_memory_gate.reserve_image(_restored_image_job, timeout=0)
 
 
@@ -3359,16 +3362,19 @@ def image_generate():
         return errore
     dati = request.get_json(silent=True) or {}
     famiglia = str(dati.get("famiglia", "")).strip().lower()
-    sdxl = famiglia == FAMIGLIA_SDXL
-    # Il Mac SDXL libera la memoria al claim del bridge; il percorso Qwen/Windows
-    # conserva lo scarico immediato della sua GPU dedicata.
-    scheda = "" if sdxl else _libera_scheda_per_immagine()
+    # Le famiglie a checkpoint unico — Pony per gli sketch, ChickMixFlat per il
+    # volto di Anna — girano sul Mac: lì la memoria la libera il ponte al claim,
+    # mentre il percorso Qwen/Windows scarica subito la sua GPU dedicata.
+    checkpoint = usa_checkpoint(famiglia)
+    lato = LATO_CONSIGLIATO.get(famiglia, 768)
+    scheda = "" if checkpoint else _libera_scheda_per_immagine()
     try:
         job = nuovo_job(dati.get("prompt", ""),
-                        negativo=dati.get("negativo", negativo_sketch() if sdxl else ""),
-                        larghezza=dati.get("larghezza", SKETCH_LATO if sdxl else 768),
-                        altezza=dati.get("altezza", SKETCH_LATO if sdxl else 768),
-                        passi=dati.get("passi", SKETCH_PASSI if sdxl else 25),
+                        negativo=dati.get("negativo", negativo_sketch() if checkpoint else ""),
+                        larghezza=dati.get("larghezza", lato),
+                        altezza=dati.get("altezza", lato),
+                        passi=dati.get("passi", SKETCH_PASSI if checkpoint else 25),
+                        fix=dati.get("fix", 0),
                         seed=dati.get("seed", 0),
                         richiedente=dati.get("richiedente", ""),
                         canale=_channel_name(),
@@ -3407,7 +3413,7 @@ def image_jobs():
     job = image_queue.prossimo(capace_di=famiglia or None)
     if job is None:
         return ('', 204)
-    if job.get("famiglia") == FAMIGLIA_SDXL:
+    if usa_checkpoint(job.get("famiglia")):
         if not image_memory_gate.reserve_image(job["id"]):
             image_queue.rinvia(job["id"])
             return jsonify({"ok": False, "error": "memoria occupata: job rinviato"}), 503
@@ -3531,14 +3537,23 @@ def image_result():
     if errore:
         return errore
     dati = request.get_json(silent=True) or {}
-    image_memory_gate.release_image(str(dati.get("id", "")))
-    chiuso = image_queue.concludi(str(dati.get("id", "")), bool(dati.get("ok")),
+    job_id = str(dati.get("id", ""))
+    chiuso = image_queue.concludi(job_id, bool(dati.get("ok")),
                                   file=dati.get("file", ""), errore=dati.get("errore", ""),
                                   durata_ms=dati.get("durata_ms", 0))
     if chiuso is None:
+        image_memory_gate.release_image(job_id)
         return jsonify({"ok": False, "error": "job sconosciuto"}), 404
     if chiuso.pop("_already_concluded", False):
+        image_memory_gate.release_image(job_id)
         return jsonify({"ok": True, "job": chiuso})
+    # Non liberare la memoria unificata fra immagini consecutive del Mac:
+    # altrimenti Ollama puo' ricaricarsi nel breve intervallo result -> jobs.
+    if (usa_checkpoint(chiuso.get("famiglia"))
+            and image_queue.ha_in_coda(FAMIGLIE_CHECKPOINT)):
+        image_memory_gate.continue_image_queue(job_id)
+    else:
+        image_memory_gate.release_image(job_id)
     esito = chiuso["esito"]
     fatto = file_da_job(chiuso)
     if fatto:
