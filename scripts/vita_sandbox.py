@@ -45,8 +45,8 @@ from shared.diario import Diario, voce  # noqa: E402
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream  # noqa: E402
 from shared.feed import Feed, nuovo_post  # noqa: E402
 from shared.persona import PersonaStore  # noqa: E402
-from shared.post_gen import (build_poem_prompt, build_post_prompt, filtra_post,  # noqa: E402
-                             parse_post, prossima_mossa)
+from shared.post_gen import (MOTIVO_ECO, build_poem_prompt, build_post_prompt,  # noqa: E402
+                             filtra_post, parse_post, prossima_mossa)
 from shared.social_dreams import social_dream_inspirations  # noqa: E402
 from shared.vita_sandbox import ingaggio, kpi, materiale_da_sognare, pubblico  # noqa: E402
 
@@ -158,21 +158,47 @@ class Regista:
         return scritti
 
     # ── i contenuti ──────────────────────────────────────────────────────────
+    def _proposta(self, sistema: str, mossa: dict) -> tuple[dict | None, str]:
+        """Il post proposto dalla persona: una volta, e una seconda se è stata un'eco.
+
+        Ritorna `(candidato, motivo)`: il motivo è vuoto quando il post va bene,
+        altrimenti è lo scarto da scrivere nel giornale (le stesse parole della
+        produzione, perché è lo stesso filtro).
+
+        Il secondo tentativo esiste **solo** per l'eco. Un meta-rumore, un
+        doppione o una didascalia vuota si riproporrebbero identici — è il modello
+        che non ha niente da dire, e insistere è solo rumore. La reazione che
+        ricopia il post della sorella invece non è una mancanza di materiale: è
+        il modello che non sa di aver ricopiato. Glielo si dice, una volta.
+        """
+        autore, reazione = mossa["autore"], mossa["replica_a"]
+
+        def chiedi(insisti: bool) -> tuple[dict | None, str]:
+            candidato = parse_post(self._genera(build_post_prompt(
+                sistema, memorie=self.memorie(), feed_recente=self.feed.list(5),
+                replica_a=reazione, insisti=insisti), tetto=200))
+            if candidato is None:
+                return None, ""
+            ok, motivo = filtra_post(candidato, autore=autore,
+                                     feed=self.feed.list(20), replica_a=reazione)
+            return (candidato, "") if ok else (None, motivo)
+
+        candidato, motivo = chiedi(insisti=False)
+        if candidato is not None or motivo != MOTIVO_ECO:
+            return candidato, motivo
+        self.journal(f"  {autore}: la reazione ricopiava il post, chiedo di nuovo")
+        return chiedi(insisti=True)
+
     def posta(self, giorno: int, turno: int) -> dict | None:
         mossa = prossima_mossa(self.feed.list(10), turno=turno)
         autore = mossa["autore"]
         sistema = self.identita.get(autore, "")
         if not sistema:
             return None
-        candidato = parse_post(self._genera(build_post_prompt(
-            sistema, memorie=self.memorie(), feed_recente=self.feed.list(5),
-            replica_a=mossa["replica_a"]), tetto=200))
+        candidato, motivo = self._proposta(sistema, mossa)
         if candidato is None:
-            self.journal(f"  {autore}: nessun post")
-            return None
-        ok, motivo = filtra_post(candidato, autore=autore, feed=self.feed.list(20))
-        if not ok:
-            self.journal(f"  {autore}: post scartato ({motivo})")
+            self.journal(f"  {autore}: post scartato ({motivo})" if motivo
+                         else f"  {autore}: nessun post")
             return None
         reazione = mossa["replica_a"]
         post = nuovo_post(autore, candidato["caption"],

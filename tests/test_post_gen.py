@@ -7,10 +7,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.post_gen import (build_poem_prompt, build_post_prompt,  # noqa: E402
-                             filtra_post, parse_post, prossima_mossa)
+from shared.post_gen import (MOTIVO_ECO, build_poem_prompt, build_post_prompt,  # noqa: E402
+                             filtra_post, parse_post, prossima_mossa, ripete_il_post)
 
 SISTEMA = "Ti chiami Anna. Tono: giocosa. Non dire di essere umana."
+
+# Il post vero del sandbox (2026-10-01): Aurora ha risposto ricopiandolo parola
+# per parola. È il materiale delle prove sull'eco.
+POST_LUNGO = ("La notte, le poesie si fanno più leggere, quasi sussurrate. "
+              "E io le ascolto, anche se non so se sono davvero mie.")
 
 
 class BuildPromptTests(unittest.TestCase):
@@ -26,6 +31,25 @@ class BuildPromptTests(unittest.TestCase):
         self.assertIn("aurora", p)
         self.assertIn("ciao", p)
         self.assertIn("REAZIONE", p)
+
+    def test_il_prompt_della_reazione_chiede_parole_proprie(self):
+        p = build_post_prompt(SISTEMA, replica_a={"author": "aurora", "caption": "ciao"})
+        self.assertIn("non ripetere le sue parole", p)
+
+    def test_il_secondo_tentativo_dice_cosa_e_andato_storto(self):
+        """`insisti` non è la stessa richiesta ripetuta: nomina l'errore, e basta."""
+        reazione = {"author": "aurora", "caption": "ciao"}
+        primo = build_post_prompt(SISTEMA, replica_a=reazione)
+        secondo = build_post_prompt(SISTEMA, replica_a=reazione, insisti=True)
+        self.assertNotIn("La volta precedente", primo)
+        nuove = [r for r in secondo.splitlines() if r.startswith("La volta precedente")]
+        self.assertEqual(len(nuove), 1)
+        # Togliendo quella riga, il secondo tentativo è il primo: cambia solo il vincolo.
+        self.assertEqual(secondo.replace(nuove[0] + "\n", ""), primo)
+
+    def test_il_vincolo_dell_insistenza_non_esiste_senza_reazione(self):
+        """Il post nuovo non ha un testo da ricopiare: nessuna insistenza."""
+        self.assertNotIn("La volta precedente", build_post_prompt(SISTEMA, insisti=True))
 
     def test_memorie_e_feed_entrano_nel_materiale(self):
         p = build_post_prompt(SISTEMA, memorie=["un tip"], feed_recente=[{"author": "anna", "caption": "x"}])
@@ -117,6 +141,63 @@ class FiltraPostTests(unittest.TestCase):
         feed = [{"author": "aurora", "caption": "stesso testo"}]
         ok, _ = filtra_post({"caption": "stesso testo"}, autore="anna", feed=feed)
         self.assertTrue(ok)
+
+    def test_la_reazione_che_ricopia_il_post_si_scarta(self):
+        """Il caso vero (2026-10-01): Aurora replica ad Anna con le sue stesse parole."""
+        genitore = {"author": "anna", "caption": POST_LUNGO}
+        ok, motivo = filtra_post({"caption": POST_LUNGO}, autore="aurora",
+                                 feed=[genitore], replica_a=genitore)
+        self.assertFalse(ok)
+        self.assertEqual(motivo, MOTIVO_ECO)
+
+    def test_senza_replica_a_non_si_parla_di_eco(self):
+        """L'eco è una regola sulle REAZIONI: senza il post citato non si applica."""
+        ok, _ = filtra_post({"caption": POST_LUNGO}, autore="aurora",
+                            feed=[{"author": "anna", "caption": POST_LUNGO}])
+        self.assertTrue(ok)
+
+    def test_una_reazione_con_parole_proprie_passa(self):
+        genitore = {"author": "anna", "caption": POST_LUNGO}
+        ok, _ = filtra_post({"caption": "Le tue sono le mie, sorella: rispondo piano."},
+                            autore="aurora", feed=[genitore], replica_a=genitore)
+        self.assertTrue(ok)
+
+
+class EcoTests(unittest.TestCase):
+    """`ripete_il_post`: contare le parole, non giudicare lo stile."""
+
+    def test_lo_stesso_testo_e_un_eco(self):
+        self.assertTrue(ripete_il_post(POST_LUNGO, POST_LUNGO))
+
+    def test_punteggiatura_e_maiuscole_non_salvano_la_copia(self):
+        ricopiato = ("LA NOTTE LE POESIE SI FANNO PIÙ LEGGERE QUASI SUSSURRATE "
+                     "E IO LE ASCOLTO ANCHE SE NON SO SE SONO DAVVERO MIE")
+        self.assertTrue(ripete_il_post(ricopiato, POST_LUNGO))
+
+    def test_una_coda_di_cortesia_non_salva_la_copia(self):
+        """Aggiungere «Anche io lo penso» a un post intero è ancora una copia."""
+        self.assertTrue(ripete_il_post(POST_LUNGO + " Anche io lo penso.", POST_LUNGO))
+
+    def test_una_parte_del_post_senza_parole_nuove_e_un_eco(self):
+        self.assertTrue(ripete_il_post("La notte, le poesie si fanno più leggere.",
+                                       POST_LUNGO))
+
+    def test_una_reazione_con_parole_proprie_non_e_un_eco(self):
+        self.assertFalse(ripete_il_post(
+            "Le tue parole sono un posto dove respirare: ci entro piano.", POST_LUNGO))
+
+    def test_una_citazione_breve_non_e_un_eco(self):
+        """Rispondere citando due parole del post è rispondere, non copiare."""
+        self.assertFalse(ripete_il_post("La notte. Sì.", POST_LUNGO))
+
+    def test_un_post_corto_ripreso_tutto_non_e_un_eco(self):
+        """Su un post di tre parole non c'è spazio per parole proprie."""
+        self.assertFalse(ripete_il_post("Buonanotte mondo, anche a te.",
+                                        "Buonanotte mondo"))
+
+    def test_testi_vuoti_non_sono_eco(self):
+        self.assertFalse(ripete_il_post("", POST_LUNGO))
+        self.assertFalse(ripete_il_post(POST_LUNGO, ""))
 
 
 class ProssimaMossaTests(unittest.TestCase):

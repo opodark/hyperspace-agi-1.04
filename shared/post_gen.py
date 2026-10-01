@@ -33,13 +33,19 @@ _META = re.compile(
 
 
 def build_post_prompt(sistema: str, *, memorie=(), feed_recente=(),
-                      replica_a: dict | None = None) -> str:
+                      replica_a: dict | None = None, insisti: bool = False) -> str:
     """Il prompt che chiede alla persona di produrre UN post.
 
     `sistema` è il blocco di identità già pronto (chi è, tono, confini): il
     chiamante lo passa, qui non si tocca. `memorie` e `feed_recente` sono il
     materiale (recente, in ordine); `replica_a` trasforma il post in una
     REAZIONE al post di qualcun altro.
+
+    `insisti` è la seconda richiesta, dopo che la prima è stata scartata come
+    eco (`filtra_post` con `replica_a`): chiedere *di nuovo la stessa cosa* allo
+    stesso modello è una giocata di dadi, chiederglielo dicendo cos'è andato
+    storto è una riparazione. Il vincolo resta relativo al post citato, perché è
+    l'unico punto in cui la ripetizione è un difetto e non uno stile.
     """
     righe = [str(sistema or "").strip(),
              "",
@@ -53,7 +59,11 @@ def build_post_prompt(sistema: str, *, memorie=(), feed_recente=(),
         righe += ["",
                   f"Stai rispondendo al post di {replica_a.get('author', 'qualcuno')}:",
                   f"«{replica_a.get('caption', '')}»",
-                  "È una REAZIONE: breve, rivolta a chi ha scritto, sempre nel tuo tono."]
+                  "È una REAZIONE: breve, rivolta a chi ha scritto, sempre nel tuo tono.",
+                  "Rispondi al pensiero con parole tue: non ripetere le sue parole."]
+        if insisti:
+            righe += ["La volta precedente hai ricopiato quelle parole: stavolta "
+                      "devono essere frasi tue, nuove."]
     if memorie:
         righe += ["", "Ricordi recenti della stanza:",
                   *[f"- {m}" for m in memorie[:5]]]
@@ -139,11 +149,70 @@ def parse_post(testo: str) -> dict | None:
             "image_prompt": " ".join(" ".join(immagine).split())}
 
 
-def filtra_post(candidato: dict, *, autore: str, feed=()) -> tuple[bool, str]:
+# ── Eco: la reazione che ricopia il post a cui risponde ──────────────────────
+# Misurato (2026-10-01, sandbox della vita): chiesta una REAZIONE, il modello
+# restituisce il post di partenza **parola per parola**. Fra due voci diverse
+# quel doppione non è un post, è un balbettio — e il filtro dei doppioni non lo
+# vede, perché l'autore è l'altro. Non è stilometria: è contare quante parole la
+# reazione aggiunge al post. Zero parole nuove su un testo lungo → è una copia;
+# pochissime (una coda di cortesia) → è la stessa copia col cappello. Una
+# citazione breve, invece, è legittima: si risponde citando.
+MOTIVO_ECO = "ripete il post a cui risponde"
+_ECO_PAROLE_MINIME = 6      # sotto sei parole il post è una battuta: non si copia
+_ECO_PAROLE_NUOVE = 4       # quante parole nuove può portare una copia
+_ECO_COPERTURA = 0.9        # quanta parte del post deve tornare perché sia una copia
+_PAROLA = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _parole(testo: str) -> list[str]:
+    """Le parole del testo in minuscolo: niente punteggiatura, niente numeri.
+
+    È privata perché è l'unico punto che deve contare le parole con lo stesso
+    metro — grassetti, virgolette e accenti diversi fra due risposte dello stesso
+    modello; fuori di qui non serve a nessuno.
+    """
+    return _PAROLA.findall(str(testo or "").lower())
+
+
+def ripete_il_post(testo: str, originale: str) -> bool:
+    """True se `testo` è il post `originale` ricopiato, anche con qualche parola in più.
+
+    Tre verdetti, tutti e tre su due numeri soli — quanta parte del post torna
+    (`copertura`) e quante parole proprie porta la reazione:
+
+    1. le stesse parole, in qualunque ordine e con qualunque punteggiatura;
+    2. nessuna parola propria, su una reazione lunga: è il post spezzato in due,
+       non una risposta;
+    3. il post intero con una coda di cortesia («Anche io lo penso»).
+
+    Restano fuori due cose, ed è la ragione per cui il metro è la copertura e non
+    la somiglianza: la **citazione breve** (rispondere citando è legittimo) e il
+    **post corto**, dove le parole sono talmente poche che riprenderle tutte è
+    fisiologico — su «Buonanotte mondo» una risposta non ha parole sue.
+    """
+    nuove, copiate = set(_parole(testo)), set(_parole(originale))
+    if not nuove or not copiate:
+        return False
+    if nuove == copiate:
+        return True
+    if len(copiate) < _ECO_PAROLE_MINIME:
+        return False                       # post corto: riprenderne le parole è normale
+    if len(nuove) >= _ECO_PAROLE_MINIME and not (nuove - copiate):
+        return True                        # nessuna parola propria: è il post, non una risposta
+    copertura = len(nuove & copiate) / len(copiate)
+    return copertura >= _ECO_COPERTURA and len(nuove - copiate) <= _ECO_PAROLE_NUOVE
+
+
+def filtra_post(candidato: dict, *, autore: str, feed=(),
+                replica_a: dict | None = None) -> tuple[bool, str]:
     """(accettato, motivo) — il filtro puro, prima di scrivere nel feed.
 
-    Scarta il meta-rumore (il verbale del modello, non un contenuto) e i doppioni
-    della stessa persona. `nuovo_post` (shared/feed.py) fa poi la validazione
+    Tre scarti, tre regole diverse: il meta-rumore (il verbale del modello, non
+    un contenuto), i doppioni **della stessa persona** e — quando `replica_a`
+    indica il post a cui si sta rispondendo — l'eco, cioè quella reazione che
+    all'altra voce non aggiunge niente (`ripete_il_post`). Il motivo dice quale
+    delle tre: chi chiama decide se ritentare, e solo l'eco si rimedia
+    chiedendo di nuovo. `nuovo_post` (shared/feed.py) fa poi la validazione
     finale di autore e didascalia.
     """
     testo = " ".join(str((candidato or {}).get("caption", "")).split())
@@ -151,6 +220,8 @@ def filtra_post(candidato: dict, *, autore: str, feed=()) -> tuple[bool, str]:
         return False, "niente da dire"
     if _META.search(testo):
         return False, "meta-rumore, non un contenuto"
+    if replica_a and ripete_il_post(testo, str(replica_a.get("caption", ""))):
+        return False, MOTIVO_ECO
     if any(str(p.get("author", "")) == autore and str(p.get("caption", "")) == testo
            for p in (feed or ())):
         return False, "già pubblicato"

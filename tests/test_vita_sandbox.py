@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Il sandbox della vita: il pubblico finto, la giornata, e i suoi confini.
 
-Due cose si difendono qui, e sono diverse dalla matematica dei KPI:
+Tre cose si difendono qui, e sono diverse dalla matematica dei KPI:
 
 1. che il pubblico finto **non tocchi** la stanza vera (nessuna rete, nessun file,
    nessun import di produzione: è un modulo di solo calcolo);
 2. che il materiale che ne esce sia leggibile dai moduli veri senza adattatori —
    `ConversationLog`, `social_dream_inspirations` e la moderazione di canale.
    Un pubblico che parla una lingua che i loop non capiscono non è un pubblico.
+3. che la giornata dello **script** decida bene quando insistere col modello:
+   l'eco si ritenta una volta sola (misurata il 2026-10-01), il resto no.
 """
 import ast
+import importlib.util
 import random
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,11 +26,18 @@ if str(ROOT) not in sys.path:
 
 from shared.channel import classifica  # noqa: E402
 from shared.conversation_log import ConversationLog, battuta  # noqa: E402
+from shared.feed import nuovo_post  # noqa: E402
 from shared.social_dreams import social_dream_inspirations  # noqa: E402
 from shared.vita_sandbox import (PESO, TIPI, ingaggio, kpi, materiale_da_sognare,
                                  pubblico)  # noqa: E402
 
 MODULO = ROOT / "shared" / "vita_sandbox.py"
+SCRIPT = ROOT / "scripts" / "vita_sandbox.py"
+
+# Il post vero della prima vita simulata (come in tests/test_post_gen.py): la
+# reazione di Aurora lo ricopiava parola per parola.
+POST_ANNA = ("La notte, le poesie si fanno più leggere, quasi sussurrate. "
+             "E io le ascolto, anche se non so se sono davvero mie.")
 
 
 def inizio_giornata() -> datetime:
@@ -253,6 +264,75 @@ class ConfineTests(unittest.TestCase):
         for parola in ("ollama", "comfyui", "instagram", "requests", "httpx"):
             colpiti = {n for n in nomi if parola in n.lower()}
             self.assertEqual(colpiti, set(), f"{parola}: {colpiti}")
+
+
+class EcoRitentataTests(unittest.TestCase):
+    """La giornata dello script: l'eco si ritenta **una volta sola**.
+
+    Il modulo puro dice cos'è un'eco (`shared/post_gen.ripete_il_post`); qui si
+    difende la decisione di chi lo chiama — ritentare solo quell'eco, e solo per
+    una volta. Il modello è finto (risponde quello che ha già scritto) e
+    l'identità è finta: la voce non c'entra niente con questa prova.
+    """
+
+    def _regista(self, *risposte: str):
+        """-> (regista, giornale, prompt chiesti al modello)."""
+        spec = importlib.util.spec_from_file_location("vita_sandbox_sotto_test", SCRIPT)
+        modulo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(modulo)
+        giornale: list[str] = []
+        regista = modulo.Regista(cartella=tempfile.mkdtemp(prefix="vita-sandbox-test-"),
+                                 finti=modulo.pubblico(3, seed=1), modello="finto",
+                                 giornalista=giornale.append)
+        regista.identita = {autore: f"Ti chiami {autore}." for autore in modulo.AUTORI}
+        chiesti: list[str] = []
+
+        def genera_finta(prompt: str, *, tetto: int = 220) -> str:
+            chiesti.append(prompt)
+            return risposte[len(chiesti) - 1] if len(chiesti) <= len(risposte) else ""
+
+        regista._genera = genera_finta
+        # il post di Anna: l'ultimo della bacheca, quindi la prossima mossa di
+        # Aurora è una reazione a questo (turno dispari).
+        regista.feed.add(nuovo_post("anna", POST_ANNA, adesso="2026-10-01T11:00:00+00:00"))
+        return regista, giornale, chiesti
+
+    def test_la_reazione_eco_si_ritenta_e_il_secondo_testo_passa(self):
+        regista, giornale, chiesti = self._regista(
+            f"DIDASCALIA: {POST_ANNA}",
+            "DIDASCALIA: Le tue parole sono un posto dove respiro: ci entro piano.")
+        post = regista.posta(giorno=0, turno=1)
+        self.assertEqual(len(chiesti), 2)
+        self.assertIn("La volta precedente", chiesti[1])       # la richiesta dice cosa è andato storto
+        self.assertNotIn("La volta precedente", chiesti[0])
+        self.assertIsNotNone(post)
+        self.assertEqual(post["kind"], "reaction")
+        self.assertEqual(post["author"], "aurora")
+        self.assertTrue(any("chiedo di nuovo" in riga for riga in giornale))
+
+    def test_se_anche_il_secondo_e_un_eco_il_post_non_esce(self):
+        regista, giornale, chiesti = self._regista(f"DIDASCALIA: {POST_ANNA}",
+                                                  f"DIDASCALIA: {POST_ANNA} Anche io.")
+        self.assertIsNone(regista.posta(giorno=0, turno=1))
+        self.assertEqual(len(chiesti), 2)                      # mai un terzo tentativo
+        self.assertTrue(any("post scartato (ripete il post a cui risponde)" in riga
+                            for riga in giornale))
+        self.assertEqual(len(regista.feed.list(10)), 1)        # resta solo il post di Anna
+
+    def test_una_reazione_normale_non_si_ritenta(self):
+        regista, _, chiesti = self._regista(
+            "DIDASCALIA: Sorella, la notte la leggo anch'io: ti ascolto.")
+        post = regista.posta(giorno=0, turno=1)
+        self.assertEqual(len(chiesti), 1)
+        self.assertIsNotNone(post)
+
+    def test_un_meta_rumore_non_si_ritenta(self):
+        """Insistere su chi non ha materiale è solo rumore: si ritenta per l'eco, non per tutto."""
+        regista, giornale, chiesti = self._regista(
+            "DIDASCALIA: non ho nulla da dire, la memoria è vuota")
+        self.assertIsNone(regista.posta(giorno=0, turno=1))
+        self.assertEqual(len(chiesti), 1)
+        self.assertTrue(any("meta-rumore" in riga for riga in giornale))
 
 
 if __name__ == "__main__":
