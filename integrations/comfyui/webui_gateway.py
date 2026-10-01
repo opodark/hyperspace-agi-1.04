@@ -68,7 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 import websockets  # noqa: E402
-from comfy_bridge import _verifiche  # noqa: E402
+from comfy_bridge import _verifiche, comfy_url_utilizzabile, PORTA_GATEWAY_WEBUI  # noqa: E402
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect  # noqa: E402
 from fastapi.responses import JSONResponse, Response  # noqa: E402
 
@@ -78,7 +78,9 @@ from shared.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
 
 COMFY_DEFAULT = "http://127.0.0.1:8188"
 OLLAMA_DEFAULT = "http://127.0.0.1:11434"
-PORT_DEFAULT = 8189
+# La porta del gateway: lo stesso numero che `COMFY_URL` non deve nominare, e per
+# questo vive in un posto solo (`comfy_bridge`), condiviso col ponte.
+PORT_DEFAULT = PORTA_GATEWAY_WEBUI
 # Il lucchetto dell'istanza singola: due gateway sono due punti che credono di avere
 # la scheda sotto controllo. Si sposta con WEBUI_GATEWAY_LOCK_FILE (serve ai test, e
 # a chi tiene il repo su un altro disco).
@@ -331,6 +333,11 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int,
                         default=int(os.getenv("WEBUI_GATEWAY_PORT", str(PORT_DEFAULT))))
     args = parser.parse_args(argv)
+    # Stessa guardia del ponte: un COMFY_URL ereditato che nomina questa porta
+    # farebbe puntare il gateway a sé stesso.
+    args.comfy, motivo_url = comfy_url_utilizzabile(args.comfy)
+    if motivo_url:
+        log(motivo_url)
 
     # Le stesse verifiche del ponte: i file del grafo devono essere nella lista che
     # ComfyUI dichiara, o il job fallisce dopo minuti di sampling (2026-09-22).

@@ -33,10 +33,21 @@ if [[ -z "$CHANNEL_TOKEN" ]]; then
 fi
 
 export CHANNEL_URL="${CHANNEL_URL:-http://127.0.0.1:8085}"
-# Comfy Desktop espone il server nativo su 8188. La 8189 era il vecchio gateway
-# WebUI, che puo' non essere avviato dopo un riavvio Docker; il bridge parla
-# direttamente a ComfyUI e non dipende dal gateway.
+# Comfy Desktop espone il server nativo su 8188. La 8189 e' la porta del gateway
+# WebUI (`webui_gateway.py`), che puo' non essere avviato dopo un riavvio Docker;
+# il ponte parla direttamente a ComfyUI e non dipende dal gateway.
 export COMFY_URL="${COMFY_URL:-http://127.0.0.1:8188}"
+# Lo stesso raddrizzamento che fa `comfy_url_utilizzabile` dentro il ponte, ma qui
+# serve al ramo «doppio clic dal Desktop», dove l'ambiente e' quello della shell e
+# non quello di launchd. Il 2026-10-01 un COMFY_URL rimasto a ...:8189 ha tenuto il
+# ponte a rinviare ogni job per una notte: «ComfyUI non raggiungibile (HTTP 0)» in
+# ciclo, e in coda non si distingue da «non c'e' lavoro».
+case "$COMFY_URL" in
+  *:8189)
+    echo "[comfy] COMFY_URL=$COMFY_URL e' la porta del gateway WebUI, non di ComfyUI: uso http://127.0.0.1:8188" >&2
+    export COMFY_URL="http://127.0.0.1:8188"
+    ;;
+esac
 # COMFY_OUTPUT_DIR NON si imposta qui: senza, il ponte riferisce il file con il
 # suo percorso RELATIVO (es. HyperSpace/bridge_00001_.jpg). Il diario lo serve
 # da /app/comfy-output (volume montato dal docker-compose): un percorso assoluto

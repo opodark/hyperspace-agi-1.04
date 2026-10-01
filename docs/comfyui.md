@@ -980,6 +980,36 @@ chiamante gli altri (`docs/connectors.md`, `tests/test_tool_passthrough.py`). Fi
 al 2026-09-23 non succedeva: il CP rispondeva «non gestito», la chiamata moriva lì e
 il modello raccontava di aver mandato un file che non esisteva.
 
+### La 8189 è del gateway, non di ComfyUI (2026-10-01)
+
+Il ponte e il gateway hanno due porte e due mestieri, e per una notte si sono
+scambiate. `launchctl getenv COMFY_URL` rispondeva `http://127.0.0.1:8189` — la
+porta *del gateway* — da un'epoca in cui `webui_gateway.py` era acceso; il gateway
+è rimasto spento dopo un riavvio, e il ponte ha passato la notte a rinviare ogni
+job: `[comfy] job …: 512x768 passi=48 seed=20260930 da=ritratto`, poi
+`[comfy] job … rinviato: ComfyUI non raggiungibile (HTTP 0)`, in ciclo. La coda non
+mostrava niente di storto (`in_coda 1, in_esecuzione 0`) e `serie.py` chiudeva con
+`non concluso: stato=pending`: il sintomo è **identico** a «non c'è lavoro», ed è
+per questo che è costato una notte. ComfyUI, intanto, rispondeva `200` su 8188 — la
+prova stava fuori dal repo, in una variabile d'ambiente.
+
+Le tre cose che lo impediscono adesso:
+
+1. il plist dell'agente (`integrations/comfyui/com.hyperspace.comfy-bridge.plist`)
+   dichiara `COMFY_URL` in `EnvironmentVariables`: l'ambiente DEL JOB vince su
+   quello del dominio, quindi un `launchctl setenv` dimenticato non è più la
+   configurazione del ponte;
+2. `comfy_bridge.comfy_url_utilizzabile()` riconosce la porta del gateway e torna a
+   `COMFY_DEFAULT`, **dicendolo nel log**; vale anche per `--check` e
+   `--stage-riferimento`, e `webui_gateway.py` usa la stessa funzione e lo stesso
+   `PORTA_GATEWAY_WEBUI` — così i due numeri non possono divergere
+   (`tests/test_comfyui_bridge_url.py`);
+3. `start-bridge.sh` raddrizza lo stesso caso per il ramo «doppio clic dal
+   Desktop», dove l'ambiente è quello della shell e non quello di `launchd`.
+
+Qualunque **altra** porta o host resta com'è: un ComfyUI altrove è una scelta di chi
+l'ha scritta, e non si corregge in silenzio.
+
 ## Cosa filtra, e cosa no
 
 Una riga detta male qui diventa un'aspettativa sbagliata, quindi va detta bene:

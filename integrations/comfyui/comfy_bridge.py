@@ -62,6 +62,10 @@ LOCK_FILE = Path(os.environ.get("COMFY_BRIDGE_LOCK_FILE")
 
 CONTROL_PLANE_DEFAULT = "http://127.0.0.1:8085"
 COMFY_DEFAULT = "http://127.0.0.1:8188"
+# La porta su cui ascolta `webui_gateway.py` (il proxy che libera la scheda prima
+# del diffusion per Open WebUI). Nominarla in COMFY_URL vuol dire parlare al
+# gateway, non a ComfyUI: vedi `comfy_url_utilizzabile`.
+PORTA_GATEWAY_WEBUI = 8189
 # La cartella dell'app desktop: si usa solo per dare un percorso leggibile al
 # file prodotto, non serve a generare.
 OUTPUT_DESKTOP = (Path(os.environ.get("LOCALAPPDATA", "")) / "Comfy-Desktop" /
@@ -86,6 +90,33 @@ PREFISSO = "HyperSpace/bridge"
 
 def log(messaggio: str) -> None:
     print(f"[comfy] {messaggio}", flush=True)
+
+
+def comfy_url_utilizzabile(url: str) -> tuple[str, str]:
+    """L'URL di ComfyUI, con la porta del gateway WebUI raddrizzata.
+
+    Il 2026-10-01 il ponte ha passato la notte a rinviare ogni job — «ComfyUI non
+    raggiungibile (HTTP 0)» in ciclo — con ComfyUI acceso e vivo su 8188: nel
+    dominio `launchd` era rimasto `COMFY_URL=http://127.0.0.1:8189`, la porta di
+    `webui_gateway.py`, da un'epoca in cui quel proxy era in ascolto. Un residuo
+    d'ambiente non si vede da nessuna parte: in coda non si distingue da «non c'è
+    lavoro», e il file non esce mai. E la 8189 non è «un'altra porta di ComfyUI»:
+    è un ALTRO processo, quindi un URL che la nomina è un errore certo, non una
+    preferenza. Si torna alla 8188 e si dice perché.
+
+    Ritorna `(url, motivo)`: motivo vuoto vuol dire che l'URL era già quello
+    giusto. Qualunque altra porta resta com'è — un ComfyUI su un'altra macchina o
+    su un'altra porta è una scelta di chi l'ha scritta, e non si corregge in
+    silenzio (né qui né in `webui_gateway.py`, che usa questa stessa funzione).
+    """
+    try:
+        porta = urllib.parse.urlparse(url).port
+    except ValueError:  # URL malformato: non è compito di questa funzione
+        return url, ""
+    if porta == PORTA_GATEWAY_WEBUI:
+        return COMFY_DEFAULT, (f"COMFY_URL={url} è la porta del gateway WebUI "
+                               f"(webui_gateway.py), non di ComfyUI: uso {COMFY_DEFAULT}")
+    return url, ""
 
 
 def _richiesta(url: str, *, payload=None, timeout: float = 30.0,
@@ -527,6 +558,12 @@ def main(argv=None) -> int:
                         default=float(os.getenv("BRIDGE_TIMEOUT_S", "1800")))
     parser.add_argument("--ollama", default=os.getenv("BRIDGE_OLLAMA_URL", "http://127.0.0.1:11434"))
     args = parser.parse_args(argv)
+    # Un COMFY_URL ereditato che nomina il gateway manderebbe il ponte a bussare a
+    # una porta che non è di ComfyUI. Si raddrizza subito, così vale anche per
+    # `--check` e `--stage-riferimento`, che passano di qui.
+    args.comfy, motivo_url = comfy_url_utilizzabile(args.comfy)
+    if motivo_url:
+        log(motivo_url)
     base = args.url.rstrip("/")
     intestazioni = {"X-Hyperspace-Channel-Token": args.token} if args.token else {}
 

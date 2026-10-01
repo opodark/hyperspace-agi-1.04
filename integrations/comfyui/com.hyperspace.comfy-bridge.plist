@@ -9,6 +9,16 @@
         <string>/Users/opo/hyperspace-agi-1.04/integrations/comfyui/start-bridge.sh</string>
     </array>
     <key>WorkingDirectory</key><string>/Users/opo/hyperspace-agi-1.04</string>
+    <!-- L'ambiente DEL JOB vince su quello del dominio launchd: senza questo, un
+         `launchctl setenv COMFY_URL` dimenticato in giro diventa la configurazione
+         del ponte. Il 2026-10-01 e' successo davvero: puntava a 8189 (il gateway
+         WebUI, spento) e il ponte ha rinviato ogni job per una notte con «ComfyUI
+         non raggiungibile (HTTP 0)», senza che in coda si vedesse nulla. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>COMFY_URL</key><string>http://127.0.0.1:8188</string>
+        <key>BRIDGE_MODEL</key><string>sdxl-turbo,sd15</string>
+    </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>ThrottleInterval</key><integer>15</integer>
