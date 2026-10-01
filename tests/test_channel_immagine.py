@@ -507,6 +507,14 @@ class LivelloCreatoreTests(unittest.TestCase):
         job = scope["image_queue"].job[0]
         self.assertEqual(job["famiglia"], "sd15")
         self.assertEqual(job["reference_image"], "anna-volto-canonico.jpg")
+        self.assertTrue(job["prompt"].lower().startswith(
+            "(solo:1.3), single woman, one person, (adult virtual nude:1.4)"))
+        self.assertEqual(job["pose_preset"], "")
+        self.assertEqual(job["reference_strength"], 0.45)
+        self.assertTrue(job["negativo"].startswith("multiple people, two women"))
+        self.assertIn("split screen", job["negativo"])
+        self.assertIn("censor bar", job["negativo"])
+        self.assertIn("covered eyes", job["negativo"])
         self.assertNotIn("nude", job["negativo"])
         self.assertNotIn("nsfw", job["negativo"])
 

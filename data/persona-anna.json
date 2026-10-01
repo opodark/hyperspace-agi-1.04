@@ -52,7 +52,7 @@
     "famiglia": "sd15",
     "modello": "chickmixflat_v10.ckpt",
     "riferimento": "anna-volto-canonico.jpg",
-    "riferimento_forza": 1.0,
+    "riferimento_forza": 0.7,
     "consenti_nudo_artistico_virtuale": true,
     "consenti_erotismo_esplicito_creatore": true,
     "seed": 20260930,

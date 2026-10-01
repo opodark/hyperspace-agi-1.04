@@ -1362,6 +1362,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
             # il livello artistico del documento).
             variante = {**vetrina, "scena": idea} if livello else vetrina
             scena_prompt = idea
+            richiesta_nudo = False
             if livello:
                 # Il quadro lo scrive il sistema, non chi chiede: `adult` e `virtual`
                 # sono cose che il documento sa già (il livello è dichiarato, il corpo è
@@ -1371,6 +1372,26 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
                 # aggiunte tornano indietro e si dicono.
                 variante, aggiunte = vetrina_con_quadro_erotismo(variante)
                 scena_prompt = variante["scena"]
+                # SD 1.5 privilegia l'inizio della finestra CLIP. La vecchia ricetta
+                # metteva prima ~60 token di stile e lasciava "nuda figura intera"
+                # in fondo: il modello vedeva il volto/riferimento ma non la scena.
+                # Le intenzioni visive note vengono duplicate in tag inglesi brevi
+                # e portate davanti, senza affidarle a un riscrittore LLM.
+                priorita_visive = []
+                if re.search(r"\b(?:nud\w*|naked|senza vestiti)\b",
+                             testo_richiesta, re.IGNORECASE):
+                    richiesta_nudo = True
+                    priorita_visive.append(
+                        "(solo:1.3), single woman, one person, "
+                        "(adult virtual nude:1.4), (fully naked:1.35), no clothing")
+                    scena_prompt = re.sub(r"\badult\s+virtual\b\s*,?", "",
+                                          scena_prompt, flags=re.IGNORECASE).strip()
+                if re.search(r"\b(?:figura intera|full[- ]body|head to toe)\b",
+                             testo_richiesta, re.IGNORECASE):
+                    priorita_visive.append(
+                        "(full body:1.3), head to toe, entire figure visible, centered")
+                if priorita_visive:
+                    scena_prompt = ", ".join(priorita_visive) + ". " + scena_prompt
                 # La richiesta passa anche dalla verifica, come un ritratto da riga di
                 # comando: se il documento non dichiara il livello, o se resta qualcosa
                 # d'altro che non va (i minori, la figura senza marcatori), si dice —
@@ -1388,15 +1409,27 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
             # a tenere il volto. Per il pubblico resta il seed canonico della vetrina.
             seed_ritratto = ((uuid.uuid4().int & ((1 << 63) - 1))
                               if livello else vetrina["seed"])
+            negativo = negativo_ritratto(variante, creatore=livello)
+            if richiesta_nudo:
+                # Il riferimento canonico mostra una salopette: IP-Adapter può copiarla
+                # anche quando il testo chiede il contrario. Per questa sola scena
+                # abbassiamo il peso del riferimento (che deve conservare il volto, non
+                # l'abito) e rendiamo esplicito al sampler il conflitto da evitare.
+                negativo = (
+                    "multiple people, two women, twins, duplicate person, split screen, "
+                    "diptych, clothes, clothing, dress, shirt, bra, lingerie, underwear, "
+                    + negativo)
             accodato = image_queue.accoda(nuovo_job(
-                prompt_ritratto(vetrina, scena=scena_prompt),
-                negativo=negativo_ritratto(variante, creatore=livello),
+                prompt_ritratto(vetrina, scena=scena_prompt,
+                                scena_prima=livello),
+                negativo=negativo,
                 larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
                 passi=vetrina["passi"], fix=vetrina["fix"], seed=seed_ritratto,
                 richiedente=autore, canale=channel, famiglia=vetrina["famiglia"],
                 modello=vetrina["modello"], destinazione=destinazione,
                 reference_image=vetrina["riferimento"],
-                reference_strength=vetrina["riferimento_forza"]))
+                reference_strength=(min(vetrina["riferimento_forza"], 0.45)
+                                    if richiesta_nudo else vetrina["riferimento_forza"])))
         else:
             # RealVisXL sul Mac: la famiglia conserva il nome storico sdxl-turbo.
             accodato = image_queue.accoda(nuovo_job(

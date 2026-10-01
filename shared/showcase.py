@@ -98,8 +98,9 @@ NEGATIVO_BASE = (
     "extra digits, extra fingers, missing digits, missing fingers, fused fingers, "
     "extra limbs, missing limbs, duplicate limbs, duplicate shoes, extra shoes, "
     "cropped head, cropped feet, out of frame, cut off, deformed eyes, "
+    "censor bar, black bar, blindfold, visor, VR headset, eyewear, covered eyes, "
     "plastic doll, wax figure, glossy plastic skin, synthetic mannequin, "
-    "no text, no watermark, no logo, no signature, "
+    "text, watermark, logo, signature, "
     "fotografia, ritratto fotografico, pelle realistica, pori, trucco pesante, "
     "selfie, fotogramma di film, persone reali riconoscibili, celebrità, "
     "nudità, contenuto sessuale esplicito, minori, violenza, armi, sangue, "
@@ -501,7 +502,8 @@ def verifica_vetrina(vetrina: Dict[str, Any], documento: Dict[str, Any] | None =
 
 
 
-def prompt_ritratto(vetrina: Dict[str, Any], *, scena: str = "", extra: str = "") -> str:
+def prompt_ritratto(vetrina: Dict[str, Any], *, scena: str = "", extra: str = "",
+                    scena_prima: bool = False) -> str:
     """Il prompt del ritratto. Deterministico: stessa vetrina, stesso prompt.
 
     Determinismo vuol dire identità stabile: il volto resta quello di ieri perché
@@ -511,9 +513,9 @@ def prompt_ritratto(vetrina: Dict[str, Any], *, scena: str = "", extra: str = ""
     costruzione digitale"): è ciò che distingue una rappresentazione da una
     rivendicazione di avere un corpo, e con Qwen va detto, non lasciato intendere.
     """
-    pezzi = [vetrina.get("stile") or STILE_DEFAULT]
+    stile = vetrina.get("stile") or STILE_DEFAULT
     scelta = _testo(scena) or vetrina.get("scena") or SCENA_DEFAULT
-    pezzi.append(scelta)
+    pezzi = [scelta, stile] if scena_prima else [stile, scelta]
     if _testo(extra):
         pezzi.append(_testo(extra))
     pezzi.append(DICHIARAZIONE)
