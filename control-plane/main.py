@@ -8305,16 +8305,48 @@ def _memory_effective_backend() -> str:
     return "hermes"
 
 
-def _memory_search_local(data: dict, *, reason: str = ""):
-    """Ricerca testuale sul mirror: la semantica richiede Hermes, il testo no."""
+def _memory_search_local(data: dict, *, reason: str = "", entries=None,
+                         source: str = "mirror", degraded: bool = True):
+    """Browse testuale per mirror degradato e backend legacy.
+
+    Hermes offre una ricerca più ricca, ma la dashboard deve poter leggere la
+    memoria anche quando resta soltanto il file locale. I filtri comuni restano
+    disponibili; ciò che non esiste localmente non viene inventato.
+    """
     query = str(data.get("query", "")).strip().lower()
     limite = max(1, int(data.get("limit", 50)))
-    voci = memory_sync.read_local(MEMORY_MAX_ENTRIES)
-    trovate = [voce for voce in voci
-               if not query or query in str(voce.get("content", "")).lower()]
-    return jsonify({"ok": True, "degraded": True, "source": "mirror",
-                    "reason": reason, "entries": trovate[:limite],
-                    "count": len(trovate[:limite])})
+    status = str(data.get("status", "")).strip()
+    node_id = str(data.get("node_id", "")).strip()
+    model = str(data.get("model", "")).strip()
+    date_from = str(data.get("date_from", "")).strip()
+    date_to = str(data.get("date_to", "")).strip()
+    voci = list(entries if entries is not None else memory_sync.read_local(MEMORY_MAX_ENTRIES))
+
+    def matches(voce):
+        haystack = " ".join(str(voce.get(key, "")) for key in (
+            "content", "prompt", "response", "summary", "detail", "metadata"))
+        timestamp = str(voce.get("ts") or voce.get("timestamp") or "")
+        entry_node = str(voce.get("node_id") or voce.get("sourceNode") or voce.get("source") or "")
+        if query and query not in haystack.lower():
+            return False
+        if status and str(voce.get("status") or "active") != status:
+            return False
+        if node_id and node_id.lower() not in entry_node.lower():
+            return False
+        if model and model.lower() not in str(voce.get("model") or "").lower():
+            return False
+        if date_from and timestamp[:10] < date_from:
+            return False
+        if date_to and timestamp[:10] > date_to:
+            return False
+        return True
+
+    trovate = [voce for voce in voci if isinstance(voce, dict) and matches(voce)][:limite]
+    risposta = {"ok": True, "degraded": degraded, "source": source,
+                "entries": trovate, "count": len(trovate)}
+    if reason:
+        risposta["reason"] = reason
+    return jsonify(risposta)
 
 
 @app.route('/memory')
@@ -8360,6 +8392,7 @@ def memory_stats():
     entries    = _load_memory()
     size_bytes = os.path.getsize(MEMORY_FILE_GZ) if os.path.exists(MEMORY_FILE_GZ) else 0
     return jsonify({
+        "backend": "legacy", "degraded": False, "source": "legacy",
         "entries": len(entries), "max_entries": MEMORY_MAX_ENTRIES,
         "ttl_days": MEMORY_TTL_DAYS,
         "file_size_bytes": size_bytes,
@@ -8381,8 +8414,10 @@ def sync_memory():
 @app.route('/memory/search', methods=['POST'])
 def search_memory():
     data = request.get_json(force=True, silent=True) or {}
+    if MEMORY_BACKEND == "legacy":
+        return _memory_search_local(data, entries=_load_memory(), source="legacy", degraded=False)
     if MEMORY_BACKEND != "hermes":
-        return jsonify({"ok": False, "error": "ricerca avanzata disponibile con Hermes"}), 409
+        return jsonify({"ok": False, "error": f"backend memoria non supportato: {MEMORY_BACKEND}"}), 409
     if _hermes_memory.unavailable():
         # Failsafe: Hermes è giù, si serve il mirror senza pagare il timeout.
         return _memory_search_local(data, reason=_hermes_memory.last_error())
@@ -8395,7 +8430,8 @@ def search_memory():
             date_from=str(data.get("date_from", "")), date_to=str(data.get("date_to", "")),
             offset=max(0, int(data.get("offset", 0))),
         )
-        return jsonify({"ok": True, "entries": entries, "count": len(entries)})
+        return jsonify({"ok": True, "backend": "hermes", "source": "hermes",
+                        "degraded": False, "entries": entries, "count": len(entries)})
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
     except HermesMemoryError as exc:
