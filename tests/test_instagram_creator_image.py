@@ -34,7 +34,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job  # noqa: E402
+from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job, richiesta_immagine  # noqa: E402
 from shared.instagram_intimacy import split_messages  # noqa: E402
 from shared.instagram_vip import CREATOR_LEVEL, INTIMATE_LEVELS, LEVEL_NAMES  # noqa: E402
 from shared.prompt_immagine import prepara_prompt_canale, richiesta_immagine_smart  # noqa: E402
@@ -93,6 +93,7 @@ def load(queue, consenso: str = "", vetrina=None):
             sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}}),
         "image_queue": queue,
         "nuovo_job": nuovo_job,
+        "richiesta_immagine": richiesta_immagine,
         "prepara_prompt_canale": prepara_prompt_canale,
         "negativo_sketch": negativo_sketch,
         "SKETCH_LATO": SKETCH_LATO,
@@ -199,6 +200,31 @@ class RicettaTests(unittest.TestCase):
         # Il volto canonico: senza riferimento il seed tiene il disegno, non l'identità.
         self.assertEqual(job["reference_image"], "anna-volto-canonico.jpg")
         self.assertEqual(job["reference_strength"], 0.7)
+
+    def test_il_ritratto_privato_chiede_figura_intera_con_margini(self):
+        """Il 2:3 non basta: la composizione va chiesta esplicitamente al modello."""
+        queue = Queue()
+
+        load(queue)("123", "fammi un disegno di te in giardino", {"level": CREATOR_LEVEL})
+        prompt = queue.jobs[0]["prompt"].lower()
+        self.assertTrue(prompt.startswith("full body"))
+        self.assertIn("full body", prompt)
+        self.assertIn("head to toe", prompt)
+        self.assertIn("space above the head", prompt)
+        self.assertIn("below the feet", prompt)
+
+    def test_un_close_up_privato_non_viene_forzato_a_figura_intera(self):
+        queue = Queue()
+
+        load(queue)("123", "fammi un close-up di te", {"level": CREATOR_LEVEL})
+        self.assertNotIn("full body", queue.jobs[0]["prompt"].lower())
+
+    def test_il_ritratto_privato_conserva_la_scena_estratta_dalla_regola(self):
+        """Una riscrittura del modello non puo' addolcire una richiesta gia' capita."""
+        queue = Queue()
+
+        load(queue)("123", "fammi un disegno di te nuda", {"level": CREATOR_LEVEL})
+        self.assertIn("nuda", queue.jobs[0]["prompt"].lower())
 
     def test_il_nome_basta_a_riconoscere_un_ritratto_di_se(self):
         queue = Queue()
@@ -486,6 +512,4 @@ class RispostaTests(unittest.TestCase):
 
         self.assertEqual(modello.chiamate, 1)
         self.assertEqual(inviati, ["ok, arriva subito"])
-
-
 

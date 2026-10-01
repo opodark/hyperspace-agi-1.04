@@ -99,7 +99,7 @@ from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, Channe
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import (FAMIGLIA_SDXL, FAMIGLIE_CHECKPOINT, ImmagineQueue,
                                LATO_CONSIGLIATO, RIFERIMENTO_FORZA_DEFAULT,
-                               nuovo_job, usa_checkpoint)
+                               nuovo_job, richiesta_immagine, usa_checkpoint)
 from shared.image_memory_gate import ImageMemoryGate
 from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,
                             prompt_ritratto, richiesta_di_se, verifica_vetrina,
@@ -3178,7 +3178,8 @@ def _livello_immagine_intima(vip: dict, sender_id: str) -> bool:
             and instagram_vips.consent(sender_id) == "granted")
 
 
-def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str) -> dict:
+def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str,
+                             testo_richiesta: str = "") -> dict:
     """Il ritratto **di sé** chiesto in DM: vetrina del documento, livello, verifica.
 
     Stessa ricetta del canale, perché è la sola che tiene il volto: famiglia, modello,
@@ -3200,8 +3201,31 @@ def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str) -> dict
     if problemi:
         return {"job": None, "quadro": [],
                 "motivo": "Questa non te la disegno: " + "; ".join(problemi) + "."}
+    # In DM la richiesta "una foto di te" non specifica quasi mai l'inquadratura.
+    # Il solo negativo "cropped" non basta a SD 1.5: tende comunque a scegliere un
+    # mezzo busto e, quando tenta la figura, a perdere testa o piedi. La verticale
+    # 2:3 della vetrina lascia spazio per una figura intera, ma dobbiamo chiederlo
+    # positivamente. Non sovrascriviamo però un close-up/mezzo busto dichiarato dal
+    # creatore: in quel caso il taglio e' parte della richiesta, non un difetto.
+    richiesta_busto = any(parola in f"{idea} {testo_richiesta}".lower() for parola in (
+        "close-up", "close up", "primo piano", "mezzo busto", "ritratto del viso",
+        "solo viso", "viso", "face", "headshot", "upper body",
+    ))
+    inquadratura = "" if richiesta_busto else (
+        "full body, head to toe, entire figure visible, centered composition, "
+        "generous space above the head and below the feet")
+    # ChickMix (SD 1.5) legge 77 token CLIP: stile, scena e dichiarazione di Anna
+    # erano gia' quasi tutti li', quindi l'inquadratura aggiunta in coda poteva non
+    # arrivare al modello. Mettiamo prima cio' che decide l'immagine, poi lo stile.
+    # La scena resta anche nel suo posto ordinario per i generatori che non hanno
+    # quel limite, ma per SD 1.5 la prima occorrenza e' quella che conta.
+    vetrina_prompt = variante
+    if inquadratura:
+        vetrina_prompt = {**variante,
+                           "stile": f"{inquadratura}. {variante['scena']}. "
+                                    f"{variante['stile']}"}
     return {"job": image_queue.accoda(nuovo_job(
-        prompt_ritratto(variante, scena=variante["scena"]),
+        prompt_ritratto(vetrina_prompt, scena=variante["scena"]),
         negativo=negativo_ritratto(variante, creatore=True),
         larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
         passi=vetrina["passi"], fix=vetrina["fix"], seed=vetrina["seed"],
@@ -3249,7 +3273,15 @@ def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool
     richiedente = str(vip.get("username") or vip.get("level") or "instagram")
     try:
         if richiesta_di_se(idea, text, _nome_persona()):
-            esito = _job_ritratto_instagram(sender_id, idea, richiedente)
+            # La riscrittura LLM serve per capire frasi libere e tradurre uno sketch
+            # generico. Per Anna in privato sarebbe invece un secondo autore della
+            # scena: anche quando la regex l'ha gia' riconosciuta puo' attenuarne o
+            # sostituirne il contenuto. Riprendiamo quindi l'idea estratta dalla
+            # regola deterministica; se era una frase capita solo dal modello,
+            # conserviamo la sua idea, che e' l'unica disponibile.
+            originale = richiesta_immagine(text) or {}
+            scena = str(originale.get("idea") or idea)
+            esito = _job_ritratto_instagram(sender_id, scena, richiedente, text)
         else:
             esito = {"job": image_queue.accoda(nuovo_job(
                 prepara_prompt_canale(idea, text),
