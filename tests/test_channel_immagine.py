@@ -75,7 +75,7 @@ class CodaFinta:
         return job
 
 
-def _load(operator=(), cerchia=(), coda=None, vetrina=None):
+def _load(operator=(), vip=(), cerchia=(), coda=None, vetrina=None):
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     # `_nome_persona` sta con `_channel_immagine` perché è il suo unico lettore qui: la
     # rotta chiede al documento il nome con cui riconoscere un ritratto di sé.
@@ -89,6 +89,7 @@ def _load(operator=(), cerchia=(), coda=None, vetrina=None):
     registrati = []
     scope = {
         "CHANNEL_OPERATOR": set(operator),
+        "CHANNEL_VIP": set(vip),
         "CHANNEL_CERCHIA": set(cerchia),
         "image_queue": coda if coda is not None else CodaFinta(),
         "nuovo_job": nuovo_job,
@@ -99,6 +100,7 @@ def _load(operator=(), cerchia=(), coda=None, vetrina=None):
         "negativo_sketch": negativo_sketch,
         "richiesta_immagine_smart": richiesta_immagine_smart,
         "prepara_prompt_canale": prepara_prompt_canale,
+        "traduci_scena_immagine": lambda testo: testo,
         "persona_store": SimpleNamespace(
             system_block=lambda: "Sono Anna",
             persona=SimpleNamespace(name="Anna"),
@@ -510,7 +512,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         self.assertTrue(job["prompt"].lower().startswith(
             "(solo:1.3), single woman, one person, (adult virtual nude:1.4)"))
         self.assertEqual(job["pose_preset"], "")
-        self.assertEqual(job["reference_strength"], 0.45)
+        self.assertEqual(job["reference_strength"], 0.6)
         self.assertTrue(job["negativo"].startswith("multiple people, two women"))
         self.assertIn("split screen", job["negativo"])
         self.assertIn("censor bar", job["negativo"])
@@ -612,6 +614,41 @@ class CerchiaTests(unittest.TestCase):
             channel="telegram", destinazione="1")
         self.assertEqual(scope["image_queue"].job, [])
         self.assertIn("minorenni", risposta)
+
+
+class VipTests(unittest.TestCase):
+    """Su Telegram la lista VIP è manuale: glamour sì, esplicito no."""
+
+    def test_vip_puo_chiedere_anna_in_lingerie_glamour(self):
+        scope = _load(operator={"alberto"}, vip={"marta"}, cerchia={"giulia"})
+        risposta = scope["_channel_immagine"](
+            _contesto("Mandami una foto in lingerie sexy stile glamour", autore="Marta"),
+            channel="telegram", destinazione="1", surface="pm")
+        job = scope["image_queue"].job[0]
+        self.assertEqual(job["famiglia"], "sd15")
+        self.assertIn("glamorous lingerie editorial", job["prompt"])
+        self.assertIn("nudità", job["negativo"])
+        self.assertIn("esplicito", job["negativo"])
+        self.assertIn("appena è pronta", risposta)
+
+    def test_vip_non_puo_chiedere_nudo_o_esplicito(self):
+        for testo in ("Mandami una foto nuda figura intera",
+                      "Mandami una foto in una scena di sesso esplicito"):
+            with self.subTest(testo=testo):
+                scope = _load(vip={"marta"})
+                risposta = scope["_channel_immagine"](
+                    _contesto(testo, autore="Marta"), channel="telegram",
+                    destinazione="1", surface="pm")
+                self.assertEqual(scope["image_queue"].job, [])
+                self.assertIn("VIP", risposta)
+                self.assertIn("MUSA", risposta)
+
+    def test_musa_conserva_il_livello_erotico(self):
+        scope = _load(vip={"marta"}, cerchia={"giulia"})
+        scope["_channel_immagine"](
+            _contesto("Mandami una foto nuda figura intera", autore="Giulia"),
+            channel="telegram", destinazione="1", surface="pm")
+        self.assertNotIn("nudità", scope["image_queue"].job[0]["negativo"])
 
 
 class MinoriTests(unittest.TestCase):

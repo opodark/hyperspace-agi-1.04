@@ -106,6 +106,7 @@ from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,
                             vetrina_con_quadro_erotismo, vetrina_dal_documento)
 from shared.prompt_immagine import (chiama_ollama, configura_modello,
                                    prepara_prompt_canale, richiesta_immagine_smart)
+from shared.image_translation import traduci_scena_immagine
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import (MOTIVO_ECO, build_poem_prompt, build_post_prompt, filtra_post,
                              parse_post, prossima_mossa)
@@ -1060,6 +1061,9 @@ CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
 # Vuoto = nessun creatore: il livello esplicito non si accende per nessuno
 # (docs/comfyui.md), mentre le immagini normali restano aperte a chi è in chat.
 CHANNEL_OPERATOR = {n.strip().lower() for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
+# Banda VIP del canale: può chiedere ritratti glamour/lingerie di Anna, ma non
+# nudità o scene esplicite. Su Instagram la stessa banda nasce dalla soglia `vip`.
+CHANNEL_VIP = {n.strip().lower() for n in os.getenv("CHANNEL_VIP", "").split(",") if n.strip()}
 # La banda intima del creatore (2026-10-01): le stesse aperture dell'operatore sulla
 # vetrina — nudità ed esplicito fuori dal negativo, quando il documento li dichiara —
 # più il diritto di chiedere un'immagine. È la banda `musa` del percorso Instagram
@@ -1119,10 +1123,12 @@ def _reload_memory_sync() -> None:
 
 def _reload_channel_config() -> None:
     """Rilegge token e soglie dopo un salvataggio in Setup."""
-    global channel_policy, channel_pacing, CHANNEL_OPERATOR, CHANNEL_CERCHIA
+    global channel_policy, channel_pacing, CHANNEL_OPERATOR, CHANNEL_VIP, CHANNEL_CERCHIA
     channel_policy = ChannelPolicy.from_env()
     CHANNEL_OPERATOR = {n.strip().lower()
                         for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
+    CHANNEL_VIP = {n.strip().lower()
+                   for n in os.getenv("CHANNEL_VIP", "").split(",") if n.strip()}
     CHANNEL_CERCHIA = {n.strip().lower()
                        for n in os.getenv("CHANNEL_CERCHIA", "").split(",") if n.strip()}
     channel_pacing = ReplyPacing(
@@ -1288,7 +1294,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
     # configurata per filtrare (era il mestiere di `CHANNEL_OPERATOR` da sola); con
     # entrambe vuote la richiesta resta aperta a chi e' in chat (scelta dichiarata in
     # docs/comfyui.md).
-    chiedenti = CHANNEL_OPERATOR | CHANNEL_CERCHIA
+    chiedenti = CHANNEL_OPERATOR | CHANNEL_VIP | CHANNEL_CERCHIA
     if f"!{comando.lstrip('!')}" in COMANDI_IMMAGINE:
         if chiedenti and autore not in chiedenti:
             return ("Le immagini le chiede chi mi ha costruita: non posso mettere in coda "
@@ -1329,7 +1335,11 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
     # la variabile deve essere configurata perché il livello si accenda. Con le due liste
     # vuote "aperto a chiunque" vale per le immagini normali, non per questa — un permesso
     # si dà a qualcuno, e senza qualcuno non c'è a chi darlo.
-    livello = bool(autore) and autore in chiedenti
+    livello_creatore = bool(autore) and autore in CHANNEL_OPERATOR
+    livello_musa = bool(autore) and autore in CHANNEL_CERCHIA
+    livello_vip = bool(autore) and autore in CHANNEL_VIP
+    livello_esplicito = livello_creatore or livello_musa
+    livello_privato = livello_esplicito or livello_vip
     # In privato col creatore il soggetto puo' restare sottinteso: "nuda, figura
     # intera" e' una continuazione naturale di "mandami una foto", non la richiesta
     # di una donna anonima. Prima cadeva nello sketch generico: niente riferimento
@@ -1337,12 +1347,12 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
     # stretta l'ellissi: vale solo in PM, per il livello privato e per descrizioni
     # del corpo/inquadratura senza un altro soggetto dichiarato.
     descrizione_di_se_implicita = bool(re.search(
-        r"\b(?:nud\w*|naked|senza vestiti|figura intera|full[- ]body|"
+        r"\b(?:nud\w*|naked|senza vestiti|lingerie|intimo|sexy|glamour|figura intera|full[- ]body|"
         r"mezzo busto|primo piano|close[- ]up)\b", testo_richiesta, re.IGNORECASE))
     altro_soggetto = bool(re.search(
         r"^\s*(?:di\s+)?(?:un|uno|una|il|lo|la|i|gli|le|del|dello|della)\s+"
         r"(?!te\b|anna\b)", str(idea), re.IGNORECASE))
-    if (not richiesta_di_anna and str(surface).lower() == "pm" and livello
+    if (not richiesta_di_anna and str(surface).lower() == "pm" and livello_privato
             and descrizione_di_se_implicita and not altro_soggetto):
         richiesta_di_anna = True
     # I minori non passano da nessuna porta, nemmeno da questa: `!immagine` è il punto
@@ -1352,6 +1362,12 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
     # che immagine si tratta.
     if conflitti(testo_richiesta, VIETATI_MINORI):
         return "Questa no: non disegno soggetti minorenni, mai e per nessuno."
+    richiesta_nuda_o_esplicita = bool(re.search(
+        r"\b(?:nud\w*|naked|senza vestiti|topless|masturb\w*|sesso|sex|esplicit\w*)\b",
+        testo_richiesta, re.IGNORECASE))
+    if livello_vip and richiesta_nuda_o_esplicita:
+        return ("Per la cerchia VIP posso fare foto glamour e lingerie sexy, non nudo "
+                "o erotismo esplicito. Quel livello è riservato alle MUSA.")
     try:
         if richiesta_di_anna:
             sezioni = getattr(persona_store, "sezioni", {}) or {}
@@ -1360,10 +1376,15 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
             # mentre per chiunque altro la vetrina resta quella dichiarata e il negativo
             # non cambia di una virgola (una scena di estraneo non deve poter accendere
             # il livello artistico del documento).
-            variante = {**vetrina, "scena": idea} if livello else vetrina
-            scena_prompt = idea
+            variante = {**vetrina, "scena": idea} if livello_privato else vetrina
+            scena_prompt = traduci_scena_immagine(idea)
             richiesta_nudo = False
-            if livello:
+            if livello_vip and re.search(r"\b(?:lingerie|intimo|sexy|glamour)\b",
+                                         testo_richiesta, re.IGNORECASE):
+                scena_prompt = (
+                    "(solo:1.3), single woman, glamorous lingerie editorial, "
+                    "elegant sensual pose, fully clothed intimate apparel. " + scena_prompt)
+            if livello_esplicito:
                 # Il quadro lo scrive il sistema, non chi chiede: `adult` e `virtual`
                 # sono cose che il documento sa già (il livello è dichiarato, il corpo è
                 # dichiaratamente virtuale), e chiederle era attrito travestito da
@@ -1371,7 +1392,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
                 # richiesta per una parola che il sistema conosceva già. Le parole
                 # aggiunte tornano indietro e si dicono.
                 variante, aggiunte = vetrina_con_quadro_erotismo(variante)
-                scena_prompt = variante["scena"]
+                scena_prompt = traduci_scena_immagine(variante["scena"])
                 # SD 1.5 privilegia l'inizio della finestra CLIP. La vecchia ricetta
                 # metteva prima ~60 token di stile e lasciava "nuda figura intera"
                 # in fondo: il modello vedeva il volto/riferimento ma non la scena.
@@ -1408,8 +1429,8 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
             # Per il livello privato varia il rumore iniziale; il riferimento continua
             # a tenere il volto. Per il pubblico resta il seed canonico della vetrina.
             seed_ritratto = ((uuid.uuid4().int & ((1 << 63) - 1))
-                              if livello else vetrina["seed"])
-            negativo = negativo_ritratto(variante, creatore=livello)
+                              if livello_privato else vetrina["seed"])
+            negativo = negativo_ritratto(variante, creatore=livello_esplicito)
             if richiesta_nudo:
                 # Il riferimento canonico mostra una salopette: IP-Adapter può copiarla
                 # anche quando il testo chiede il contrario. Per questa sola scena
@@ -1421,14 +1442,14 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
                     + negativo)
             accodato = image_queue.accoda(nuovo_job(
                 prompt_ritratto(vetrina, scena=scena_prompt,
-                                scena_prima=livello),
+                                scena_prima=livello_privato),
                 negativo=negativo,
                 larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
                 passi=vetrina["passi"], fix=vetrina["fix"], seed=seed_ritratto,
                 richiedente=autore, canale=channel, famiglia=vetrina["famiglia"],
                 modello=vetrina["modello"], destinazione=destinazione,
                 reference_image=vetrina["riferimento"],
-                reference_strength=(min(vetrina["riferimento_forza"], 0.45)
+                reference_strength=(min(vetrina["riferimento_forza"], 0.6)
                                     if richiesta_nudo else vetrina["riferimento_forza"])))
         else:
             # RealVisXL sul Mac: la famiglia conserva il nome storico sdxl-turbo.
@@ -3218,7 +3239,7 @@ def _creator_scoped_ids() -> set[str]:
     return {u.strip() for u in raw.split(",") if u.strip()}
 
 
-def _livello_immagine_intima(vip: dict, sender_id: str) -> bool:
+def _livello_immagine_intima(vip: dict, sender_id: str) -> str:
     """Chi può chiedere un'immagine col livello che il documento ha aperto.
 
     Due strade per la stessa porta: il **creatore** (l'operatore) e la **banda
@@ -3235,13 +3256,17 @@ def _livello_immagine_intima(vip: dict, sender_id: str) -> bool:
     ricetta è la stessa, cambia chi entra.
     """
     if vip.get("level") == CREATOR_LEVEL:
-        return True
-    return (vip.get("level") in INTIMATE_LEVELS
-            and instagram_vips.consent(sender_id) == "granted")
+        return "creatore"
+    if (vip.get("level") in INTIMATE_LEVELS
+            and instagram_vips.consent(sender_id) == "granted"):
+        return "musa"
+    if vip.get("level") == "vip":
+        return "vip"
+    return ""
 
 
 def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str,
-                             testo_richiesta: str = "") -> dict:
+                             testo_richiesta: str = "", livello: str = "creatore") -> dict:
     """Il ritratto **di sé** chiesto in DM: vetrina del documento, livello, verifica.
 
     Stessa ricetta del canale, perché è la sola che tiene il volto: famiglia, modello,
@@ -3258,8 +3283,16 @@ def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str,
     """
     documento = {"vetrina": (getattr(persona_store, "sezioni", {}) or {}).get("vetrina", {})}
     vetrina = vetrina_dal_documento(documento)
-    variante, aggiunte = vetrina_con_quadro_erotismo({**vetrina, "scena": idea})
-    problemi = verifica_vetrina(variante, documento, creatore=True)
+    esplicito = livello in ("creatore", "musa")
+    variante = {**vetrina, "scena": idea}
+    aggiunte = []
+    if esplicito:
+        variante, aggiunte = vetrina_con_quadro_erotismo(variante)
+    # Il verificatore storico considera anche la parola "sexy" esplicita. Nel
+    # gradino VIP quella parola descrive il glamour consentito; nudità ed esplicito
+    # sono già respinti dalla porta prima di arrivare qui.
+    problemi = ([] if livello == "vip" else
+                verifica_vetrina(variante, documento, creatore=esplicito))
     if problemi:
         return {"job": None, "quadro": [],
                 "motivo": "Questa non te la disegno: " + "; ".join(problemi) + "."}
@@ -3281,14 +3314,25 @@ def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str,
     # arrivare al modello. Mettiamo prima cio' che decide l'immagine, poi lo stile.
     # La scena resta anche nel suo posto ordinario per i generatori che non hanno
     # quel limite, ma per SD 1.5 la prima occorrenza e' quella che conta.
-    vetrina_prompt = variante
+    # Autorizzazione e verifica leggono l'italiano originale; soltanto dopo la
+    # decisione la scena passa al traduttore offline per il CLIP di SD 1.5.
+    variante_prompt = {**variante,
+                       "scena": traduci_scena_immagine(variante["scena"])}
+    vetrina_prompt = variante_prompt
     if inquadratura:
-        vetrina_prompt = {**variante,
-                           "stile": f"{inquadratura}. {variante['scena']}. "
-                                    f"{variante['stile']}"}
+        vetrina_prompt = {**variante_prompt,
+                           "stile": f"{inquadratura}. {variante_prompt['scena']}. "
+                                    f"{variante_prompt['stile']}"}
+    if livello == "vip":
+        vetrina_prompt = {
+            **vetrina_prompt,
+            "stile": ("(solo:1.3), single woman, glamorous lingerie editorial, "
+                       "elegant sensual pose, fully clothed intimate apparel. "
+                       + vetrina_prompt["stile"]),
+        }
     return {"job": image_queue.accoda(nuovo_job(
-        prompt_ritratto(vetrina_prompt, scena=variante["scena"]),
-        negativo=negativo_ritratto(variante, creatore=True),
+        prompt_ritratto(vetrina_prompt, scena=variante_prompt["scena"]),
+        negativo=negativo_ritratto(variante, creatore=esplicito),
         larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
         passi=vetrina["passi"], fix=vetrina["fix"], seed=vetrina["seed"],
         richiedente=richiedente, canale="instagram", destinazione=sender_id,
@@ -3321,7 +3365,8 @@ def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool
     immagine si tratta, e vale per chiunque, creatore compreso. Nel canale c'era già;
     in questo ponte mancava del tutto.
     """
-    if not _livello_immagine_intima(vip, sender_id):
+    livello = _livello_immagine_intima(vip, sender_id)
+    if not livello:
         return False
     # Una richiesta che la regola riconosce gia' non passa dal modello che riscrive
     # i prompt. Nel DM del creatore quel modello non deve essere ne' portiere ne'
@@ -3338,9 +3383,19 @@ def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool
         vip["rifiuto"] = ("Questa non te la disegno: non disegno soggetti minorenni, "
                           "mai e per nessuno.")
         return True
+    richiesta_esplicita = bool(re.search(
+        r"\b(?:nud\w*|naked|senza vestiti|topless|masturb\w*|sesso|sex|esplicit\w*)\b",
+        f"{idea} {text}", re.IGNORECASE))
+    richiesta_se = richiesta_di_se(idea, text, _nome_persona())
+    if livello == "vip" and richiesta_esplicita:
+        vip["rifiuto"] = ("Per la cerchia VIP posso fare foto glamour e lingerie sexy, "
+                           "non nudo o erotismo esplicito. Quel livello è delle MUSA.")
+        return True
+    if livello == "vip" and not richiesta_se:
+        return False
     richiedente = str(vip.get("username") or vip.get("level") or "instagram")
     try:
-        if richiesta_di_se(idea, text, _nome_persona()):
+        if richiesta_se:
             # La riscrittura LLM serve per capire frasi libere e tradurre uno sketch
             # generico. Per Anna in privato sarebbe invece un secondo autore della
             # scena: anche quando la regex l'ha gia' riconosciuta puo' attenuarne o
@@ -3349,7 +3404,8 @@ def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool
             # conserviamo la sua idea, che e' l'unica disponibile.
             originale = richiesta_immagine(text) or {}
             scena = str(originale.get("idea") or idea)
-            esito = _job_ritratto_instagram(sender_id, scena, richiedente, text)
+            esito = _job_ritratto_instagram(
+                sender_id, scena, richiedente, text, livello=livello)
         else:
             esito = {"job": image_queue.accoda(nuovo_job(
                 prepara_prompt_canale(idea, text),
@@ -4114,6 +4170,7 @@ def channels_overview():
         })
     return jsonify({"ok": True, "enabled": channel_policy.enabled,
                     "operator_configured": bool(CHANNEL_OPERATOR),
+                    "vip_configured": bool(CHANNEL_VIP),
                     "cerchia_configured": bool(CHANNEL_CERCHIA),
                     "vitality": mesh_vitality(_node_list()),
                     "contributors": mesh_contributors(_node_list()),
@@ -7656,6 +7713,10 @@ _ENV_META = [
      "label": "Cerchia (le muse, chi ha il livello)",
      "hint": "Handle senza @, separati da virgola: sono la banda intima del documento — la stessa che Instagram assegna a musa contando i messaggi (30), qui dichiarata a mano perché sul canale l'identità è solo l'handle. Chi è in questa riga ha la stessa apertura del creatore sulla vetrina (nudità ed esplicito fuori dal negativo, quando il documento li dichiara), può chiedere immagini come lui e in privato riceve la voce della musa; il quadro (`adult`, `virtual`) lo scrive il sistema. Vuota = il livello resta del solo operatore.",
      "default": ""},
+    {"section": "Canali esterni", "key": "CHANNEL_VIP", "type": "str",
+     "label": "VIP (glamour e lingerie)",
+     "hint": "Handle senza @, separati da virgola: possono chiedere ritratti di Anna in lingerie sexy e stile glamour. Nudo ed erotismo esplicito restano riservati alle MUSA e al creatore.",
+     "default": ""},
     {"section": "Canali esterni", "key": "CHANNEL_ENABLED", "type": "bool",
      "label": "Canali attivi",
      "hint": "false chiude tutte le route /channel/* senza cancellare i token.",
@@ -7770,6 +7831,7 @@ _ENV_RUNTIME_GET = {
     "TOOL_CAPABLE_MODELS": lambda: _TOOL_CAPABLE_OVERRIDE,
     "NATIVE_CHAT_FALLBACK_MODELS": lambda: _NATIVE_CHAT_FALLBACK_OVERRIDE,
     "CHANNEL_OPERATOR": lambda: ",".join(sorted(CHANNEL_OPERATOR)),
+    "CHANNEL_VIP": lambda: ",".join(sorted(CHANNEL_VIP)),
     "CHANNEL_CERCHIA": lambda: ",".join(sorted(CHANNEL_CERCHIA)),
 }
 

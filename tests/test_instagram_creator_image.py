@@ -26,6 +26,7 @@ regex, che e' la stessa strada della produzione quando Ollama non risponde).
 import ast
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -95,6 +96,7 @@ def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
         "prepara_prompt_canale": prepara_prompt_canale,
+        "traduci_scena_immagine": lambda testo: testo,
         "negativo_sketch": negativo_sketch,
         "SKETCH_LATO": SKETCH_LATO,
         "SKETCH_PASSI": SKETCH_PASSI,
@@ -107,6 +109,7 @@ def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
         "richiesta_di_se": richiesta_di_se,
         "conflitti": conflitti,
         "VIETATI_MINORI": VIETATI_MINORI,
+        "re": re,
         "push_log": lambda *args, **kwargs: None,
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
@@ -156,12 +159,42 @@ class PortaTests(unittest.TestCase):
                 "123", "fammi un disegno di un faro", {"level": livello}))
             self.assertEqual(len(queue.jobs), 1)
 
-    def test_il_consenso_non_basta_fuori_dalla_banda_intima(self):
-        for livello in ("", "vip", "conosciuto"):
+    def test_il_consenso_non_basta_fuori_dalle_bande(self):
+        for livello in ("", "conosciuto"):
             queue = Queue()
             self.assertFalse(load(queue, "granted")(
                 "123", "fammi un disegno di un faro", {"level": livello}))
             self.assertEqual(queue.jobs, [])
+
+    def test_vip_puo_chiedere_anna_in_lingerie_glamour(self):
+        queue = Queue()
+        vip = {"level": "vip", "username": "tizia"}
+
+        self.assertTrue(load(queue)(
+            "123", "fammi un disegno di te in lingerie sexy stile glamour", vip))
+        self.assertEqual(len(queue.jobs), 1)
+        job = queue.jobs[0]
+        self.assertEqual(job["famiglia"], "sd15")
+        self.assertIn("glamorous lingerie editorial", job["prompt"])
+        self.assertIn("nudità", job["negativo"])
+        self.assertIn("esplicito", job["negativo"])
+
+    def test_vip_non_puo_chiedere_nudo_o_erotismo_esplicito(self):
+        for richiesta in ("fammi un disegno di te nuda",
+                           "fammi un disegno di te in una scena di sesso esplicito"):
+            with self.subTest(richiesta=richiesta):
+                queue = Queue()
+                vip = {"level": "vip"}
+                self.assertTrue(load(queue)("123", richiesta, vip))
+                self.assertEqual(queue.jobs, [])
+                self.assertIn("VIP", vip["rifiuto"])
+                self.assertIn("MUSA", vip["rifiuto"])
+
+    def test_vip_non_usa_la_scheda_per_soggetti_generici(self):
+        queue = Queue()
+        self.assertFalse(load(queue)(
+            "123", "fammi un disegno di un faro", {"level": "vip"}))
+        self.assertEqual(queue.jobs, [])
 
     def test_una_frase_che_non_e_una_richiesta_non_accoda_nulla(self):
         queue = Queue()
