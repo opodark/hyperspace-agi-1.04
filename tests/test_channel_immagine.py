@@ -30,6 +30,7 @@ perche' sono quegli oggetti a finire nel grafo che ComfyUI esegue.
 import ast
 import sys
 import unittest
+import uuid
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -109,6 +110,7 @@ def _load(operator=(), cerchia=(), coda=None, vetrina=None):
         "verifica_vetrina": verifica_vetrina,
         "conflitti": conflitti,
         "VIETATI_MINORI": VIETATI_MINORI,
+        "uuid": uuid,
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
@@ -470,6 +472,28 @@ class LivelloCreatoreTests(unittest.TestCase):
         self.assertIn("appena è pronta", risposta)
         self.assertIn("quadro", risposta)
         self.assertIn("adult", risposta)
+
+    def test_la_richiesta_naturale_del_creatore_non_viene_riscritta(self):
+        """Il positivo non puo' reintrodurre la censura tolta dal negativo."""
+        scope = _load(operator={"alberto"})
+
+        scope["_channel_immagine"](
+            _contesto("Mandami una foto di te nuda che ti masturbi", autore="Alberto"),
+            channel="telegram", destinazione="1")
+        prompt = scope["image_queue"].job[0]["prompt"].lower()
+        self.assertIn("nuda che ti masturbi", prompt)
+        self.assertNotIn("non-explicit", prompt)
+
+    def test_due_ritratti_privati_non_riusano_lo_stesso_seed(self):
+        scope = _load(operator={"alberto"})
+
+        for _ in range(2):
+            scope["_channel_immagine"](
+                _contesto("!immagine di te nuda, adult virtual", autore="Alberto"),
+                channel="telegram", destinazione="1")
+        semi = [job["seed"] for job in scope["image_queue"].job]
+        self.assertNotEqual(semi[0], semi[1])
+        self.assertNotIn(VETRINA_ANNA["seed"], semi)
 
     def test_il_quadro_gia_scritto_non_si_ripete_nel_prompt(self):
         """Un quadro dichiarato a mano resta quello: niente parole in più, e niente

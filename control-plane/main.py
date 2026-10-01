@@ -1299,8 +1299,14 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
         # Richiesta a parole ("fammi un disegno di X"): senza nessuna delle due liste
         # resta aperta come il comando esplicito. Una frase non riconosciuta
         # torna None: parla la stanza.
-        richiesta = richiesta_immagine_smart(
-            ultimo, contesto=context[:-1], identita=persona_store.system_block())
+        # Se la regola deterministica ha gia' capito la richiesta, il testo resta
+        # quello scritto dalla persona. Il riscrittore LLM aveva trasformato una
+        # richiesta esplicita del creatore in "artistic and non-explicit style":
+        # il negativo era aperto correttamente, ma il positivo la censurava di nuovo.
+        richiesta = richiesta_immagine(ultimo)
+        if richiesta is None:
+            richiesta = richiesta_immagine_smart(
+                ultimo, contesto=context[:-1], identita=persona_store.system_block())
         if richiesta is None:
             return None
         idea = richiesta["idea"]
@@ -1359,11 +1365,18 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
                                             creatore=True)
                 if problemi:
                     return "Questa non te la disegno: " + "; ".join(problemi) + "."
+            # Il seed dichiarato e' l'ancora del volto, ma con IP-Adapter attivo non
+            # deve diventare l'identificatore immutabile di ogni foto privata. Prompt
+            # e seed identici producevano davvero lo stesso JPEG a ogni richiesta.
+            # Per il livello privato varia il rumore iniziale; il riferimento continua
+            # a tenere il volto. Per il pubblico resta il seed canonico della vetrina.
+            seed_ritratto = ((uuid.uuid4().int & ((1 << 63) - 1))
+                              if livello else vetrina["seed"])
             accodato = image_queue.accoda(nuovo_job(
                 prompt_ritratto(vetrina, scena=scena_prompt),
                 negativo=negativo_ritratto(variante, creatore=livello),
                 larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
-                passi=vetrina["passi"], fix=vetrina["fix"], seed=vetrina["seed"],
+                passi=vetrina["passi"], fix=vetrina["fix"], seed=seed_ritratto,
                 richiedente=autore, canale=channel, famiglia=vetrina["famiglia"],
                 modello=vetrina["modello"], destinazione=destinazione,
                 reference_image=vetrina["riferimento"],
