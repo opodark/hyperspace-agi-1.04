@@ -1,6 +1,6 @@
 # Connectors
 
-Enterprise tool fabric of the control plane: GitHub, Microsoft 365 / Office 365 and Google Workspace become **executable capabilities**, not static integrations. This document covers what exists today, how to configure it, how to verify it, and what is deliberately still open.
+GitHub, Microsoft 365 / Office 365, Google Workspace and Instagram become **executable capabilities**, not static integrations — the first three are the enterprise side, the last is the account Aurora and Anna actually publish through. This document covers what exists today, how to configure it, how to verify it, and what is deliberately still open.
 
 ## What a connector is
 
@@ -8,20 +8,24 @@ Enterprise tool fabric of the control plane: GitHub, Microsoft 365 / Office 365 
 control-plane/connectors/
   base.py       BaseConnector — the contract
   manager.py    ConnectorManager — discovery, dispatch, diagnostics
-  github.py     GitHub REST API (5 tools)
-  google.py     Gmail + Calendar + Drive, service account (6 tools)
-  office365.py  Microsoft Graph via the O365 SDK (6 tools)
+  github.py     GitHub REST API (5 tools: 3 read, 2 write)
+  google.py     Gmail + Calendar + Drive, service account (6 tools: 4 read, 2 write)
+  office365.py  Microsoft Graph via the O365 SDK (6 tools: 4 read, 2 write)
+  instagram.py  Instagram API with Instagram Login (5 tools: 1 read, 4 write)
 ```
+
+The `connectors/*.py` files in the repository root are **empty stubs of the pre-`control-plane/` layout** (`class GitHubConnector: pass`), with no `__init__.py`: nothing imports them, and the import `connectors.*` always resolves to the package above (a namespace directory does not shadow a regular package found further along `sys.path` — same reason the tests insert `control-plane/` first, see `tests/test_connectors.py`). Edit the file under `control-plane/connectors/`.
 
 `BaseConnector` requires:
 
 | Member | Meaning |
 |---|---|
-| `name` | unique id, also the tool-name prefix (`github_*`, `o365_*`, `google_*`) |
+| `name` | unique id, also the tool-name prefix (`github_*`, `o365_*`, `google_*`, `instagram_*`) |
 | `REQUIRED_ENV` | env vars without which the connector cannot work (only *names* are ever published) |
 | `enabled` | property: `CONNECTOR_<NAME>_ENABLED=false` forces it off, otherwise `is_available()` |
 | `get_tools()` | OpenAI function-calling schemas |
 | `execute(name, args)` | returns a string, or `None` when the tool is not its own |
+| `READ_TOOLS` / `WRITE_TOOLS` | classification of **every** published tool, validated against `get_tools()`: a tool that is published but not classified makes the whole connector fall out of the catalogue (fail-closed). This is what the read/write policy reads — see below |
 
 `ConnectorManager` finds every subclass in the package at boot (`pkgutil`), instantiates it and keeps only the enabled ones. **A connector without credentials is silently absent from the catalogue — and that silence is exactly why `/connectors` and the Setup panel exist.**
 
@@ -31,15 +35,46 @@ One catalogue, three consumers — the tools are not re-declared anywhere:
 
 1. **Chat tool loop** — `BUILTIN_TOOLS` is injected into `/v1/chat/completions` for tool-capable models (non-stream and stream paths). The tools the *caller* offered are forwarded to the model as they are, and the CP executes **only its own** (natives + connectors): a tool that belongs to the client is handed back to it with `finish_reason: tool_calls` — in both paths, including the SSE delta. The rule exists because the alternative was a lie: Open WebUI 0.11 offers its model a native `generate_image` (its own images route → gateway → ComfyUI), the CP answered `Tool 'generate_image' non gestito da nessun connector attivo`, the call died there, and the model told the user it had sent the image (2026-09-23 — no file anywhere). See `tests/test_tool_passthrough.py`.
 
+2. **MCP** — `/mcp` `tools/list` / `tools/call`, with the per-client allowlist of `shared/mcp_auth.py`.
+3. **`POST /tools/execute`** — single-shot execution for external callers, i.e. the Open WebUI bridge in `openwebui-tools/office365_tool.py`. It can execute **every** published tool, so it is not left open: it sits behind the same gate as the network-admin routes (`X-Hyperspace-Network-Token` = `NETWORK_ADMIN_TOKEN`, at least 32 characters). The bridge must be given that token in its `network_token` valve.
+
+## The fourth consumer: the control plane calls Instagram itself
+
+The catalogue has one more caller, and it is not a client: **the control plane's own code**. Instagram's write tools are not only for the model — the CP's publishing loops and its DM path call them directly:
+
+| Tool | Called from (all in `control-plane/main.py`) | When |
+|---|---|---|
+| `instagram_publish_image` | `_instagram_publish_voce()` (dreams and poems), `_publish_dialogue()` (the sisters' dialogue card) and the boot backfill `_instagram_publish_latest()` | `INSTAGRAM_DREAM_PUBLISH_ENABLED=true` and a finished illustration |
+| `instagram_send_image` | the `/image/result` route, when the closed job has `canale=instagram` | a drawing asked for in DM is delivered (log: `Disegno VIP consegnato` / `Disegno VIP non consegnato`) |
+| `instagram_send_message` | `_instagram_auto_reply()`, through the reply outbox | `INSTAGRAM_AUTO_REPLY_ENABLED=true`, fed by `INSTAGRAM_INBOX_POLL_ENABLED` |
+
+The fourth write tool, `instagram_add_comment`, has **no caller in the control plane today**: it exists for the model, and for the growth play of commenting in the AI-art niche ([growth-strategy.md](growth-strategy.md)).
+
+Those calls go through `ConnectorManager.execute()`, so they pass **the same read/write policy** as a tool call from a model. Measured on this tree (2026-10-01) with the shipped defaults: ten write tools exist and **all ten are blocked**, Instagram's four included — hence `INSTAGRAM_DREAM_PUBLISH_ENABLED=true` alone publishes nothing. The evidence is not a guess: the voice is marked `failed` in the diario with the policy message as its `error`, the log line is `Pubblicazione Instagram fallita`, and the text is
+
+```
+Tool 'instagram_publish_image' bloccato dalla policy: è un tool di SCRITTURA del connettore
+'instagram' non abilitato. Servono CONNECTOR_WRITE_TOOLS="instagram=instagram_publish_image" e
+CONNECTOR_READ_ONLY=false (vedi docs/connectors.md).
+```
+
+On the DM paths the same refusal is quieter: images end as the warn line `Disegno VIP non consegnato`, text replies as `Risposta automatica Instagram fallita` (status `error`) plus a failed entry in the reply outbox.
+
+Publishing (or answering in DM) therefore needs **both halves**:
+
+```
+CONNECTOR_READ_ONLY=false
+CONNECTOR_WRITE_TOOLS="instagram=*"     # or the single tools, comma-separated
+```
+
+The Setup hint on *Instagram abilitato* ("la pubblicazione richiede anche la policy write") is this same statement, and this is where it is explained. `.env.example` documents the Instagram flags without this prerequisite — the message above is the reminder.
+
 ## Web search (`web_search`): what the results are worth
 
 The native `web_search` tool asks the SearXNG instance (`SEARXNG_URL`) and hands the results to the model, so its **quality is the model's evidence**. Two decisions live in `shared/web_search.py` (pure, tested in `tests/test_web_search.py`) because both were real failures:
 
 - **Language per query.** The tool used to send `language=it-IT` always. Measured on this instance: `best russian nude wallpaper sites 2024` came back as *"best — Dizionario inglese-italiano WordReference"* and `Unbridled Market dark web marketplace` as *"Sovranità e sicurezza alimentare"* — while the same queries with `en-US` returned the relevant pages. The reverse also holds (`chi ha vinto il campionato mondiale di Formula 1 nel 2025` with `en-US` → *"Chi (letter) - Wikipedia"*), so the language is decided per query; short ambiguous queries pass no language at all and let the instance default rule.
 - **Pertinence guard.** When an engine is throttled or behind CAPTCHA (`CAPTCHA (it-it)`, `suspended_time=180` in the SearXNG logs) the instance still answers **HTTP 200 with unrelated content** — *"Chi Magazine"* for an F1 question, *"WhatsApp Web"* for a dark-web marketplace. The tool used to pass that on as the answer, which is how a chat ended up "finding" a photo that does not exist. Now a result set with no significant term in common with the query is refused, the attempt is logged as `non pertinenti`, and the tool says plainly that the engines did not answer — instead of filling the gap.
-
-2. **MCP** — `/mcp` `tools/list` / `tools/call`, with the per-client allowlist of `shared/mcp_auth.py`.
-3. **`POST /tools/execute`** — single-shot execution for external callers, i.e. the Open WebUI bridge in `openwebui-tools/office365_tool.py`. It can execute **every** published tool, so it is not left open: it sits behind the same gate as the network-admin routes (`X-Hyperspace-Network-Token` = `NETWORK_ADMIN_TOKEN`, at least 32 characters). The bridge must be given that token in its `network_token` valve.
 
 ## Configuration
 
@@ -50,8 +85,11 @@ All variables live in one section of the Setup tab (or in `.env`, same keys):
 | GitHub | `GITHUB_TOKEN`, `CONNECTOR_GITHUB_ENABLED` | PAT with `repo` scope |
 | Microsoft 365 | `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TENANT_ID`, `CONNECTOR_OFFICE365_ENABLED` | daemon app, APPLICATION permissions: `Mail.Read`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All` |
 | Google Workspace | `GOOGLE_CREDENTIALS_JSON`, `GOOGLE_DELEGATE_EMAIL`, `CONNECTOR_GOOGLE_ENABLED` | service account with Gmail/Calendar/Drive APIs enabled, domain-wide delegation if impersonating |
+| Instagram | `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_USER_ID`, `CONNECTOR_INSTAGRAM_ENABLED` | a professional account reached through Instagram Login (`graph.instagram.com`); the token's permissions come from the Meta app that issued it, so publishing and DM need them enabled there. `CONNECTOR_INSTAGRAM_ENABLED` alone only unlocks reading the account — writes need the read/write policy below |
 
 `GOOGLE_CREDENTIALS_JSON` is the whole service-account JSON **on one line**; it is entered as a password field, so in the dashboard it is masked and never echoed back — to change it you must paste the whole value again.
+
+The Instagram keys live in the same Setup section (`Connettori`), where `INSTAGRAM_ACCESS_TOKEN` is also a password field; `CREATOR_IG_HANDLE` / `CREATOR_IG_USERNAMES` / `CREATOR_IG_SCOPED_IDS` sit there too, because they decide who counts as the creator in DM (see [comfyui.md](comfyui.md)).
 
 Optional knobs (they change latency, not behaviour):
 
@@ -61,6 +99,8 @@ Optional knobs (they change latency, not behaviour):
 | `GITHUB_RETRY_S` | `1` | wait before the single retry (network / 5xx, **idempotent methods only**) |
 | `GOOGLE_TIMEOUT_S` | `20` | per-request timeout (`google-auth-httplib2` required; without it the connector still works, just without a timeout) |
 | `O365_TOKEN_DIR` | `$DATA_DIR/o365` | where the O365 SDK caches its token |
+| `INSTAGRAM_API_VERSION` | `v25.0` | Graph version in the URL (`graph.instagram.com/<version>`); it *is* in the Setup section |
+| `INSTAGRAM_TIMEOUT_S` | `20` | per-request timeout, floor 5s — **.env only**, it is not in the Setup schema |
 
 `O365_TOKEN_DIR` used to be hardcoded to `/tmp`: a directory that does not exist on Windows and that is not persistent inside a recreated container, so every restart re-authenticated from scratch.
 
@@ -68,7 +108,7 @@ Saving the Setup tab applies the change **immediately**: the control plane reloa
 
 ## Read/write policy
 
-Publishing a connector's tools is not the same as authorising it to WRITE. Six of the shipped tools have side effects (`github_create_issue`, `github_add_comment`, `o365_send_email`, `o365_create_event`, `google_send_email`, `google_create_event`): by default they are **not exposed at all** — not to the chat tool loop, not to the MCP catalogue, not to `/tools/execute`. Two conditions must hold to enable one:
+Publishing a connector's tools is not the same as authorising it to WRITE. Ten of the shipped tools have side effects — the six enterprise ones (`github_create_issue`, `github_add_comment`, `o365_send_email`, `o365_create_event`, `google_send_email`, `google_create_event`) and Instagram's four (`instagram_publish_image`, `instagram_send_message`, `instagram_send_image`, `instagram_add_comment`): by default they are **not exposed at all** — not to the chat tool loop, not to the MCP catalogue, not to `/tools/execute`. Two conditions must hold to enable one:
 
 | Variable | Meaning |
 |---|---|
@@ -79,7 +119,7 @@ Example — `CONNECTOR_READ_ONLY=false` with `CONNECTOR_WRITE_TOOLS="github=gith
 
 The classification is declared by each connector (`READ_TOOLS` / `WRITE_TOOLS` on the `BaseConnector` subclass) and is **validated against `get_tools()`**: a tool that is published but not classified makes the whole connector fall out of the catalogue (fail-closed), with the reason visible in `GET /connectors`. Better a missing connector than a tool whose nature nobody declared. The policy itself lives in `shared/connector_policy.py`, pure and unit-tested like `shared/mcp_auth.py`.
 
-This is enforced twice, on purpose: `get_all_tools()` does not publish blocked writes, and `ConnectorManager.execute()` refuses them — a client can call a tool name it saw before the policy changed, or one it simply knows.
+This is enforced twice, on purpose: `get_all_tools()` does not publish blocked writes, and `ConnectorManager.execute()` refuses them — a client can call a tool name it saw before the policy changed, or one it simply knows. The second half is also why the *fourth consumer* is in this document: the control plane's own publishing loops and DM replies call that same `execute()`, so the gate is not only a model-facing guardrail.
 
 ```
 GET /connectors   (excerpt, read-only default)
@@ -144,7 +184,8 @@ Other useful checks:
 - boot log: `[ConnectorManager] Loaded: github` / `Skipped: office365 (env mancanti: ...)`;
 - `/mcp/status` → `published_tools` is the effective catalogue;
 - log lines `tool_call: <name>` and `tool_result: <name>` for every connector invocation (chat and tool loop);
-- `POST /tools/execute` with `{"tool_name": "github_get_repo", "args": {"repo": "owner/repo"}}` for a manual smoke test.
+- `POST /tools/execute` with `{"tool_name": "github_get_repo", "args": {"repo": "owner/repo"}}` for a manual smoke test;
+- **the check that matters before expecting a post on Instagram**: with `CONNECTOR_READ_ONLY=false` and the allowlist in place, `GET /connectors` must show the publishing tool under `write_tools_exposed` for `instagram`. If it is under `write_tools_blocked`, the loop is muted no matter what `INSTAGRAM_DREAM_PUBLISH_ENABLED` says — see *The fourth consumer* above.
 
 Nothing in `/connectors` contains a secret value: only booleans, tool names and the names of missing env vars.
 
@@ -163,9 +204,23 @@ Nothing in `/connectors` contains a secret value: only booleans, tool names and 
 | `Tool 'X': il connettore che lo espone ha fallito — …` | an exception **inside** the connector, attributed to it (not "unknown tool"): the exception type is in the message and in the log (`type=system`) |
 | a working connector stopped right after a Setup save | it was reloaded: read `problems` in `GET /connectors` |
 | `il connettore 'X' è in pausa dopo N errori consecutivi` | circuit breaker open: fix the underlying error, or save the Connectors section to reset it immediately |
+| Instagram publishes nothing although `INSTAGRAM_DREAM_PUBLISH_ENABLED=true` | the write policy, not Instagram: `instagram_publish_image` sits in `write_tools_blocked`. Set `CONNECTOR_READ_ONLY=false` and `CONNECTOR_WRITE_TOOLS="instagram=…"` (see *The fourth consumer*) |
+| DM replies never leave, or DM images never arrive | the same gate on `instagram_send_message` / `instagram_send_image` |
+| no `instagram_*` tool in the catalogue at all | credentials absent, or `CONNECTOR_INSTAGRAM_ENABLED=false` — read `GET /connectors`, which names the missing env |
+
+## Connectors are not channels
+
+Two different paths can both be called "Instagram", and they are not the same thing (see [channel.md](channel.md)):
+
+- **connector** (`control-plane/connectors/instagram.py`): the account's own API — token in `.env`, `graph.instagram.com`, publishing, DM text, DM media. This document.
+- **channel** (`shared/channel.py` → `KNOWN_CHANNELS`): a conversation surface the control plane cannot reach directly. A driver on the machine pulls commands from `/channel/commands` and executes them against a DOM, because on the other side there is a page, not an endpoint. Telegram and Discord are first-class today; **Instagram, X and IRC are placeholders** in the catalogue (`first_class: False`) — the shape is declared, no driver exists.
+
+Instagram appears in both lists precisely because the two paths are independent: what is missing there is the browser/DOM route, not the API one. The catalogue also holds surfaces that are deliberately not connectors at all (CAM4 and Chaturbate, `account_browser`), which is why "adding a social" in [social.md](social.md) is a channel decision first and a connector second.
 
 ## Known limits (open work)
 
 - **Non-idempotent writes are never retried.** Deliberate — a lost response after a created issue must be retried by a human, not silently duplicated — but it means a transient network blip on a write surfaces as an error.
 - **CI never calls a live API.** Tests cover the contract (discovery, gating, diagnostics, classification, error translation, retry policy) with fake credentials and no network, by design.
 - **Microsoft 365 and Google tool bodies are not exercised against a real tenant/account in CI:** O365 is only exercised through its documented interface, Google only through the service-account path.
+- **The coupling between the Instagram loops and the write policy has no test.** `tests/test_connectors.py` exercises the policy with fake GitHub credentials and `tests/test_instagram_connector.py` covers the classification and the publish body, but nothing asserts that `INSTAGRAM_DREAM_PUBLISH_ENABLED=true` with the default policy stays silent. It was measured by hand on 2026-10-01 and is written down in *The fourth consumer*.
+- **This document listed three connectors while four were shipped** — until 2026-10-01 `instagram.py` was discovered, exposed through `/connectors`, MCP and `/tools/execute`, and callable by the control plane itself, without appearing here. Same silent drift the `REQUIRED_ENV` rule exists to prevent, one level up.

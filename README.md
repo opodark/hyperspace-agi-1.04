@@ -57,6 +57,8 @@ The control plane includes an enterprise connector layer for agents, focused on:
 - Google Workspace
 - Microsoft 365 / Office 365
 
+It also ships the **Instagram** connector — the account Aurora and Anna publish through and answer DMs with. It is not an enterprise one but it obeys the same read/write policy, and the control plane's own publishing loops call it: see [docs/connectors.md](docs/connectors.md).
+
 These connectors are meant to turn HyperSpace into an **Enterprise Connector Fabric for Agents**, not just another agent runner.
 
 ## Network profiles

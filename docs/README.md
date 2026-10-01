@@ -17,7 +17,7 @@ Architecture and deployment notes for HyperSpace-AGI. Mission, lexicon and phase
 - [hermes.md](hermes.md) — current integration boundary and end-to-end acceptance criteria for Hermes.
 - [memory schema](../memory/schema/README.md) — the `hyperspace.memory.v1` entry contract and retention tiers (operative / project / persistent).
 - [tool-skill-forge.md](tool-skill-forge.md) — controlled authoring, review and local IDE workflow for inert tool and skill drafts.
-- [connectors.md](connectors.md) — enterprise connector fabric (GitHub, Microsoft 365, Google Workspace): contract, configuration, diagnostics and open limits.
+- [connectors.md](connectors.md) — connector fabric (GitHub, Microsoft 365, Google Workspace and Instagram): the `BaseConnector` contract, discovery, the read/write policy the control plane itself obeys, diagnostics and open limits.
 - [persona.md](persona.md) — declared identity of the agent: identity document, live self-model, the verifiable disclosure policy ("I am an AI"), and the human-gated identity dream that proposes self-observations at night.
 - [channel.md](channel.md) — external conversation surfaces (a room's chat and private messages): channel tokens, spam classification, moderation escalation and reply pacing decided by the control plane.
 - [development-tooling-architecture.md](development-tooling-architecture.md) — one HyperSpace development experience backed by isolated offline, browser, dependency-audit and security-lab runtimes.
