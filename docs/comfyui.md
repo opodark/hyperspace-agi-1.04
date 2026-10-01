@@ -1028,6 +1028,7 @@ scrivere il prompt.
 | Immagine chiesta dalla **WebUI** | **No**: stesso grafo e stessi pesi `-UC`; cambia solo chi la riceve | `scripts/webui_image_env.py` |
 | ComfyUI e i pesi | Nessun safety checker: è la variante **`-UC`** | `integrations/comfyui/modelli.json` |
 | La moderazione del canale | **Non è un filtro di contenuto**: classifica lo spam in arrivo e conta strike | `shared/channel.py` |
+| La scena tradotta prima del job | **No**: cambia la lingua della scena, non la giudica; traduttore spento = scena originale | `shared/image_translation.py` |
 
 Due conseguenze da tenere presenti:
 
@@ -1059,6 +1060,15 @@ domani farebbe fallire un test, non cambierebbe il risultato in silenzio.
   minuto, e il timeout dell'ingresso è lì per questo.
 - **Il prompt è in inglese** di default: i modelli text-to-image sono addestrati
   così. La lingua dell'*idea* non conta, la traduzione la fa la rete.
+- **La traduzione della scena è opzionale, e qui è spenta.** `shared/image_translation.py`
+  manda la sola scena al traduttore prima del job, perché i checkpoint leggono meglio
+  l'inglese; stile, negativi e dichiarazione sono tecnici e restano come sono. Se il
+  traduttore non risponde la scena resta italiana: fail-open, niente blocca la coda,
+  una riga di `WARNING` per job (`tests/test_image_translation.py`). In questa
+  installazione non esiste nessun servizio `libretranslate`, quindi il default del
+  codice (`http://libretranslate:5000`) paga un tentativo fallito per ogni immagine
+  senza cambiare il risultato: per zittirlo, `LIBRETRANSLATE_URL=` vuota nel `.env`
+  (la voce non passa dal pannello Setup, che accetta solo le chiavi di `_ENV_META`).
 - **Nessun job asincrono**: non c'è coda, non c'è ritentativo. Se il CP è giù, il
   nodo lo dice subito.
 - **La memoria non c'entra**: questi nodi non scrivono nella memoria di Aurora.
