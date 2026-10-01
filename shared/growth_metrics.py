@@ -3,12 +3,14 @@
 
 Legge le strutture già persistite (diario, VIP Instagram) e produce i KPI della
 strategia (docs/growth-strategy.md): volume per serie, stato di pubblicazione,
-conversione DM→cerchia e ritenzione. Puro e testabile: nessun filesystem, nessun
+conversione DM→musa e ritenzione. Puro e testabile: nessun filesystem, nessun
 modello, nessuna rete — il chiamante passa i dati già caricati e riceve un dict.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+
+from shared.instagram_vip import CREATOR_LEVEL, LEVEL_NAMES
 
 SERIES = ("sogno", "poesia", "dialogo", "post")
 
@@ -48,7 +50,12 @@ def compute_growth(voci, people, *, days: int = 7,
             published[status] = published.get(status, 0) + 1
 
     people_list = list((people or {}).values()) if isinstance(people, dict) else list(people or [])
-    levels = {"vip": 0, "cerchia": 0, "musa": 0, "none": 0}
+    # Le stesse bande che la scala assegna (`LEVEL_NAMES`), più il creatore — a mano,
+    # non contato — e il secchio degli anonimi: se la scala cambia, cambia anche qui,
+    # invece di lasciare per sempre una riga a zero col nome di un livello tolto.
+    levels = {name: 0 for name in LEVEL_NAMES}
+    levels[CREATOR_LEVEL] = 0
+    levels["none"] = 0
     active_recent = 0
     total_messages = 0
     for p in people_list:

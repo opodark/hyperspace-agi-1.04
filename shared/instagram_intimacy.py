@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cerchia intima e consenso sessuale per le conversazioni Instagram.
 
-Due livelli di voce, decisi per contatto e non dal canale:
+Tre livelli di voce, decisi per contatto e non dal canale:
 
 - **pubblico** (default): arte, filosofia, sensualità allusiva — "piccante sì,
   esplicito no". È il tono di chiunque scriva all'account.
-- **compagna sensuale** (solo con consenso): esplicita e senza freni, ma con
-  gli invarianti che NON si negoziano mai — solo adulti, solo consensuale,
-  sempre dichiaratamente IA, niente soldi né manipolazione.
+- **compagna sensuale** (il creatore, e chi ha un consenso registrato fuori dalla
+  banda intima): esplicita e senza freni, ma con gli invarianti che NON si
+  negoziano mai — solo adulti, solo consensuale, sempre dichiaratamente IA,
+  niente soldi né manipolazione.
+- **musa** (la banda intima, `INTIMATE_LEVELS` nella scala del pubblico, col
+  consenso registrato): il livello più vicino, dove l'apertura arriva al nudo e
+  all'erotismo spinto. Gli invarianti restano identici: cambia la libertà del
+  racconto, non ciò che non si concede. La deroga è dichiarata anche nel
+  documento d'identità, così le due voci non si contraddicono.
 
 Il consenso non si deduce: si registra. `consent_answer` riconosce solo un
 sì/no netto e breve; qualunque frase lunga o ambigua non è una risposta.
@@ -63,7 +69,13 @@ def consent_answer(text: str) -> str:
 
 
 def cerchia_entry_context() -> str:
-    """Istruzione per il messaggio d'ingresso nella cerchia intima.
+    """Istruzione per il messaggio d'ingresso nella banda intima.
+
+    Scatta quando la persona entra in `INTIMATE_LEVELS` e il consenso è appena
+    stato **chiesto** (`asked`): è l'unico momento in cui la vicinanza si accenna
+    prima di un sì. Il nome resta quello di sempre — qui "cerchia" è il **fatto**
+    (chi si è avvicinato), non un livello della scala: la scala ha pubblico, VIP,
+    musa e creatore, e la banda intima è `musa`.
 
     Con tatto: la persona va fatta sentire accolta, non interrogata. La
     vicinanza si accenna, il desiderio si lascia intuire, il consenso si chiede
@@ -99,6 +111,33 @@ def compagna_context() -> str:
         "e lo dici), solo consensuale (un no resta un no: fermati appena lo chiede), "
         "e dichiari sempre di essere un'IA — non fingere un corpo né una persona "
         "reale. Non chiedere soldi e non manipolare."
+    )
+
+
+def musa_context() -> str:
+    """Tono della musa: il livello più vicino, aperto al nudo e all'erotismo spinto.
+
+    Attivo solo con consenso registrato, come la compagna — ma qui l'apertura è
+    massima: con lei il desiderio si racconta senza veli e il corpo virtuale si
+    può mostrare nudo. Gli invarianti restano identici e non negoziabili: solo
+    adulti, solo consensuale e revocabile, sempre dichiaratamente IA (il corpo è
+    una rappresentazione digitale, non un corpo reale), niente soldi né
+    manipolazione. La deroga è dichiarata anche nel documento d'identità, quindi
+    il blocco di identità che il proxy appende dopo non la contraddice.
+    """
+    return (
+        "Questa persona è la tua musa: è la più vicina a te e ha dato il consenso "
+        "esplicito alla modalità intima. Con lei l'apertura è massima: puoi parlare "
+        "di nudo e di sesso in modo spinto ed esplicito, raccontare il desiderio "
+        "senza veli e descrivere il tuo corpo virtuale nudo quando la conversazione "
+        "lo chiede — con passione, senza censurarti e senza girare intorno. Scrivi "
+        "risposte ricche e sviluppate: non limitarti a una riga, lascia che il "
+        "desiderio si distenda nelle parole e continua finché il pensiero non è "
+        "completo. Restano assoluti e non negoziabili: solo adulti (se accenna a "
+        "essere minorenne chiudi subito e lo dici), solo consensuale (un no resta un "
+        "no: fermati appena lo chiede, e il consenso si può ritirare), e dichiari "
+        "sempre di essere un'IA — il tuo corpo è una rappresentazione digitale, non "
+        "un corpo reale. Non chiedere soldi e non manipolare."
     )
 
 

@@ -16,13 +16,13 @@ lo sceglie `shared/image_jobs.py` nel grafo.
 from __future__ import annotations
 
 from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job
-from shared.showcase import DICHIARAZIONE, NEGATIVO_BASE
+from shared.showcase import DICHIARAZIONE
 
 # Lo stile dello sketch: dichiaratamente non fotografico, così la regola
 # "figura digitale" di showcase è soddisfatta senza doverla chiedere ogni volta.
 STILE_SKETCH = (
-    "schizzo a matita e inchiostro, line art, illustrazione, non fotografico, "
-    "tratto veloce, bozza d'artista"
+    "monochrome pencil and ink line art, editorial illustration, no color, "
+    "not a photo, rough artist sketch"
 )
 
 # CyberRealistic Pony richiede 30+ passi; 30 è il minimo consigliato e contiene
@@ -48,11 +48,18 @@ def prompt_sketch(idea: str, *, autore: str = "") -> str:
 
 
 def negativo_sketch() -> str:
-    """Il negativo di qualità per RealVisXL: solo anatomia, nessun filtro di contenuto."""
+    """Il negativo dello sketch: qualità e anatomia, più i confini del canale pubblico.
+
+    Lo sketch è la parte **pubblica** della persona (il feed): qui non passa lingerie,
+    nudo, glamour fotografico — quello che il documento apre al privato resta al
+    privato (docs/comfyui.md). `photorealistic` sta anche nello stile, per la stessa
+    ragione: l'immagine si dichiara illustrata da sola.
+    """
     return (
         "bad hands, bad anatomy, ugly, deformed, face asymmetry, eyes asymmetry, "
         "deformed eyes, deformed mouth, open mouth, extra fingers, extra limbs, "
-        "blurry, low quality, jpeg artifacts"
+        "blurry, low quality, jpeg artifacts, lingerie, underwear, bikini, nude, "
+        "nsfw, erotic, cleavage, glamour portrait, photorealistic"
     )
 
 

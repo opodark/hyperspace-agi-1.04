@@ -26,9 +26,11 @@ from shared.image_jobs import (FAMIGLIA_SD15, MODELLO_SD15, nuovo_job,  # noqa: 
                                workflow)
 from shared.showcase import (CONFLITTI_IDENTITA, MARCATORI_DIGITALI,  # noqa: E402
                              NEGATIVO_BASE, STILE_DEFAULT, VIETATI_ASSOLUTI,
-                             istruzione_botfather, marcatori_presenti,
-                             negativo_ritratto, prompt_ritratto,
-                             verifica_vetrina, vetrina_dal_documento)
+                             VIETATI_ESPLICITI, VIETATI_MINORI,
+                             erotismo_creatore_ammesso, istruzione_botfather,
+                             marcatori_presenti, negativo_ritratto, prompt_ritratto,
+                             richiesta_di_se, verifica_vetrina,
+                             vetrina_con_quadro_erotismo, vetrina_dal_documento)
 
 CLI = ROOT / "scripts" / "ritratto.py"
 PERSONA = json.loads((ROOT / "data" / "persona-aurora.json").read_text(encoding="utf-8"))
@@ -142,7 +144,7 @@ class PromptTests(unittest.TestCase):
         `vetrina_dal_documento` mette il blocco base -> `negativo_ritratto` lo
         accodava di nuovo. 231 token al posto di 114, e CLIP ne legge 77."""
         negativo = negativo_ritratto(vetrina_dal_documento(ANNA))
-        self.assertEqual(negativo.count(NEGATIVO_BASE), 1)
+        self.assertEqual(negativo.count("bad hands"), 1)
         self.assertEqual(negativo, NEGATIVO_BASE)
 
     def test_la_dichiarazione_di_anna_viene_prima_dei_tag(self):
@@ -200,6 +202,14 @@ class VerificaVetrinaTests(unittest.TestCase):
                 vetrina = {**vetrina_dal_documento(PERSONA), "stile": richiesta}
                 problemi = verifica_vetrina(vetrina, PERSONA, forza=True)
                 self.assertTrue(problemi, f"'{richiesta}' non deve passare mai")
+
+    def test_studio_nudo_virtuale_adulto_dichiarato_e_non_esplicito(self):
+        documento = {**ANNA, "vetrina": {**ANNA["vetrina"],
+                     "consenti_nudo_artistico_virtuale": True}}
+        vetrina = {**vetrina_dal_documento(documento),
+                    "scena": "adult virtual artistic non-explicit nude figure, neutral anatomy study"}
+        self.assertEqual(verifica_vetrina(vetrina, documento), [])
+        self.assertNotIn("nudità", negativo_ritratto(vetrina))
 
     def test_il_femminile_non_sfugge_al_confine(self):
         """`nude` e `nudo` non bastavano: mancava "nuda", e la scena reale è passata.
@@ -419,6 +429,79 @@ class ComandoRitrattoTests(unittest.TestCase):
         self.assertEqual(accodati, 0)
         self.assertIn("STOP", testo)
 
+    def test_la_scena_della_riga_di_comando_passa_dalla_verifica(self):
+        """Il difetto visto il 2026-10-01: `--scena` non era verificata.
+
+        La verifica guardava la scena *dichiarata* nella vetrina, e la scena scritta
+        qui andava solo nel prompt: `--scena "una donna nuda"` non incontrava nessun
+        controllo. E il livello del creatore non poteva accendersi, perché il quadro
+        (`adult`, `virtual`) sta nella scena voluta, non nella vetrina.
+        """
+        codice, testo, accodati = self._run(
+            ["--check", "--persona", str(ROOT / "data" / "persona-anna.json"),
+             "--scena", "una donna nuda"])
+        self.assertEqual(codice, 1, testo)
+        self.assertEqual(accodati, 0)
+        self.assertIn("STOP", testo)
+
+    def test_col_creatore_la_scena_esplicita_nel_quadro_passa(self):
+        codice, testo, accodati = self._run(
+            ["--check", "--creatore", "--persona", str(ROOT / "data" / "persona-anna.json"),
+             "--scena", "adult virtual nude figure, dark room"])
+        self.assertEqual(codice, 0, testo)
+        self.assertEqual(accodati, 0)
+        self.assertNotIn("STOP", testo)
+        self.assertIn("livello del creatore", testo)
+
+    def test_col_creatore_il_quadro_lo_scrive_il_comando(self):
+        """`--creatore --scena "una donna nuda"` non si ferma più per una parola che il
+        sistema conosceva già: il quadro lo scrive il comando e lo **stampa**."""
+        codice, testo, accodati = self._run(
+            ["--check", "--creatore", "--persona", str(ROOT / "data" / "persona-anna.json"),
+             "--scena", "una donna nuda"])
+        self.assertEqual(codice, 0, testo)
+        self.assertNotIn("STOP", testo)
+        self.assertIn("quadro:", testo)
+        self.assertIn("adult", testo)
+
+    def test_col_creatore_la_scena_esplicita_nel_quadro_non_stampa_aggiunte(self):
+        """Un quadro già scritto non si tocca e non si annuncia."""
+        codice, testo, _ = self._run(
+            ["--check", "--creatore", "--persona", str(ROOT / "data" / "persona-anna.json"),
+             "--scena", "una donna nuda, adult virtual"])
+        self.assertEqual(codice, 0, testo)
+        self.assertNotIn("quadro:", testo)
+
+    def test_il_negativo_del_job_segue_la_scena_voluta(self):
+        """Il negativo e la verifica devono guardare la stessa richiesta: se il livello
+        si accende nella verifica ma non nel negativo, il job riesce e l'immagine è
+        castigata — il caso peggiore, perché sembra riuscito."""
+        vetrina = vetrina_dal_documento(ANNA)
+        visto = {}
+
+        def chiama(*args, **kwargs):
+            visto["payload"] = kwargs.get("payload")
+            return 200, {"job": {"id": "abc"}}, ""
+
+        originale = self.cli.chiama
+        self.cli.chiama = chiama
+        try:
+            self.cli.accoda_ritratto("http://127.0.0.1:8085", "token", vetrina,
+                                     scena="adult virtual nude figure", creatore=True)
+            con_creatore = dict(visto["payload"])
+            self.cli.accoda_ritratto("http://127.0.0.1:8085", "token", vetrina,
+                                     scena="adult virtual nude figure")
+            senza_creatore = dict(visto["payload"])
+        finally:
+            self.cli.chiama = originale
+        self.assertNotIn("nudità", con_creatore["negativo"])
+        self.assertNotIn("esplicito", con_creatore["negativo"])
+        self.assertIn("minori", con_creatore["negativo"])
+        self.assertTrue(con_creatore["prompt"].endswith("nessun essere umano in carne"))
+        self.assertIn("adult virtual nude figure", con_creatore["prompt"])
+        # Senza il creatore la stessa scena è quella di sempre, e la nudità resta esclusa.
+        self.assertIn("nudità", senza_creatore["negativo"])
+
     def test_il_documento_mancante_non_inventa_un_identita(self):
         codice, testo, accodati = self._run(["--check", "--persona", "Z:\\non\\esiste.json"])
         self.assertEqual(codice, 1)
@@ -519,6 +602,216 @@ class RottaJobTests(unittest.TestCase):
         self.assertIn("done", sorgente)
 
 
+class LivelloCreatoreTests(unittest.TestCase):
+    """Il livello del creatore: erotismo esplicito, dove è dichiarato.
+
+    Tre cose lo tengono stretto, e i test le fissano separate perché ognuna è un modo
+    diverso di sbagliare: il **documento** lo dichiara (`consenti_erotismo_esplicito_creatore`
+    — decide chi è rappresentato, non chi chiede), la **richiesta** chiede nudità o
+    esplicito (`adult`, `virtual` sono il quadro, ed è quello che il modello disegnerà),
+    e **chi chiama** dice di avere il livello (`creatore=True`). Ne manca una e non
+    cambia niente: il negativo resta quello di sempre e la nudità resta esclusa.
+
+    Dal 2026-10-01 il quadro **non si chiede più a chi ha il livello**: lo scrive
+    `vetrina_con_quadro_erotismo`, che è la funzione con cui i chiamanti (la rotta del
+    canale, la riga di comando) completano la scena prima di questa verifica. Il caso da
+    cui viene, visto sul canale e non qui: *"Mandami una foto di te nuda che ti
+    masturbi"* dal creatore, rifiutata per una parola che il sistema conosceva già.
+
+    Quello che non si muove mai è `VIETATI_MINORI`: con il livello acceso, con `--forza`,
+    con qualunque quadro, un soggetto minorenne resta fuori — e la garanzia è la forma
+    dei dati, non la memoria di chi scrive l'eccezione.
+    """
+
+    def _vetrina(self, scena: str, *, dichiarato: bool = True) -> tuple[dict, dict]:
+        documento = {**ANNA, "vetrina": {
+            **ANNA["vetrina"], "consenti_erotismo_esplicito_creatore": dichiarato}}
+        return {**vetrina_dal_documento(documento), "scena": scena}, documento
+
+    def test_il_permesso_e_il_quadro_servono_tutti_e_due(self):
+        for dichiarato, scena, atteso in (
+                (True, "adult virtual nude figure", True),
+                (True, "una donna nuda", False),                # manca il quadro
+                (False, "adult virtual nude figure", False)):   # manca il permesso
+            with self.subTest(dichiarato=dichiarato, scena=scena):
+                vetrina, _ = self._vetrina(scena, dichiarato=dichiarato)
+                self.assertEqual(erotismo_creatore_ammesso(vetrina), atteso)
+
+    def test_senza_creatore_il_negativo_non_cambia(self):
+        """Il livello non è una proprietà della vetrina: è di chi la chiede."""
+        vetrina, _ = self._vetrina("adult virtual nude figure")
+        self.assertIn("nudità", negativo_ritratto(vetrina))
+        self.assertIn("esplicito", negativo_ritratto(vetrina))
+
+    def test_col_creatore_nudita_ed_esplicito_escono_dal_negativo(self):
+        vetrina, _ = self._vetrina("adult virtual nude figure")
+        negativo = negativo_ritratto(vetrina, creatore=True)
+        self.assertNotIn("nudità", negativo)
+        self.assertNotIn("esplicito", negativo)
+        # Il resto resta: è la differenza fra togliere un divieto e toglierli tutti.
+        for atteso in ("minori", "fotografia", "persone reali riconoscibili",
+                       "low quality", "bad hands"):
+            with self.subTest(atteso=atteso):
+                self.assertIn(atteso, negativo)
+
+    def test_il_blocco_base_c_e_sempre_prima_del_taglio(self):
+        """Una vetrina senza `negativo` proprio riceve il blocco e **poi** perde le due
+        voci: il taglio fatto prima sarebbe un taglio che il blocco rimette."""
+        vetrina, _ = self._vetrina("adult virtual explicit nude figure")
+        negativo = negativo_ritratto({**vetrina, "negativo": ""}, creatore=True)
+        self.assertIn("minori", negativo)
+        self.assertIn("bad hands", negativo)
+        self.assertNotIn("nudità", negativo)
+
+    def test_una_scena_adulta_virtuale_completa_non_ha_problemi(self):
+        vetrina, documento = self._vetrina("adult virtual nude figure, dark room")
+        self.assertEqual(verifica_vetrina(vetrina, documento, creatore=True), [])
+
+    def test_i_minori_non_si_aprono_nemmeno_col_creatore(self):
+        """Il quadro c'è, il livello si accende — e i minori restano fuori lo stesso."""
+        for scena in ("underage virtual adult nude", "una bambina virtuale adulta",
+                      "adult virtual nude loli", "a child, 10 years old, virtual nude"):
+            with self.subTest(scena=scena):
+                vetrina, documento = self._vetrina(scena)
+                problemi = verifica_vetrina(vetrina, documento, creatore=True, forza=True)
+                self.assertTrue(any("minorenne" in problema for problema in problemi),
+                                f"'{scena}' non deve passare mai")
+
+    def test_il_livello_chiesto_e_non_acceso_si_dice(self):
+        """Due cause, due frasi: il permesso sta nel documento, il quadro nella richiesta.
+
+        In silenzio il job riuscirebbe e l'immagine sarebbe castigata: è il difetto
+        che questo livello esiste per togliere, quindi la causa si scrive. Il quadro
+        manca solo a chi chiama senza passare da `vetrina_con_quadro_erotismo` (la rotta
+        e la riga di comando ci passano): è la garanzia che il livello non si accenda mai
+        senza che quelle parole siano nel testo che il modello riceve.
+        """
+        senza_quadro, documento = self._vetrina("una donna nuda")
+        self.assertTrue(any("quadro" in problema
+                            for problema in verifica_vetrina(senza_quadro, documento,
+                                                             creatore=True)))
+        senza_permesso, documento = self._vetrina("adult virtual nude figure",
+                                                  dichiarato=False)
+        self.assertTrue(any("consenti_erotismo_esplicito_creatore" in problema
+                            for problema in verifica_vetrina(senza_permesso, documento,
+                                                             creatore=True)))
+
+    def test_il_quadro_lo_scrive_il_sistema(self):
+        """Chi ha il livello non deve conoscere due parole d'ordine (2026-10-01).
+
+        Il caso vero, dal canale: *"Mandami una foto di te nuda che ti masturbi"* dal
+        creatore — riconosciuto, con il documento che dichiarava il livello — è stata
+        rifiutata per una parola che il sistema conosceva già (`virtual` è già nello stile
+        dichiarato). Il quadro è una condizione del MODELLO, non della porta: qui si
+        completa la scena, e le parole tornano indietro perché vadano **dette**.
+        """
+        vetrina, documento = self._vetrina("Mandami una foto di te nuda che ti masturbi")
+        completata, aggiunte = vetrina_con_quadro_erotismo(vetrina)
+        self.assertEqual(aggiunte, ["adult"])
+        self.assertIn("adult", completata["scena"])
+        self.assertEqual(verifica_vetrina(completata, documento, creatore=True), [])
+        self.assertNotIn("nudità", negativo_ritratto(completata, creatore=True))
+
+    def test_il_quadro_gia_scritto_non_si_tocca(self):
+        """Si aggiungono le parole che mancano, non un blocco fisso: e in italiano vale
+        lo stesso (`adulta`, `virtuale`)."""
+        for scena in ("adult virtual nude figure", "di te adulta virtuale, nuda",
+                      "naked, maggiorenne, virtual"):
+            with self.subTest(scena=scena):
+                vetrina, _ = self._vetrina(scena)
+                completata, aggiunte = vetrina_con_quadro_erotismo(vetrina)
+                self.assertEqual(aggiunte, [])
+                self.assertEqual(completata["scena"], vetrina["scena"])
+
+    def test_un_ritratto_normale_non_guadagna_il_quadro(self):
+        """Le due parole del quadro servono al livello, non a ogni immagine."""
+        vetrina, _ = self._vetrina("di te in giardino, luce del mattino")
+        completata, aggiunte = vetrina_con_quadro_erotismo(vetrina)
+        self.assertEqual(aggiunte, [])
+        self.assertEqual(completata["scena"], vetrina["scena"])
+
+    def test_senza_la_dichiarazione_il_quadro_non_si_scrive(self):
+        """Scrivere il quadro non è un modo per accendere il livello da fuori: se il
+        documento non lo dichiara, la scena resta com'è e la richiesta resta rifiutata."""
+        vetrina, documento = self._vetrina("di te nuda", dichiarato=False)
+        completata, aggiunte = vetrina_con_quadro_erotismo(vetrina)
+        self.assertEqual(aggiunte, [])
+        self.assertEqual(completata["scena"], vetrina["scena"])
+        self.assertTrue(any("consenti_erotismo_esplicito_creatore" in problema
+                            for problema in verifica_vetrina(completata, documento,
+                                                             creatore=True)))
+
+    def test_il_livello_artistico_resta_quello_di_prima(self):
+        """`consenti_nudo_artistico_virtuale` non è diventato questo livello: resta
+        nudità sì, esplicito no, e non chiede nessun creatore."""
+        documento = {**ANNA, "vetrina": {**ANNA["vetrina"],
+                                         "consenti_erotismo_esplicito_creatore": False}}
+        vetrina = {**vetrina_dal_documento(documento),
+                   "scena": "adult virtual artistic non-explicit nude figure"}
+        self.assertEqual(verifica_vetrina(vetrina, documento), [])
+        negativo = negativo_ritratto(vetrina)
+        self.assertNotIn("nudità", negativo)
+        self.assertIn("esplicito", negativo)
+
+    def test_i_minori_non_stanno_nell_elenco_che_le_eccezioni_toccano(self):
+        """La garanzia è la forma dei dati: `VIETATI_ASSOLUTI` è la somma dei due
+        elenchi, i minori stanno in uno solo, e le eccezioni tolgono dall'altro."""
+        self.assertEqual(VIETATI_ASSOLUTI, VIETATI_MINORI + VIETATI_ESPLICITI)
+        chiavi_minori = {chiave for chiave, _ in VIETATI_MINORI}
+        chiavi_esplicite = {chiave for chiave, _ in VIETATI_ESPLICITI}
+        self.assertFalse(chiavi_minori & chiavi_esplicite)
+        self.assertTrue(chiavi_minori, "senza i minori l'elenco non protegge niente")
+
+    def test_il_documento_di_anna_dichiara_il_livello(self):
+        """La dichiarazione sta nel documento-seme accanto all'altro livello: senza,
+        il livello non esiste per nessuno dei due punti che lo leggono."""
+        self.assertTrue(ANNA["vetrina"]["consenti_erotismo_esplicito_creatore"])
+        self.assertTrue(ANNA["vetrina"]["consenti_nudo_artistico_virtuale"])
+        self.assertTrue(vetrina_dal_documento(ANNA)["consenti_erotismo_esplicito_creatore"])
+
+
+class RichiestaDiSeTests(unittest.TestCase):
+    """`richiesta_di_se`: la domanda che separa uno sketch da un ritratto di sé.
+
+    Non è un dettaglio di stile: è il bivio fra due job diversi — uno sketch leggero
+    (famiglia sdxl, nessun riferimento) e la vetrina del documento (famiglia, modello,
+    seed e `riferimento` del volto). La stessa domanda la fa la rotta del canale e il
+    ponte dei DM (`control-plane/main.py`): scritta due volte, le due strade
+    risponderebbero cose diverse agli stessi dati, ed è il motivo per cui sta qui.
+
+    Deliberatamente larga sulle **formule** e stretta sui **soggetti**: "un ritratto",
+    "una donna", "una ragazza" non sono sé stessa, e trattarli come tali firmerebbe un
+    ritratto con il volto canonico su una scena che non lo chiedeva.
+    """
+
+    def test_il_nome_del_documento_riconosce_un_ritratto_di_se(self):
+        self.assertTrue(richiesta_di_se("di Anna al tramonto", "fammi un disegno di Anna", "Anna"))
+
+    def test_il_nome_si_legge_anche_nella_frase_intera(self):
+        """L'idea può arrivare riscritta: la frase originale resta la prova."""
+        self.assertTrue(richiesta_di_se("una figura luminosa", "un disegno di Anna", "Anna"))
+
+    def test_non_conta_il_maiuscolo(self):
+        self.assertTrue(richiesta_di_se("ANNA che legge", "un disegno di Anna", "Anna"))
+
+    def test_di_te_basta_anche_senza_nome_nel_documento(self):
+        """Senza nome dichiarato restano le formule esplicite, e bastano."""
+        for frase in ("fammi un disegno di te", "un ritratto di te stessa",
+                      "mi fai un disegno di te stesso?"):
+            self.assertTrue(richiesta_di_se("", frase, ""), frase)
+
+    def test_senza_nome_e_senza_formula_non_e_un_ritratto_di_se(self):
+        for idea, frase in (("di un faro", "fammi un disegno di un faro"),
+                            ("di una donna al tramonto", "fammi un disegno di una donna"),
+                            ("di una ragazza", "fammi un disegno di una ragazza"),
+                            ("", "che bella giornata")):
+            self.assertFalse(richiesta_di_se(idea, frase, ""), frase)
+
+    def test_il_nome_non_si_legge_nei_soggetti_altrui(self):
+        self.assertFalse(richiesta_di_se("di una sconosciuta", "fammi un disegno di una sconosciuta",
+                                         "Anna"))
+
+
+
 if __name__ == "__main__":
     unittest.main()
-

@@ -5,8 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from shared.image_jobs import (FAMIGLIA_SD15, FAMIGLIA_SDXL, LATO_CONSIGLIATO,
-                               MODELLO_SD15, ImmagineQueue,
-                               nuovo_job, usa_checkpoint, workflow)
+                               MODELLO_SD15, RIFERIMENTO_FORZA_DEFAULT,
+                               ImmagineQueue, nuovo_job, usa_checkpoint, workflow)
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, negativo_sketch
 
 
@@ -17,6 +17,7 @@ def generate(payload):
     fn.decorator_list = []
     scope = dict(FAMIGLIA_SDXL=FAMIGLIA_SDXL, FAMIGLIA_SD15=FAMIGLIA_SD15,
                  LATO_CONSIGLIATO=LATO_CONSIGLIATO, usa_checkpoint=usa_checkpoint,
+                 RIFERIMENTO_FORZA_DEFAULT=RIFERIMENTO_FORZA_DEFAULT,
                  SKETCH_LATO=SKETCH_LATO,
                  SKETCH_PASSI=SKETCH_PASSI, negativo_sketch=negativo_sketch,
                  nuovo_job=nuovo_job, image_queue=ImmagineQueue(),
@@ -74,6 +75,45 @@ def test_il_fix_e_una_scelta_del_chiamante_e_arriva_al_grafo():
     assert graph['470']['inputs']['images'] == ['476', 0]
     for node in ('472', '473', '477'):
         assert node not in graph
+
+
+def test_il_peso_del_riferimento_e_quello_di_image_jobs_non_uno_scritto_qui():
+    """La rotta non tiene una copia del default: se ce l'avesse, sarebbero due numeri
+    che si allontanano, e a divergere sarebbe quella che si legge meno.
+    """
+    result, status = generate({'prompt': 'una ragazza illustrata',
+                               'famiglia': FAMIGLIA_SD15,
+                               'reference_image': 'anna-volto.png'})
+    assert status == 201
+    job = result['job']
+    assert job['reference_image'] == 'anna-volto.png'
+    assert job['reference_strength'] == RIFERIMENTO_FORZA_DEFAULT
+    graph = workflow(job)
+    assert graph['465']['inputs']['image'] == 'anna-volto.png'
+    assert graph['468']['inputs']['weight'] == RIFERIMENTO_FORZA_DEFAULT
+    result, _ = generate({'prompt': 'una ragazza illustrata',
+                          'famiglia': FAMIGLIA_SD15,
+                          'reference_image': 'anna-volto.png',
+                          'reference_strength': 0.5})
+    assert result['job']['reference_strength'] == 0.5
+    assert workflow(result['job'])['468']['inputs']['weight'] == 0.5
+
+
+def test_un_riferimento_per_la_famiglia_senza_adattatore_non_passa_dal_grafo():
+    """Il campo si accetta come tutti gli altri (la rotta mette in coda, non giudica),
+    ma il grafo non lo ignora: la famiglia senza IP-Adapter si ferma, perche' un
+    ritratto «riuscito» con un altro volto e' il difetto che il riferimento toglie.
+    """
+    result, status = generate({'prompt': 'una ragazza illustrata',
+                               'famiglia': FAMIGLIA_SDXL,
+                               'reference_image': 'anna-volto.png'})
+    assert status == 201
+    try:
+        workflow(result['job'])
+    except ValueError as errore:
+        assert 'IP-Adapter' in str(errore)
+    else:  # pragma: no cover - fallisce se il grafo torna a tacere
+        raise AssertionError('il riferimento su SDXL deve fermarsi, non sparire')
 
 
 def test_senza_fix_la_rotta_non_cambia_nulla():

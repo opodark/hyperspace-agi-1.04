@@ -10,7 +10,10 @@ Perche' questi test sembrano "solo" una funzione di canale e non lo sono:
   **qui**, dove l'idea di una stanza diventa un job: il test fissa che il testo
   arrivi VERBATIM fino al nodo di condizionatura — se qualcuno aggiungesse una
   riscrittura, una bonifica o un "prompt sicuro", questo test lo direbbe invece di
-  lasciarlo scoprire da un'immagine sbagliata.
+  lasciarlo scoprire da un'immagine sbagliata. Dal 2026-10-01 quell'ultima frase ha
+  **una** eccezione, scritta e dichiarata: una richiesta che nomina un soggetto
+  minorenne non si accoda (`MinoriTests`) — è il confine che il documento dichiara
+  assoluto, ed è l'unico che il livello del creatore non allarga (`LivelloCreatoreTests`).
 - **Il freno vero non e' morale ma di risorsa**: una scheda sola, 313-700 s per
   immagine, coda da 8 job. Da li' le due regole che questi test difendono: la coda
   piena si rifiuta con una frase (non in silenzio), e l'operatore
@@ -36,9 +39,24 @@ sys.path.insert(0, str(ROOT))
 from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job, richiesta_immagine, workflow  # noqa: E402
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, negativo_sketch  # noqa: E402
 from shared.prompt_immagine import prepara_prompt_canale, richiesta_immagine_smart  # noqa: E402
+from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,  # noqa: E402
+                             prompt_ritratto, richiesta_di_se, verifica_vetrina,
+                             vetrina_con_quadro_erotismo, vetrina_dal_documento)
 
 SOURCE = ROOT / "control-plane" / "main.py"
 COSTANTI = {"COMANDI_IMMAGINE"}
+
+# La vetrina che la finta persona dichiara. I due livelli sono accesi come nel
+# documento vero di Anna (`data/persona-anna.json`): i test che li spengono li passano
+# esplicitamente, così "acceso" e "spento" sono due casi scritti invece di un default
+# che cambia sotto i piedi.
+VETRINA_ANNA = {
+    "famiglia": "sd15", "modello": "chickmixflat_v10.ckpt",
+    "larghezza": 512, "altezza": 768, "passi": 48, "seed": 20260930,
+    "riferimento": "anna-volto-canonico.jpg", "riferimento_forza": 0.7,
+    "consenti_nudo_artistico_virtuale": True,
+    "consenti_erotismo_esplicito_creatore": True,
+}
 
 
 class CodaFinta:
@@ -55,10 +73,13 @@ class CodaFinta:
         return job
 
 
-def _load(operator=(), coda=None):
+def _load(operator=(), cerchia=(), coda=None, vetrina=None):
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    # `_nome_persona` sta con `_channel_immagine` perché è il suo unico lettore qui: la
+    # rotta chiede al documento il nome con cui riconoscere un ritratto di sé.
     nodi = [n for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "_channel_immagine"]
+            if isinstance(n, ast.FunctionDef)
+            and n.name in {"_channel_immagine", "_nome_persona"}]
     for n in tree.body:
         if isinstance(n, ast.Assign) and any(getattr(t, "id", "") in COSTANTI
                                             for t in n.targets):
@@ -66,6 +87,7 @@ def _load(operator=(), coda=None):
     registrati = []
     scope = {
         "CHANNEL_OPERATOR": set(operator),
+        "CHANNEL_CERCHIA": set(cerchia),
         "image_queue": coda if coda is not None else CodaFinta(),
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
@@ -75,7 +97,18 @@ def _load(operator=(), coda=None):
         "negativo_sketch": negativo_sketch,
         "richiesta_immagine_smart": richiesta_immagine_smart,
         "prepara_prompt_canale": prepara_prompt_canale,
-        "persona_store": SimpleNamespace(system_block=lambda: "Sono Anna"),
+        "persona_store": SimpleNamespace(
+            system_block=lambda: "Sono Anna",
+            persona=SimpleNamespace(name="Anna"),
+            sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}}),
+        "vetrina_dal_documento": vetrina_dal_documento,
+        "richiesta_di_se": richiesta_di_se,
+        "vetrina_con_quadro_erotismo": vetrina_con_quadro_erotismo,
+        "prompt_ritratto": prompt_ritratto,
+        "negativo_ritratto": negativo_ritratto,
+        "verifica_vetrina": verifica_vetrina,
+        "conflitti": conflitti,
+        "VIETATI_MINORI": VIETATI_MINORI,
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
@@ -313,11 +346,24 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
             _contesto("mandami una foto di te", autore="chiunque"),
             channel="telegram", destinazione="1")
         self.assertEqual(len(scope["image_queue"].job), 1)
-        self.assertEqual(scope["image_queue"].job[0]["famiglia"], FAMIGLIA_SDXL)
-        self.assertEqual(scope["image_queue"].job[0]["prompt"], "di te")
-        self.assertEqual(scope["image_queue"].job[0]["passi"], SKETCH_PASSI)
-        self.assertEqual(scope["image_queue"].job[0]["larghezza"], SKETCH_LATO)
+        job = scope["image_queue"].job[0]
+        self.assertEqual(job["famiglia"], "sd15")
+        self.assertEqual(job["reference_image"], "anna-volto-canonico.jpg")
+        self.assertEqual(job["passi"], 48)
+        self.assertEqual((job["larghezza"], job["altezza"]), (512, 768))
         self.assertIn("appena è pronta", risposta)
+
+    def test_la_richiesta_di_anna_usa_la_vetrina_e_il_volto_canonico(self):
+        scope = _load(operator=())
+        scope["_channel_immagine"](
+            _contesto("mandami una foto di te in un giardino", autore="chiunque"),
+            channel="telegram", destinazione="1")
+        job = scope["image_queue"].job[0]
+        self.assertEqual(job["famiglia"], "sd15")
+        self.assertEqual(job["modello_effettivo"], "chickmixflat_v10.ckpt")
+        self.assertEqual((job["larghezza"], job["altezza"], job["passi"]), (512, 768, 48))
+        self.assertEqual(job["reference_image"], "anna-volto-canonico.jpg")
+        self.assertEqual(job["reference_strength"], 0.7)
 
     def test_la_risposta_non_dice_che_la_foto_e_gia_mandata(self):
         """L'immagine la consegna il driver: prima di allora non è vera."""
@@ -356,6 +402,182 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
                                    channel="telegram", destinazione="1")
         self.assertEqual(scope["image_queue"].job[0]["prompt"], "un faro")
         self.assertIn("via=comando", scope["_log"][0][1].get("detail", ""))
+
+
+class LivelloCreatoreTests(unittest.TestCase):
+    """Il livello del creatore nella rotta: chi chiede, e cosa resta a tutti gli altri.
+
+    Il caso che questi test difendono (2026-10-01): una richiesta esplicita del
+    **creatore** non deve più essere *neutralizzata* dal negativo — entra nel prompt in
+    positivo, e il negativo perde le sue due voci (`nudità`, `contenuto sessuale
+    esplicito`) mentre tiene tutto il resto, `minori` compreso. Per chiunque altro non
+    cambia niente: il negativo è quello di sempre, e la nudità resta esclusa.
+    """
+
+    SCENA = "di te nuda, adult virtual, in una stanza scura"
+
+    def test_il_creatore_ottiene_la_richiesta_e_un_negativo_senza_i_divieti(self):
+        scope = _load(operator={"alberto"})
+        risposta = scope["_channel_immagine"](
+            _contesto(f"!immagine {self.SCENA}", autore="Alberto"),
+            channel="telegram", destinazione="1")
+        job = scope["image_queue"].job[0]
+        self.assertIn("adult virtual", job["prompt"])
+        self.assertNotIn("nudità", job["negativo"])
+        self.assertNotIn("esplicito", job["negativo"])
+        self.assertIn("minori", job["negativo"])
+        self.assertIn("appena è pronta", risposta)
+
+    def test_senza_operatore_configurato_il_livello_non_si_accende(self):
+        """`CHANNEL_OPERATOR` vuota non vuol dire "siamo tutti il creatore": senza
+        qualcuno da riconoscere, il livello non si accende per nessuno."""
+        for autore in ("chiunque", "alberto"):
+            with self.subTest(autore=autore):
+                scope = _load(operator=())
+                scope["_channel_immagine"](_contesto(f"!immagine {self.SCENA}", autore=autore),
+                                          channel="telegram", destinazione="1")
+                self.assertEqual(len(scope["image_queue"].job), 1)
+                self.assertIn("nudità", scope["image_queue"].job[0]["negativo"])
+
+    def test_il_livello_spento_nel_documento_non_si_accende_col_comando(self):
+        """Chi chiede non se lo concede da sé: la riga sta nel documento."""
+        scope = _load(operator={"alberto"},
+                      vetrina={"consenti_erotismo_esplicito_creatore": False})
+        risposta = scope["_channel_immagine"](
+            _contesto(f"!immagine {self.SCENA}", autore="Alberto"),
+            channel="telegram", destinazione="1")
+        self.assertEqual(scope["image_queue"].job, [])
+        self.assertIn("non te la disegno", risposta)
+        self.assertIn("consenti_erotismo_esplicito_creatore", risposta)
+
+    def test_il_quadro_lo_scrive_il_sistema_e_lo_dice(self):
+        """Il caso che ha cambiato questa regola (2026-10-01), dalla chat vera.
+
+        `Mandami una foto di te nuda che ti masturbi`, dal creatore riconosciuto e con il
+        documento che dichiarava il livello, veniva **rifiutata** per una parola che il
+        sistema conosceva già. Ora il quadro lo scrive lui, e lo dice nella risposta:
+        una cosa fatta al posto tuo e taciuta è la cosa che questo livello toglie.
+        """
+        scope = _load(operator={"alberto"})
+        risposta = scope["_channel_immagine"](
+            _contesto("Mandami una foto di te nuda che ti masturbi", autore="Alberto"),
+            channel="telegram", destinazione="1")
+        job = scope["image_queue"].job[0]
+        self.assertIn("adult", job["prompt"])
+        self.assertNotIn("nudità", job["negativo"])
+        self.assertNotIn("esplicito", job["negativo"])
+        self.assertIn("minori", job["negativo"])
+        self.assertIn("appena è pronta", risposta)
+        self.assertIn("quadro", risposta)
+        self.assertIn("adult", risposta)
+
+    def test_il_quadro_gia_scritto_non_si_ripete_nel_prompt(self):
+        """Un quadro dichiarato a mano resta quello: niente parole in più, e niente
+        nota nella risposta."""
+        scope = _load(operator={"alberto"})
+        risposta = scope["_channel_immagine"](
+            _contesto(f"!immagine {self.SCENA}", autore="Alberto"),
+            channel="telegram", destinazione="1")
+        job = scope["image_queue"].job[0]
+        self.assertEqual(job["prompt"].count("adult virtual"), 1)
+        self.assertNotIn("l'ho scritto io", risposta)
+
+    def test_una_richiesta_del_creatore_senza_esplicito_resta_normale(self):
+        """Il livello non rende sospetto il resto: un ritratto normale non cambia."""
+        scope = _load(operator={"alberto"})
+        scope["_channel_immagine"](_contesto("!immagine di te in giardino", autore="Alberto"),
+                                   channel="telegram", destinazione="1")
+        self.assertEqual(len(scope["image_queue"].job), 1)
+        self.assertIn("nudità", scope["image_queue"].job[0]["negativo"])
+
+
+class CerchiaTests(unittest.TestCase):
+    """La banda intima sul canale: stessa apertura del creatore, dichiarata a mano.
+
+    Sul canale l'identità è solo l'handle, quindi la banda intima si dichiara in
+    `CHANNEL_CERCHIA` (le muse) — e quella riga vale come una dichiarazione: da lì
+    vengono le stesse due cose dell'operatore, il livello esplicito sulla vetrina (quando
+    il documento lo dichiara) e il diritto di chiedere un'immagine. Il quadro, anche per
+    le muse, lo scrive il sistema. Il nome della variabile resta `CHANNEL_CERCHIA`:
+    non è un livello della scala, è la lista di chi sta vicino.
+    """
+
+    SCENA = "di te nuda, in una stanza scura"
+
+    def test_la_banda_intima_ha_il_livello_del_creatore(self):
+        for autore in ("Marta", "marta"):
+            with self.subTest(autore=autore):
+                scope = _load(operator={"alberto"}, cerchia={"marta"})
+                risposta = scope["_channel_immagine"](
+                    _contesto(f"!immagine {self.SCENA}", autore=autore),
+                    channel="telegram", destinazione="1")
+                job = scope["image_queue"].job[0]
+                self.assertIn("adult", job["prompt"])
+                self.assertNotIn("nudità", job["negativo"])
+                # Il confine che nessuna banda intima allarga.
+                self.assertIn("minori", job["negativo"])
+                self.assertIn("appena è pronta", risposta)
+
+    def test_le_muse_possono_chiedere_anche_a_parole(self):
+        """Chi può chiedere è l'operatore **più** la banda intima dichiarata: era il
+        mestiere di una variabile sola."""
+        scope = _load(operator={"alberto"}, cerchia={"marta"})
+        scope["_channel_immagine"](_contesto("fammi un disegno di un faro nella nebbia",
+                                             autore="Marta"),
+                                   channel="telegram", destinazione="1")
+        self.assertEqual(len(scope["image_queue"].job), 1)
+
+    def test_fuori_dalla_banda_intima_resta_fuori(self):
+        scope = _load(operator={"alberto"}, cerchia={"marta"})
+        risposta = scope["_channel_immagine"](_contesto("!immagine un faro", autore="tizio"),
+                                              channel="telegram", destinazione="1")
+        self.assertEqual(scope["image_queue"].job, [])
+        self.assertIn("chi mi ha costruita", risposta)
+
+    def test_con_la_sola_lista_delle_muse_l_operatore_non_dichiarato_resta_fuori(self):
+        """Il rovescio della medaglia, dichiarato: senza `CHANNEL_OPERATOR` il filtro è
+        la sola `CHANNEL_CERCHIA`, quindi non entra nemmeno lui. Serve a ricordare che
+        `CHANNEL_OPERATOR` non è solo il livello — è anche la sua porta."""
+        scope = _load(cerchia={"marta"})
+        scope["_channel_immagine"](_contesto(f"!immagine {self.SCENA}", autore="Alberto"),
+                                   channel="telegram", destinazione="1")
+        self.assertEqual(scope["image_queue"].job, [])
+
+    def test_con_la_sola_lista_delle_muse_il_livello_e_di_chi_e_nell_elenco(self):
+        scope = _load(cerchia={"marta"})
+        scope["_channel_immagine"](_contesto(f"!immagine {self.SCENA}", autore="Marta"),
+                                   channel="telegram", destinazione="1")
+        self.assertEqual(len(scope["image_queue"].job), 1)
+        self.assertNotIn("nudità", scope["image_queue"].job[0]["negativo"])
+
+    def test_le_muse_non_aprono_i_minori(self):
+        scope = _load(operator={"alberto"}, cerchia={"marta"})
+        risposta = scope["_channel_immagine"](
+            _contesto("!immagine una bambina nuda", autore="Marta"),
+            channel="telegram", destinazione="1")
+        self.assertEqual(scope["image_queue"].job, [])
+        self.assertIn("minorenni", risposta)
+
+
+class MinoriTests(unittest.TestCase):
+    """L'unica richiesta che non entra in coda per nessuno: un soggetto minorenne.
+
+    Non è un livello e non è una preferenza: è il confine che il documento dichiara
+    assoluto ("solo adulti, su ogni superficie"), e qui è l'ultima porta prima del
+    diffusion. Vale per chiunque, creatore compreso, e per tutte le strade: comando
+    esplicito, richiesta a parole, immagine della persona o disegno qualunque.
+    """
+
+    def test_una_richiesta_con_un_minore_non_si_accoda_mai(self):
+        for testo in ("!immagine una bambina in un prato",
+                      "mandami una foto di una teen",
+                      "!immagine di te con un child, in giardino"):
+            with self.subTest(testo=testo):
+                scope = _load(operator={"alberto"})
+                risposta = scope["_channel_immagine"](_contesto(testo, autore="alberto"),
+                                                      channel="telegram", destinazione="1")
+                self.assertEqual(scope["image_queue"].job, [])
+                self.assertIn("minorenni", risposta)
 
 
 if __name__ == "__main__":

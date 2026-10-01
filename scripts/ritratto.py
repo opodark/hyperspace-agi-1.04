@@ -21,12 +21,24 @@ documentazione (Bot API + MTProto):
 Uso:
     python scripts/ritratto.py --check                 # cosa manca, senza generare
     python scripts/ritratto.py --crea                  # genera la candidata (5 min)
-    python scripts/ritratto.py --crea --scena "..."/--seed N
+    python scripts/ritratto.py --crea --scena "..." --seed N
+    python scripts/ritratto.py --crea --riferimento ~/volto.png   # il VOLTO da tenere
     python scripts/ritratto.py --foto <file> --chat @canale   # foto del CANALE
+    python scripts/ritratto.py --crea --creatore --scena "adult virtual nude figure"
+
+`--creatore` (2026-10-01) è il **livello del creatore**: la nudità e l'esplicito di
+una persona che ha dichiarato `consenti_erotismo_esplicito_creatore` nella propria
+vetrina smettono di essere respinti dal negativo, e la scena li porta nel prompt in
+positivo. Tre cose lo tengono stretto, e servono tutte: la dichiarazione nel
+documento (chi è rappresentato decide della propria rappresentazione), il quadro
+nella scena (`adult`, `virtual`: adulti e virtuale, cioè le due assolute che
+sopravvivono), e il comando che si dichiara creatore — perché il documento non sa
+chi ha scritto il comando. `VIETATI_MINORI` non si apre per nessun livello.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -40,7 +52,13 @@ sys.path.insert(0, str(ROOT))
 
 from shared.showcase import (istruzione_botfather, negativo_ritratto,  # noqa: E402
                              prompt_ritratto, verifica_vetrina,
-                             vetrina_dal_documento)
+                             vetrina_con_quadro_erotismo, vetrina_dal_documento)
+# Il caricamento del riferimento è l'upload di ComfyUI, e quell'upload è già scritto
+# nel ponte (`--stage-riferimento`): qui si prende quella funzione invece di
+# ricomporre il multipart. Due implementazioni del protocollo di upload sarebbero due
+# cose da tenere allineate a ComfyUI, e a divergere sarebbe quella che si usa di rado.
+from integrations.comfyui.comfy_bridge import COMFY_DEFAULT, carica_riferimento  # noqa: E402
+from shared.image_jobs import RIFERIMENTO_FORZA_DEFAULT  # noqa: E402
 
 TOKEN_ENV_DEFAULT = ROOT / "data" / "telegram-bot.env"
 # L'identità viva è quella del runtime: è il file montato nel control-plane
@@ -186,15 +204,41 @@ def divergenze_documenti(percorsi) -> list[str]:
 
 
 def accoda_ritratto(base: str, token: str, vetrina: dict, *, scena: str = "",
-                    seed: int | None = None, destinazione: str = "") -> tuple[int, dict]:
+                    seed: int | None = None, destinazione: str = "",
+                    creatore: bool = False) -> tuple[int, dict]:
     """Mette in coda il ritratto. Con `destinazione` il driver lo consegna in chat.
 
     La consegna non passa dal control-plane: lui decide *dove* (una chat, un id),
     il file ce l'ha il driver — che è l'unico a poter parlare con Telegram.
+
+    Della vetrina il job porta anche il **volto** (`riferimento`) e la **posa**
+    (`pose_preset`): due cose che il prompt non può fare. Il seed fisso tiene fermo
+    il disegno, non l'identità — con la stessa richiesta e due scene diverse il
+    modello disegna due volti diversi — e una posa scritta a parole è una speranza,
+    non una geometria.
+
+    `creatore` accende il livello del creatore nel negativo (`shared/showcase.py`):
+    senza, il negativo è quello di sempre e la nudità resta esclusa. Non è un
+    permesso locale — la vetrina deve dichiararlo e la scena deve dichiarare il
+    quadro, altrimenti non cambia niente — ma è quel po' che la riga di comando deve
+    dire di sé, perché il documento non sa chi ha scritto il comando.
     """
+    # Il negativo si calcola sulla STESSA scena che va nel prompt: i livelli (artistico
+    # e del creatore) si accendono sul quadro che la scena dichiara, quindi un negativo
+    # calcolato sulla vetrina dichiarata sarebbe calcolato su un'altra richiesta. Il
+    # difetto che questo evita, visto il 2026-10-01: `--scena "adult virtual nude
+    # figure"` con `--creatore` non faceva niente — il quadro non arrivava mai al
+    # negativo, che continuava a escludere la nudità, e il job riusciva.
+    variante = {**vetrina, "scena": scena} if str(scena or "").strip() else vetrina
+    # Il seed del volto resta un'ancora, ma una serie con scene diverse non deve
+    # riciclare vestiti, palette e composizione. Stessa scena = seed ripetibile.
+    seed_effettivo = (int(seed) if seed is not None else
+                      (int(vetrina["seed"]) if not str(scena or "").strip() else
+                       int(vetrina["seed"]) + int(hashlib.sha256(
+                           str(scena).encode()).hexdigest()[:8], 16)))
     payload = {
         "prompt": prompt_ritratto(vetrina, scena=scena),
-        "negativo": negativo_ritratto(vetrina),
+        "negativo": negativo_ritratto(variante, creatore=creatore),
         "larghezza": int(vetrina["larghezza"]),
         "altezza": int(vetrina["altezza"]),
         "passi": int(vetrina["passi"]),
@@ -202,15 +246,44 @@ def accoda_ritratto(base: str, token: str, vetrina: dict, *, scena: str = "",
         # misura del ritratto è una sua scelta — 512×768 + fix dà il 2:3 dei demo
         # del modello, 768×768 con il fix sarebbe 1536×1536 (fuori misura).
         "fix": int(vetrina.get("fix") or 0),
-        "seed": int(vetrina["seed"] if seed is None else seed),
+        "seed": seed_effettivo,
         "richiedente": "ritratto",
         "destinazione": destinazione.strip(),
         # Con chi è disegnato il volto: se il documento non lo dichiara resta vuoto,
         # e il job cade sulla famiglia di default della coda come è sempre stato.
         "famiglia": str(vetrina.get("famiglia") or ""),
         "modello": str(vetrina.get("modello") or ""),
+        # Il volto e la posa: la vetrina li PORTA al job, non li interpreta. Il
+        # riferimento lo rifiuta `verifica_vetrina` quando la famiglia non ha
+        # l'IP-Adapter (e il grafo lo rifiuta a sua volta, in `workflow`), quindi qui
+        # si manda e basta: una seconda difesa qui sarebbe una difesa da ricordarsi.
+        "reference_image": str(vetrina.get("riferimento") or ""),
+        "reference_strength": float(vetrina.get("riferimento_forza")
+                                    or RIFERIMENTO_FORZA_DEFAULT),
+        # La posa è della VARIANTE, non dell'identità: la serie ne sceglie una per
+        # scena (`scripts/serie.py`), e dove il documento non ne dichiara nessuna
+        # resta al testo decidere — come è sempre stato.
+        "pose_preset": str(vetrina.get("pose_preset") or ""),
+        "pose_strength": float(vetrina.get("pose_strength") or 1.0),
     }
     return chiama(f"{base}/image/generate", token, metodo="post", payload=payload)
+
+
+def prepara_riferimento(percorso: str, comfy_url: str, nome: str = "") -> str:
+    """Mette un volto di riferimento in ComfyUI/input e torna il nome per il job.
+
+    Il nome che va nel job è quello che ComfyUI dichiara di aver salvato: la sua
+    cartella input la decide l'installazione (`~/ComfyUI-Shared/input` su questa
+    macchina, non `~/Documents/ComfyUI/input`), e indovinarla vuol dire scrivere un
+    file che ComfyUI non leggerà mai — con il ritratto che fallisce su `LoadImage`.
+    Vuoto = non caricato, e il motivo è già stampato.
+    """
+    nome_file, motivo = carica_riferimento(percorso, comfy_url=comfy_url, nome=nome)
+    if not nome_file:
+        print(f"riferimento non caricato: {motivo}")
+        return ""
+    print(f"riferimento in ComfyUI/input: {nome_file}")
+    return nome_file
 
 
 def aspetta_job(base: str, token: str, job_id: str, *, attesa_s: float = 480.0,
@@ -249,8 +322,26 @@ def main(argv=None) -> int:
                              "con --crea è dove il driver consegna il ritratto")
     parser.add_argument("--scena", default="", help="scena del ritratto (default: quella dichiarata)")
     parser.add_argument("--seed", type=int, default=None, help="un altro seed = un'altra candidata")
+    # Il riferimento è il volto: senza, il seed fisso dà lo stesso disegno ma non la
+    # stessa identità. Questo flag è come si mette il PRIMO volto (e come se ne
+    # cambia uno): il file finisce in ComfyUI/input, e da lì in poi basta il nome —
+    # che è quello che il documento dichiara in `vetrina.riferimento`.
+    parser.add_argument("--riferimento", default="",
+                        help="immagine del volto da usare come riferimento: viene messa "
+                             "nella cartella input di ComfyUI e il job la usa "
+                             "(serve una famiglia con IP-Adapter)")
+    parser.add_argument("--riferimento-forza", type=float, default=None,
+                        help="peso del riferimento sul volto (default: quello "
+                             f"dichiarato, {RIFERIMENTO_FORZA_DEFAULT})")
+    parser.add_argument("--comfy", default=os.getenv("COMFY_URL", COMFY_DEFAULT),
+                        help="indirizzo di ComfyUI: serve solo a mettere il riferimento "
+                             "nella sua cartella input")
     parser.add_argument("--forza", action="store_true",
                         help="accetta una vetrina che contraddice il documento (resta scritto)")
+    parser.add_argument("--creatore", action="store_true",
+                        help="livello del creatore: nudità ed esplicito fuori dal "
+                             "negativo, se il documento lo dichiara e la scena "
+                             "dichiara il quadro (adult, virtual)")
     parser.add_argument("--attesa", type=float, default=480.0,
                         help="secondi di attesa massima per la generazione (default 480)")
     parser.add_argument("--persona", default="", help="documento di identità (default: quello del repo)")
@@ -283,13 +374,55 @@ def main(argv=None) -> int:
     # altro vorrebbe dire leggere il job dopo.
     print("modello:   " + (vetrina.get("famiglia") or "(famiglia di default della coda)")
           + (f" · {vetrina['modello']}" if vetrina.get("modello") else ""))
+    # Il riferimento chiesto a mano vince su quello dichiarato. Il file va messo in
+    # ComfyUI/input una volta sola: dopo, basta il nome che ComfyUI gli ha dato, che è
+    # quello che il documento dichiara in `vetrina.riferimento`.
+    if args.riferimento:
+        nome_riferimento = prepara_riferimento(args.riferimento, args.comfy)
+        if not nome_riferimento:
+            return 1
+        vetrina["riferimento"] = nome_riferimento
+    if args.riferimento_forza is not None:
+        vetrina["riferimento_forza"] = float(args.riferimento_forza)
+    # Il volto: il riferimento e con quanta forza. Senza questa riga, «perché questo
+    # ritratto ha una faccia diversa da quello di ieri» si scoprirebbe solo leggendo
+    # il job, e il job sparisce dopo dodici ore.
+    if vetrina.get("riferimento"):
+        print(f"riferimento: {vetrina['riferimento']} · forza {vetrina['riferimento_forza']}"
+              + (" (dalla riga di comando, non dal documento)" if args.riferimento else ""))
+    else:
+        print("riferimento: nessuno — il volto lo decide il seed (stesso seed, stesso "
+              "disegno; scene diverse possono cambiare il volto)")
     altri_documenti = [p for p in PERSONA_CANDIDATI if p != percorso and p.is_file()]
     for avviso in divergenze_documenti([percorso] + altri_documenti):
         print(f"ATTENZIONE: due documenti di identità divergono — {avviso}")
     if args.forza:
         print("ATTENZIONE: --forza attivo — la vetrina può contraddire il documento, "
               "e la cosa resta scritta qui e nei log")
-    problemi = verifica_vetrina(vetrina, documento, forza=args.forza)
+    if args.creatore:
+        print("creatore: livello del creatore — nudità ed esplicito escono dal negativo "
+              "se il documento dichiara il livello e la scena chiede nudità o esplicito "
+              "(il quadro `adult`, `virtual` lo scrive il sistema); i minori restano "
+              "esclusi come per chiunque")
+    # La scena scritta qui è la scena di QUESTA generazione, e la verifica deve vederla:
+    # senza, `--scena "una donna nuda"` non passava da nessun controllo — la vetrina
+    # dichiarata è un'altra — e il livello del creatore non si accendeva mai (il quadro
+    # sta nella scena, non nella vetrina). È lo stesso difetto corretto nel negativo di
+    # `accoda_ritratto`: verifica e negativo devono guardare la stessa richiesta.
+    variante = {**vetrina, "scena": args.scena.strip()} if args.scena.strip() else vetrina
+    # Il quadro lo scrive il sistema, come nella rotta del canale: `adult` e `virtual`
+    # sono cose che il documento sa già (il livello è dichiarato, il corpo è
+    # dichiaratamente virtuale), e chiederle a chi scrive il comando era attrito —
+    # `--creatore --scena "di te nuda"` si fermava alla verifica per una parola che il
+    # sistema conosceva già.
+    aggiunte = []
+    if args.creatore and args.scena.strip():
+        variante, aggiunte = vetrina_con_quadro_erotismo(variante)
+        if aggiunte:
+            print("quadro:     " + ", ".join(aggiunte) + " — scritto qui: la scena non lo "
+                  "dichiarava, e senza il quadro il livello non si accende")
+    problemi = verifica_vetrina(variante, documento, forza=args.forza,
+                                creatore=args.creatore)
     if problemi:
         print("STOP: la vetrina non va bene:")
         for problema in problemi:
@@ -325,8 +458,10 @@ def main(argv=None) -> int:
         return 1
     print("")
     print("accodo il ritratto (identità stabile: stesso prompt, stesso seed)...")
-    stato, dati = accoda_ritratto(base, token, vetrina, scena=args.scena, seed=args.seed,
-                                  destinazione=args.chat)
+    stato, dati = accoda_ritratto(base, token, vetrina,
+                                  scena=variante["scena"] if args.scena.strip() else "",
+                                  seed=args.seed,
+                                  destinazione=args.chat, creatore=args.creatore)
     if stato != 201 or not dati.get("ok"):
         print(f"accodamento fallito (HTTP {stato}): {dati.get('error') or dati.get('errore')}")
         return 1
@@ -394,6 +529,4 @@ def _metti_foto(args, documento: dict) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
 

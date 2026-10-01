@@ -262,6 +262,20 @@ class ChannelWiringTests(unittest.TestCase):
                 self.assertEqual(meta[chiave]["section"], "Canali esterni")
         self.assertEqual(meta["CHANNEL_CLIENTS"]["type"], "password")
 
+    def test_la_voce_intima_del_documento_vale_anche_sul_canale(self):
+        """In privato l'operatore e le muse non sentono il registro pubblico.
+
+        Le stesse note del percorso Instagram (`compagna_context`, `musa_context`),
+        gated sulla superficie: in una stanza con altri la vicinanza resta un fatto
+        privato, e il registro è quello che il documento dichiara per il pubblico.
+        """
+        body = ast.unparse(self.functions["_channel_reply"])
+        self.assertIn("CHANNEL_CERCHIA", body)
+        self.assertIn("CHANNEL_OPERATOR", body)
+        self.assertIn("musa_context", body)
+        self.assertIn("compagna_context", body)
+        self.assertIn("surface == 'pm'", body)
+
     def test_il_salvataggio_rilegge_la_configurazione(self):
         body = ast.unparse(self.functions["set_config_env"])
         self.assertIn("_CHANNEL_ENV_KEYS", body)

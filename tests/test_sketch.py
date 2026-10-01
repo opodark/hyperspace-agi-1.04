@@ -9,19 +9,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from shared.sketch import (SKETCH_CANALE, SKETCH_LATO, SKETCH_PASSI,  # noqa: E402
-                           job_sketch, prompt_sketch, puo_generare)
+                           STILE_SKETCH, job_sketch, prompt_sketch, puo_generare)
 
 
 class PromptSketchTests(unittest.TestCase):
+    # Lo stile si confronta con la costante, non con una parola copiata qui: è la
+    # stessa ragione per cui è in **tag inglesi** — con CLIP a 77 token la prosa
+    # italiana si taglia e lo stile non arriva al modello (vedi shared/sketch.py).
     def test_contiene_stile_idea_e_dichiarazione(self):
         p = prompt_sketch("una torre al tramonto")
-        self.assertIn("schizzo", p)
+        self.assertIn(STILE_SKETCH, p)
         self.assertIn("una torre al tramonto", p)
         self.assertIn("costruzione digitale", p)
 
     def test_l_idea_vuota_lascia_stile_e_dichiarazione(self):
         p = prompt_sketch("")
-        self.assertIn("schizzo", p)
+        self.assertIn(STILE_SKETCH, p)
         self.assertIn("costruzione digitale", p)
 
     def test_normalizza_gli_spazi_dell_idea(self):
@@ -47,7 +50,7 @@ class JobSketchTests(unittest.TestCase):
 
     def test_il_prompt_porta_lo_stile(self):
         job = job_sketch("un gatto")
-        self.assertIn("schizzo", job["prompt"])
+        self.assertIn(STILE_SKETCH, job["prompt"])
 
     def test_il_negativo_non_e_vuoto(self):
         # CyberRealistic Pony usa il negativo di qualità, non filtri di contenuto.

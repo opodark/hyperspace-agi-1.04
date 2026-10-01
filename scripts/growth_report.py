@@ -3,8 +3,8 @@
 """Cruscotto settimanale di crescita: KPI dai dati già persistiti.
 
 Legge data/control-plane/{diario,instagram_vips}.json e stampa i KPI di
-docs/growth-strategy.md: volume per serie, stato di pubblicazione, livelli della
-cerchia e ritenzione. Nessuna rete, nessun modello.
+docs/growth-strategy.md: volume per serie, stato di pubblicazione, bande del
+pubblico e ritenzione. Nessuna rete, nessun modello.
 
 Uso:
 
@@ -57,8 +57,8 @@ def main() -> int:
         s = serie[nome]
         print(f"  {nome:8s} {s['total']:3d} | {s['recent']:3d}")
     print(f"\nPubblicazione Instagram: {report['published']}")
-    print(f"\nCerchia: {v['total_contacts']} contatti, {v['total_messages']} messaggi")
-    print(f"  livelli: {v['levels']}")
+    print(f"\nPubblico: {v['total_contacts']} contatti, {v['total_messages']} messaggi")
+    print(f"  bande: {v['levels']}")
     print(f"  attivi negli ultimi {report['window_days']} giorni: {v['active_last_n_days']}")
     return 0
 

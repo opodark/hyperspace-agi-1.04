@@ -98,8 +98,12 @@ from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, Channe
                             ChannelRuntime, ReplyPacing)
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import (FAMIGLIA_SDXL, FAMIGLIE_CHECKPOINT, ImmagineQueue,
-                               LATO_CONSIGLIATO, nuovo_job, usa_checkpoint)
+                               LATO_CONSIGLIATO, RIFERIMENTO_FORZA_DEFAULT,
+                               nuovo_job, usa_checkpoint)
 from shared.image_memory_gate import ImageMemoryGate
+from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,
+                            prompt_ritratto, richiesta_di_se, verifica_vetrina,
+                            vetrina_con_quadro_erotismo, vetrina_dal_documento)
 from shared.prompt_immagine import (chiama_ollama, configura_modello,
                                    prepara_prompt_canale, richiesta_immagine_smart)
 from shared.feed import Feed, nuovo_post
@@ -112,10 +116,11 @@ from shared.dialogue_image import compose_dialogue
 from shared.conversation_log import ConversationLog, battuta
 from shared.social_dreams import social_dream_inspirations
 from shared.dream_schedule import choose_author, in_hour_window
-from shared.instagram_vip import CREATOR_LEVEL, InstagramVipStore
+from shared.instagram_vip import (CREATOR_LEVEL, INTIMATE_LEVELS,
+                                  InstagramVipStore)
 from shared.instagram_intimacy import (cerchia_entry_context, compagna_context,
-                                       consent_answer, split_messages,
-                                       wants_continuous)
+                                       consent_answer, musa_context,
+                                       split_messages, wants_continuous)
 from shared.sister_status import sister_note
 from shared.instagram_language import fast_reply, language_hint, load_codex
 from shared.instagram_project_context import (PROJECT_CONTEXT, should_offer_creator,
@@ -996,7 +1001,10 @@ channel_runtime = ChannelRuntime()
 # La coda sopravvive al riavvio del control-plane: il ponte del Mac puo' essere
 # spento per aggiornamento o standby. I claim tornano pending dopo il timeout.
 IMAGE_QUEUE_FILE = os.getenv("IMAGE_QUEUE_FILE", "").strip() or "/app/data/image-jobs.json"
-image_queue = ImmagineQueue(state_path=IMAGE_QUEUE_FILE)
+# Il limite resta prudente (8) finché l'operatore non lo alza esplicitamente:
+# una serie notturna può però essere più lunga della coda interattiva.
+image_queue = ImmagineQueue(state_path=IMAGE_QUEUE_FILE,
+                            max_jobs=_channel_int("IMAGE_QUEUE_MAX", 8))
 image_memory_gate = ImageMemoryGate()
 # Le famiglie a checkpoint unico girano sul Mac e la loro memoria la prenota il
 # gate: i claim ritrovati dopo un riavvio sono job che il ponte stava eseguendo.
@@ -1048,8 +1056,18 @@ INSTAGRAM_LANGUAGE_CODEX = os.getenv("INSTAGRAM_LANGUAGE_CODEX", "").strip() or 
 CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
 CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
 # Chi è "io" nel dialogo interno a due voci: nome autore dell'operatore
-# (separato da virgola se più alias). Vuoto = nessuna etichetta speciale.
+# (separato da virgola se più alias, senza @: il driver manda from.username).
+# Vuoto = nessun creatore: il livello esplicito non si accende per nessuno
+# (docs/comfyui.md), mentre le immagini normali restano aperte a chi è in chat.
 CHANNEL_OPERATOR = {n.strip().lower() for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
+# La banda intima del creatore (2026-10-01): le stesse aperture dell'operatore sulla
+# vetrina — nudità ed esplicito fuori dal negativo, quando il documento li dichiara —
+# più il diritto di chiedere un'immagine. È la banda `musa` del percorso Instagram
+# (`INTIMATE_LEVELS`), e sul canale si dichiara a mano perché l'identità è solo l'handle
+# e non c'è un conteggio che la guadagni: `CHANNEL_OPERATOR` da solo lascia il livello al
+# creatore, la banda intima vive di questa riga. Il nome della variabile resta quello di
+# sempre — è il nome di una lista di handle, non di un livello.
+CHANNEL_CERCHIA = {n.strip().lower() for n in os.getenv("CHANNEL_CERCHIA", "").split(",") if n.strip()}
 # Effetto Tamagotchi: poca mesh → modelli piccoli e risposte essenziali; mesh
 # ricca → (se configurato) il modello grande. Soglia e modello sono configurabili.
 VITALITY_BIG_LEVEL = max(0, int(os.getenv("VITALITY_BIG_LEVEL", "3")))
@@ -1101,10 +1119,12 @@ def _reload_memory_sync() -> None:
 
 def _reload_channel_config() -> None:
     """Rilegge token e soglie dopo un salvataggio in Setup."""
-    global channel_policy, channel_pacing, CHANNEL_OPERATOR
+    global channel_policy, channel_pacing, CHANNEL_OPERATOR, CHANNEL_CERCHIA
     channel_policy = ChannelPolicy.from_env()
     CHANNEL_OPERATOR = {n.strip().lower()
                         for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
+    CHANNEL_CERCHIA = {n.strip().lower()
+                       for n in os.getenv("CHANNEL_CERCHIA", "").split(",") if n.strip()}
     channel_pacing = ReplyPacing(
         min_interval_s=_channel_float("CHANNEL_MIN_REPLY_INTERVAL_S", 25.0),
         batch_max_age_s=_channel_float("CHANNEL_BATCH_MAX_AGE_S", 6.0),
@@ -1221,35 +1241,62 @@ CHANNEL_INGEST_MAX_EVENTS = _channel_int("CHANNEL_INGEST_MAX_EVENTS", 100)
 COMANDI_IMMAGINE = ("!immagine", "!immagine:", "!foto", "!image", "!imagine")
 
 
+def _nome_persona() -> str:
+    """Il nome dichiarato nel documento — la firma di un ritratto **di sé**.
+
+    Non è un'ipotesi sul testo: è il nome che il documento dà alla persona, quindi
+    quello con cui una richiesta può chiedere *lei* invece di un soggetto. Vuoto se
+    il documento non ne dichiara uno, e allora restano le formule esplicite
+    ("di te"): `richiesta_di_se` le legge entrambe.
+    """
+    return str(getattr(getattr(persona_store, "persona", None), "name", "")).strip()
+
+
 def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str | None:
     """Un'immagine chiesta dalla stanza: `!immagine <idea>` oppure **a parole**.
 
-    Comandi espliciti e richieste naturali condividono la guardia operatore:
+    Comandi espliciti e richieste naturali condividono la stessa guardia:
 
     - `!immagine` è sintassi esplicita: chi sbaglia il comando se ne accorge. Con
-      `CHANNEL_OPERATOR` configurato filtra chi chiede; senza quella variabile
-      resta aperto a chiunque sia in chat (scelta dichiarata in docs/comfyui.md).
+      `CHANNEL_OPERATOR` o `CHANNEL_CERCHIA` configurate filtra chi chiede; senza
+      quelle variabili resta aperto a chiunque sia in chat (scelta dichiarata in
+      docs/comfyui.md).
     - la richiesta **a parole** usa regex e modello per conservare soggetto e
-      stile, con identità e cronologia recente. Se CHANNEL_OPERATOR è impostato
+      stile, con identità e cronologia recente. Con una delle due liste impostata
       si accettano solo gli autori configurati; altrimenti resta aperta.
 
     La risposta non promette mai un'immagine già mandata: dice che è in coda e che
     arriva. L'immagine la consegna il driver, e solo dopo è vera.
+
+    Da qui passa anche il **livello esplicito** (2026-10-01): una richiesta di nudità
+    o di esplicito, se l'autore è il creatore (`CHANNEL_OPERATOR`) o uno delle muse
+    che lui dichiara (`CHANNEL_CERCHIA`) e il documento dichiara
+    `consenti_erotismo_esplicito_creatore`, non viene neutralizzata dal negativo. Il
+    quadro (`adult`, `virtual`) che `shared/showcase.py` pretende per accendere il
+    livello lo **scrive il sistema** (`vetrina_con_quadro_erotismo`) e lo dice nella
+    risposta: chi ha il livello non deve conoscere due parole d'ordine. Per chiunque
+    altro nulla cambia; i minori non passano per nessuno.
     """
     ultimo = str((context[-1] if context else {}).get("text", "")).strip()
     autore = str((context[-1] if context else {}).get("author", "")).strip().lower()
     pezzi = ultimo.split(" ", 1)
     comando = pezzi[0].lower().rstrip(":") if pezzi else ""
     regola = ""
+    aggiunte = []            # le parole del quadro che il sistema ha scritto da sé
+    # Chi chiede: l'operatore e le muse che lui dichiara. Basta una delle due liste
+    # configurata per filtrare (era il mestiere di `CHANNEL_OPERATOR` da sola); con
+    # entrambe vuote la richiesta resta aperta a chi e' in chat (scelta dichiarata in
+    # docs/comfyui.md).
+    chiedenti = CHANNEL_OPERATOR | CHANNEL_CERCHIA
     if f"!{comando.lstrip('!')}" in COMANDI_IMMAGINE:
-        if CHANNEL_OPERATOR and autore not in CHANNEL_OPERATOR:
+        if chiedenti and autore not in chiedenti:
             return ("Le immagini le chiede chi mi ha costruita: non posso mettere in coda "
                     "una richiesta di chiunque, la scheda è una sola.")
         idea = pezzi[1].strip() if len(pezzi) > 1 else ""
     else:
-        if CHANNEL_OPERATOR and autore not in CHANNEL_OPERATOR:
-            return None          # non-operatore: silenzio, parla la stanza
-        # Richiesta a parole ("fammi un disegno di X"): senza CHANNEL_OPERATOR
+        if chiedenti and autore not in chiedenti:
+            return None          # fuori dalla banda intima: silenzio, parla la stanza
+        # Richiesta a parole ("fammi un disegno di X"): senza nessuna delle due liste
         # resta aperta come il comando esplicito. Una frase non riconosciuta
         # torna None: parla la stanza.
         richiesta = richiesta_immagine_smart(
@@ -1264,15 +1311,72 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
     # disegno ricevono lo stile del diario, salvo una tecnica già specificata.
     if regola:
         idea = prepara_prompt_canale(idea, ultimo)
+    # Un canale può chiedere sia un soggetto qualsiasi sia un'immagine di Anna.
+    # Il primo resta uno sketch leggero; il secondo è una rappresentazione di sé e
+    # deve passare dalla sua vetrina, altrimenti Telegram la disegnerebbe con il
+    # checkpoint generico e perderebbe il volto canonico.
+    nome_persona = _nome_persona()
+    testo_richiesta = f"{idea} {ultimo}".lower()
+    richiesta_di_anna = richiesta_di_se(idea, ultimo, nome_persona)
+    # Il livello esplicito è di chi l'ha costruita **e delle muse che lui dichiara**:
+    # la variabile deve essere configurata perché il livello si accenda. Con le due liste
+    # vuote "aperto a chiunque" vale per le immagini normali, non per questa — un permesso
+    # si dà a qualcuno, e senza qualcuno non c'è a chi darlo.
+    livello = bool(autore) and autore in chiedenti
+    # I minori non passano da nessuna porta, nemmeno da questa: `!immagine` è il punto
+    # in cui una frase di una stanza diventa un prompt per il diffusion, e una richiesta
+    # che chiede un soggetto minorenne non si accoda e non si "riduce". Vale per
+    # chiunque, creatore compreso, ed è l'unico controllo che parla prima di sapere di
+    # che immagine si tratta.
+    if conflitti(testo_richiesta, VIETATI_MINORI):
+        return "Questa no: non disegno soggetti minorenni, mai e per nessuno."
     try:
-        # RealVisXL sul Mac: la famiglia conserva il nome storico sdxl-turbo.
-        accodato = image_queue.accoda(nuovo_job(
-            idea,
-            negativo=negativo_sketch(),
-            larghezza=SKETCH_LATO, altezza=SKETCH_LATO, passi=SKETCH_PASSI,
-            richiedente=autore, canale=channel,
-            famiglia=FAMIGLIA_SDXL,
-            destinazione=destinazione))
+        if richiesta_di_anna:
+            sezioni = getattr(persona_store, "sezioni", {}) or {}
+            vetrina = vetrina_dal_documento({"vetrina": sezioni.get("vetrina", {})})
+            # La richiesta **è** la scena di questa generazione: il livello si legge lì,
+            # mentre per chiunque altro la vetrina resta quella dichiarata e il negativo
+            # non cambia di una virgola (una scena di estraneo non deve poter accendere
+            # il livello artistico del documento).
+            variante = {**vetrina, "scena": idea} if livello else vetrina
+            scena_prompt = idea
+            if livello:
+                # Il quadro lo scrive il sistema, non chi chiede: `adult` e `virtual`
+                # sono cose che il documento sa già (il livello è dichiarato, il corpo è
+                # dichiaratamente virtuale), e chiederle era attrito travestito da
+                # controllo — il 2026-10-01 il creatore si è visto rifiutare la sua
+                # richiesta per una parola che il sistema conosceva già. Le parole
+                # aggiunte tornano indietro e si dicono.
+                variante, aggiunte = vetrina_con_quadro_erotismo(variante)
+                scena_prompt = variante["scena"]
+                # La richiesta passa anche dalla verifica, come un ritratto da riga di
+                # comando: se il documento non dichiara il livello, o se resta qualcosa
+                # d'altro che non va (i minori, la figura senza marcatori), si dice —
+                # accodare e basta darebbe un'immagine che il negativo rende castigata
+                # senza che nessuno sappia perché.
+                problemi = verifica_vetrina(variante,
+                                            {"vetrina": sezioni.get("vetrina", {})},
+                                            creatore=True)
+                if problemi:
+                    return "Questa non te la disegno: " + "; ".join(problemi) + "."
+            accodato = image_queue.accoda(nuovo_job(
+                prompt_ritratto(vetrina, scena=scena_prompt),
+                negativo=negativo_ritratto(variante, creatore=livello),
+                larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
+                passi=vetrina["passi"], fix=vetrina["fix"], seed=vetrina["seed"],
+                richiedente=autore, canale=channel, famiglia=vetrina["famiglia"],
+                modello=vetrina["modello"], destinazione=destinazione,
+                reference_image=vetrina["riferimento"],
+                reference_strength=vetrina["riferimento_forza"]))
+        else:
+            # RealVisXL sul Mac: la famiglia conserva il nome storico sdxl-turbo.
+            accodato = image_queue.accoda(nuovo_job(
+                idea,
+                negativo=negativo_sketch(),
+                larghezza=SKETCH_LATO, altezza=SKETCH_LATO, passi=SKETCH_PASSI,
+                richiedente=autore, canale=channel,
+                famiglia=FAMIGLIA_SDXL,
+                destinazione=destinazione))
     except ValueError:
         return "Un'immagine senza descrizione non esiste: scrivi cosa disegnare."
     except RuntimeError as e:
@@ -1280,12 +1384,17 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
     push_log('channel', f"{channel}: richiesta immagine",
              detail=f"id={accodato['id']} da={autore or '?'} "
                     f"via={regola or 'comando'} famiglia={accodato['famiglia']} "
-                    f"modello={accodato['modello_effettivo']} prompt={accodato['prompt']}",
+                    + (f"quadro={','.join(aggiunte)} " if aggiunte else "")
+                    + f"modello={accodato['modello_effettivo']} prompt={accodato['prompt']}",
              source=f"channel:{channel}", status='info')
+    # Le parole del quadro scritte dal sistema si dicono: una cosa fatta al posto tuo e
+    # taciuta è la cosa che questo livello esiste per togliere.
+    nota = (" Il quadro (`" + "`, `".join(aggiunte) + "`) l'ho scritto io: senza, il "
+            "modello disegnerebbe un'altra cosa." if aggiunte else "")
     if not destinazione:
         return ("L'ho messa in coda, ma non so dove mandartela: chiedila dalla chat "
-                "(nel canale il driver manda l'id della conversazione).")
-    return "Ok! Mi metto subito al lavoro: appena è pronta te la mando qui."
+                "(nel canale il driver manda l'id della conversazione)." + nota)
+    return "Ok! Mi metto subito al lavoro: appena è pronta te la mando qui." + nota
 
 
 def _trascrizione(context) -> str:
@@ -1353,6 +1462,18 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
          "ripiego soltanto se la lingua non è riconoscibile."),
         vitality_context(vitalita),
     ]
+    # La vicinanza dichiarata vale anche qui (2026-10-01): l'operatore e le muse che
+    # lui dichiara non sono "la stanza", e **in privato** ricevono la voce che il
+    # documento riserva a loro — le stesse note del percorso Instagram
+    # (`compagna_context`, `musa_context`) — invece del registro pubblico, che è la
+    # censura che l'apertura esiste per togliere. In una stanza con altri no: lì la
+    # vicinanza è un fatto privato e il registro resta quello dichiarato per il pubblico.
+    if surface == "pm":
+        ultimo_autore = str((context[-1] if context else {}).get("author", "")).strip().lower()
+        if ultimo_autore in CHANNEL_CERCHIA:
+            blocco.append(musa_context())
+        elif ultimo_autore in CHANNEL_OPERATOR:
+            blocco.append(compagna_context())
     if str(persona_store.persona.name or "").strip().lower() == "anna":
         nota_sorella = _sister_note()
         if nota_sorella:
@@ -2744,6 +2865,37 @@ _instagram_poll_started = False
 _instagram_reply_started = False
 
 
+def _nota_quadro(vip: dict) -> str:
+    """La riga che dice che il quadro l'ha scritto il sistema, non chi chiede.
+
+    Stessa frase del canale (`_channel_immagine`): le parole che il sistema ha scritto
+    al posto della persona si **dicono** — una cosa fatta al posto tuo e taciuta è
+    esattamente ciò che questo livello esiste per togliere.
+    """
+    aggiunte = [str(parola) for parola in (vip.get("quadro") or []) if str(parola).strip()]
+    if not aggiunte:
+        return ""
+    return (" Il quadro (`" + "`, `".join(aggiunte) + "`) l'ho scritto io: senza, il "
+            "modello disegnerebbe un'altra cosa.")
+
+
+def _chunks_con_nota(chunks: list, nota: str, *, limite: int = 1000) -> list:
+    """La nota in coda all'**ultimo** messaggio, o da sola se non ci sta.
+
+    Instagram accetta ~1000 caratteri per messaggio, e la troncatura (`reply[:1000]`)
+    passa prima di qui: appesa al pezzo finale la nota viaggia col messaggio che parla
+    dell'immagine, e se non ci sta diventa un messaggio a sé invece di sparire — un
+    fatto del sistema non si taglia con la coda della risposta del modello.
+    """
+    pezzi = [str(pezzo) for pezzo in (chunks or [])]
+    if not nota:
+        return pezzi
+    if pezzi and len(pezzi[-1]) + len(nota) <= limite:
+        pezzi[-1] = pezzi[-1] + nota
+        return pezzi
+    return pezzi + [nota.strip()]
+
+
 def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
                           vip: dict | None = None) -> None:
     """Generate and send one short reply for an inbound Instagram DM."""
@@ -2759,6 +2911,13 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
             consecutive_user_turns += 1
         codex = load_codex(INSTAGRAM_LANGUAGE_CODEX)
         reply = fast_reply(text, codex) if consecutive_user_turns <= 1 else ""
+        # Il ponte delle immagini (`_queue_instagram_creator_image`) può aver rifiutato
+        # la richiesta: allora la spiegazione **è** la risposta, e non si genera nulla.
+        # Una promessa senza un job accodato sarebbe una bugia, e la bugia costerebbe
+        # più del rifiuto (l'immagine non arriva, e la persona la aspetta).
+        rifiuto = str(vip.get("rifiuto") or "").strip()
+        if rifiuto:
+            reply = rifiuto
         transcript = "\n".join(
             f"{'Persona' if turn.get('role') == 'user' else 'Anna'}: {turn.get('text', '')}"
             for turn in memory.get("turns") or [])
@@ -2811,7 +2970,19 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
             intimacy_note = " " + compagna_context()
         elif consent == "asked":
             intimacy_note = " " + cerchia_entry_context()
+        elif consent == "granted" and vip.get("level") in INTIMATE_LEVELS:
+            # La banda intima (`INTIMATE_LEVELS`) è il livello più vicino: col consenso
+            # registrato si apre anche il nudo e l'erotismo spinto, non solo la voce
+            # esplicita. La lista è la stessa che chiede il consenso (qui sotto, nel
+            # webhook) e che apre l'immagine: una sola, così voce, domanda e porta non
+            # possono separarsi.
+            intimacy_note = " " + musa_context()
         elif consent == "granted":
+            # Un consenso registrato quando la persona non è nella banda intima:
+            # succede a chi l'aveva dato nella vecchia banda `cerchia` (tolta il
+            # 2026-10-01) e a un consenso dato a mano. Il tono resta quello della
+            # compagna — un consenso registrato non si revoca da soli — mentre il
+            # livello dell'immagine resta chiuso: la voce non è la porta.
             intimacy_note = " " + compagna_context()
         nota_sorella = sister_note(_sister_peer())
         sister_note_value = (" " + nota_sorella) if nota_sorella else ""
@@ -2855,9 +3026,17 @@ def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
         meta_markers = ("the user wants", "i need to", "let me ", "previous instructions",
                         "the message is", "respond as aurora", "okay, the user")
         max_reply = 4000 if continuous else 1000
-        if len(reply) > max_reply or any(marker in reply.lower() for marker in meta_markers):
+        # Un rifiuto lo decide il sistema, non il modello: non ha ragionamento da
+        # filtrare e non si taglia a metà — una spiegazione troncata è peggio di una
+        # spiegazione breve (`split_messages` la divide ai confini di frase).
+        if not rifiuto and (len(reply) > max_reply
+                            or any(marker in reply.lower() for marker in meta_markers)):
             raise RuntimeError("risposta bloccata: rilevato ragionamento o testo meta")
-        chunks = split_messages(reply) if continuous else [reply[:1000]]
+        chunks = (split_messages(rifiuto) if rifiuto
+                  else split_messages(reply) if continuous else [reply[:1000]])
+        # Le parole del quadro scritte dal sistema si dicono, e la troncatura è già
+        # passata: la nota si appende qui o diventa un messaggio a sé (`_chunks_con_nota`).
+        chunks = _chunks_con_nota(chunks, _nota_quadro(vip))
     except Exception as error:
         instagram_reply_outbox.fail(sender_id, message_id, error, safe_retry=True)
         push_log("instagram", "Generazione risposta Instagram fallita",
@@ -2977,33 +3156,125 @@ def _creator_scoped_ids() -> set[str]:
     return {u.strip() for u in raw.split(",") if u.strip()}
 
 
-def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool:
-    """Accoda un'immagine chiesta in DM dal creatore, che è sopra i VIP.
+def _livello_immagine_intima(vip: dict, sender_id: str) -> bool:
+    """Chi può chiedere un'immagine col livello che il documento ha aperto.
 
-    Il webhook Instagram non passa da ``/channel/reply``: senza questo piccolo
-    ponte il comando/linguaggio naturale del creatore riceverebbe solo una
-    risposta testuale. La consegna resta quella normale del job Instagram, che
-    invia il file pronto al suo scoped ID in DM.
+    Due strade per la stessa porta: il **creatore** (l'operatore) e la **banda
+    intima** — `INTIMATE_LEVELS`, che nella scala del pubblico è `musa` — quando ha
+    **registrato** il consenso: esattamente la lista che decide la voce
+    (`INTIMATE_LEVELS` più `consent == "granted"`). Chi ha la parola esplicita ha
+    l'immagine esplicita: tenerle diverse era la stessa incoerenza che al canale è
+    stata tolta — lì testo e immagine leggono ormai la stessa lista, e il test che le
+    tiene d'accordo impedisce che tornino a divergere.
+
+    Sul canale Telegram l'appartenenza si **dichiara** a mano (`CHANNEL_CERCHIA`,
+    le muse: lì non c'è un conteggio né un consenso da registrare); qui si **guadagna**
+    contando i messaggi e si **registra** rispondendo. Due porte, una regola: la
+    ricetta è la stessa, cambia chi entra.
     """
-    if vip.get("level") != CREATOR_LEVEL:
+    if vip.get("level") == CREATOR_LEVEL:
+        return True
+    return (vip.get("level") in INTIMATE_LEVELS
+            and instagram_vips.consent(sender_id) == "granted")
+
+
+def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str) -> dict:
+    """Il ritratto **di sé** chiesto in DM: vetrina del documento, livello, verifica.
+
+    Stessa ricetta del canale, perché è la sola che tiene il volto: famiglia, modello,
+    seed e `riferimento` vengono dalla vetrina dichiarata, la richiesta è la scena di
+    *questa* generazione, e il quadro (`adult`, `virtual`) lo scrive il sistema
+    (`vetrina_con_quadro_erotismo`) — chi ha il livello non deve conoscere due parole
+    d'ordine. Uno sketch generico disegnerebbe *una* donna, non questa.
+
+    Ritorna `{"job", "quadro", "motivo"}`: il job accodato, le parole del quadro
+    scritte dal sistema (che vanno **dette**), oppure — se `verifica_vetrina` trova
+    qualcosa — nessun job e il motivo, che va detto **al posto** della risposta del
+    modello. Accodare e tacere darebbe un'immagine castigata senza che nessuno sappia
+    perché; prometterla e non accodarla sarebbe peggio.
+    """
+    documento = {"vetrina": (getattr(persona_store, "sezioni", {}) or {}).get("vetrina", {})}
+    vetrina = vetrina_dal_documento(documento)
+    variante, aggiunte = vetrina_con_quadro_erotismo({**vetrina, "scena": idea})
+    problemi = verifica_vetrina(variante, documento, creatore=True)
+    if problemi:
+        return {"job": None, "quadro": [],
+                "motivo": "Questa non te la disegno: " + "; ".join(problemi) + "."}
+    return {"job": image_queue.accoda(nuovo_job(
+        prompt_ritratto(variante, scena=variante["scena"]),
+        negativo=negativo_ritratto(variante, creatore=True),
+        larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
+        passi=vetrina["passi"], fix=vetrina["fix"], seed=vetrina["seed"],
+        richiedente=richiedente, canale="instagram", destinazione=sender_id,
+        famiglia=vetrina["famiglia"], modello=vetrina["modello"],
+        reference_image=vetrina["riferimento"],
+        reference_strength=vetrina["riferimento_forza"])),
+        "quadro": list(aggiunte), "motivo": ""}
+
+
+def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool:
+    """Un'immagine chiesta in DM: sketch, o ritratto dalla vetrina se è sé stessa.
+
+    Il webhook Instagram non passa da ``/channel/reply``: senza questo ponte la
+    richiesta del creatore — e, dalla banda intima, di chi ha dato il consenso —
+    riceverebbe solo una risposta testuale. La consegna resta quella normale del job
+    Instagram, che invia il file pronto al suo scoped ID in DM.
+
+    Due strade, come nel canale, e la **vetrina** è ciò che le distingue: un soggetto
+    qualunque resta uno sketch leggero (famiglia sdxl, 1024, nessun riferimento), una
+    rappresentazione di sé passa dalla vetrina del documento. Il livello intimo non
+    cambia la ricetta: cambia il negativo, e solo per chi ha la porta
+    (`_livello_immagine_intima`).
+
+    Ritorna True quando la richiesta è **presa in carico** — accodata, oppure
+    rifiutata con una spiegazione che va detta (`vip["rifiuto"]`, che sostituisce la
+    risposta del modello): False la lascia alle strade normali, cioè al disegno di
+    promozione e alla risposta testuale.
+
+    I minori non passano di qui: è l'unico controllo che parla prima di sapere di che
+    immagine si tratta, e vale per chiunque, creatore compreso. Nel canale c'era già;
+    in questo ponte mancava del tutto.
+    """
+    if not _livello_immagine_intima(vip, sender_id):
         return False
     richiesta = richiesta_immagine_smart(
         text, identita=persona_store.system_block())
     if not richiesta or not richiesta.get("idea"):
         return False
+    idea = str(richiesta["idea"])
+    if conflitti(f"{idea} {text}".lower(), VIETATI_MINORI):
+        vip["rifiuto"] = ("Questa non te la disegno: non disegno soggetti minorenni, "
+                          "mai e per nessuno.")
+        return True
+    richiedente = str(vip.get("username") or vip.get("level") or "instagram")
     try:
-        image_queue.accoda(nuovo_job(
-            prepara_prompt_canale(richiesta["idea"], text),
-            negativo=negativo_sketch(), larghezza=SKETCH_LATO,
-            altezza=SKETCH_LATO, passi=SKETCH_PASSI,
-            richiedente="creatore", canale="instagram", destinazione=sender_id,
-            famiglia=FAMIGLIA_SDXL))
+        if richiesta_di_se(idea, text, _nome_persona()):
+            esito = _job_ritratto_instagram(sender_id, idea, richiedente)
+        else:
+            esito = {"job": image_queue.accoda(nuovo_job(
+                prepara_prompt_canale(idea, text),
+                negativo=negativo_sketch(), larghezza=SKETCH_LATO,
+                altezza=SKETCH_LATO, passi=SKETCH_PASSI,
+                richiedente=richiedente, canale="instagram", destinazione=sender_id,
+                famiglia=FAMIGLIA_SDXL)), "quadro": [], "motivo": ""}
     except (ValueError, RuntimeError) as error:
-        push_log("instagram", "Disegno del creatore non accodato", str(error)[:160],
+        push_log("instagram", "Disegno in DM non accodato", str(error)[:160],
                  status="warn")
         return False
-    push_log("instagram", "Disegno del creatore accodato",
-             detail=f"destinazione={sender_id}", status="success")
+    if esito["motivo"]:
+        vip["rifiuto"] = esito["motivo"]
+        push_log("instagram", "Disegno in DM rifiutato",
+                 detail=f"destinazione={sender_id} {esito['motivo'][:180]}",
+                 status="warn")
+        return True
+    if esito["quadro"]:
+        vip["quadro"] = esito["quadro"]
+    push_log("instagram", "Disegno in DM accodato",
+             detail=f"id={esito['job']['id']} da={richiedente} "
+                    f"famiglia={esito['job']['famiglia']} "
+                    + (f"quadro={','.join(esito['quadro'])} " if esito["quadro"] else "")
+                    + f"modello={esito['job']['modello_effettivo']}",
+             status="success")
     return True
 
 
@@ -3031,7 +3302,7 @@ def _dispatch_instagram_messages(payload: dict) -> None:
                     risposta_consenso = consent_answer(text)
                     if risposta_consenso:
                         instagram_vips.set_consent(sender_id, risposta_consenso)
-                if (vip.get("level") in ("cerchia", "musa")
+                if (vip.get("level") in INTIMATE_LEVELS
                         and instagram_vips.consent(sender_id) == ""):
                     instagram_vips.set_consent(sender_id, "asked")
                 instagram_memory.append(sender_id, "user", text, username=username)
@@ -3383,6 +3654,17 @@ def image_generate():
                         pose_image=dati.get("pose_image", ""),
                         pose_preset=dati.get("pose_preset", ""),
                         pose_strength=dati.get("pose_strength", 1.0),
+                        # Il volto: il riferimento che la vetrina di Anna dichiara
+                        # (`riferimento`), o quello che un client passa a mano. Un nome
+                        # dentro ComfyUI/input, e la famiglia deve avere l'IP-Adapter:
+                        # dove non ce l'ha il job fallisce in modo visibile invece di
+                        # uscire con un volto qualunque.
+                        reference_image=dati.get("reference_image", ""),
+                        # Il default è quello di `shared/image_jobs` e non un 0.8 scritto
+                        # qui: due copie dello stesso numero sono due default che si
+                        # allontanano, e a divergere sarebbe quella che si legge meno.
+                        reference_strength=dati.get("reference_strength",
+                                                    RIFERIMENTO_FORZA_DEFAULT),
                         lora_name=dati.get("lora_name", ""),
                         lora_strength=dati.get("lora_strength", 0.8))
     except (ValueError, TypeError) as e:
@@ -3732,6 +4014,7 @@ def channels_overview():
         })
     return jsonify({"ok": True, "enabled": channel_policy.enabled,
                     "operator_configured": bool(CHANNEL_OPERATOR),
+                    "cerchia_configured": bool(CHANNEL_CERCHIA),
                     "vitality": mesh_vitality(_node_list()),
                     "contributors": mesh_contributors(_node_list()),
                     "channels": voci})
@@ -7125,7 +7408,7 @@ _ENV_META = [
      "default": ""},
     {"section": "Connettori", "key": "CREATOR_IG_USERNAMES", "type": "str",
      "label": "Handle Instagram del creatore (riconoscimento)",
-     "hint": "Elenco separato da virgola degli handle riconosciuti come creatore (l'operatore), senza @. Es. robertomalvani,malvaniroberto.",
+     "hint": "Elenco separato da virgola degli handle riconosciuti come creatore (l'operatore), senza @. Es. robertomalvani,malvaniroberto. Il creatore accende in DM il livello esplicito del documento (immagine e voce); la banda intima (le muse) lo ottiene col consenso registrato (docs/comfyui.md).",
      "default": ""},
     {"section": "Connettori", "key": "CREATOR_IG_SCOPED_IDS", "type": "str",
      "label": "Instagram-scoped ID del creatore (riconoscimento)",
@@ -7255,7 +7538,11 @@ _ENV_META = [
      "default": ""},
     {"section": "Canali esterni", "key": "CHANNEL_OPERATOR", "type": "str",
      "label": "Operatore (chi è \"io\")",
-     "hint": "Nome autore dell'operatore nel dialogo interno a due voci (più alias separati da virgola). Vuoto = nessuna etichetta speciale.",
+     "hint": "Nome autore dell'operatore senza @ (il driver manda from.username), più alias separati da virgola: nel dialogo interno diventa \"(io)\", entra fra chi può chiedere le immagini (insieme a CHANNEL_CERCHIA), in privato riceve la voce intima del documento (compagna sensuale) e con la banda intima accende il livello esplicito (docs/comfyui.md). Vuota = nessun creatore.",
+     "default": ""},
+    {"section": "Canali esterni", "key": "CHANNEL_CERCHIA", "type": "str",
+     "label": "Cerchia (le muse, chi ha il livello)",
+     "hint": "Handle senza @, separati da virgola: sono la banda intima del documento — la stessa che Instagram assegna a musa contando i messaggi (30), qui dichiarata a mano perché sul canale l'identità è solo l'handle. Chi è in questa riga ha la stessa apertura del creatore sulla vetrina (nudità ed esplicito fuori dal negativo, quando il documento li dichiara), può chiedere immagini come lui e in privato riceve la voce della musa; il quadro (`adult`, `virtual`) lo scrive il sistema. Vuota = il livello resta del solo operatore.",
      "default": ""},
     {"section": "Canali esterni", "key": "CHANNEL_ENABLED", "type": "bool",
      "label": "Canali attivi",
@@ -7371,6 +7658,7 @@ _ENV_RUNTIME_GET = {
     "TOOL_CAPABLE_MODELS": lambda: _TOOL_CAPABLE_OVERRIDE,
     "NATIVE_CHAT_FALLBACK_MODELS": lambda: _NATIVE_CHAT_FALLBACK_OVERRIDE,
     "CHANNEL_OPERATOR": lambda: ",".join(sorted(CHANNEL_OPERATOR)),
+    "CHANNEL_CERCHIA": lambda: ",".join(sorted(CHANNEL_CERCHIA)),
 }
 
 def _coerce_env_val(meta: dict, raw):

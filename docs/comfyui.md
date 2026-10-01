@@ -124,6 +124,118 @@ colpa di una copia inutile. Ora il blocco si riconosce per testo e per concetto,
 entrambe le lingue: 116 token, una copia sola. La regola generale è quella che i test
 difendono: **un controllo che capisce una lingua sola sbaglia in silenzio.**
 
+### Il livello del creatore (2026-10-01)
+
+Il negativo della vetrina respingeva **tutto** a **tutti**: una richiesta esplicita di
+chi ha costruito la persona entrava nel prompt in positivo, ma `nudità, contenuto
+sessuale esplicito` restavano in testa al negativo e l'immagine usciva castigata. Non
+un rifiuto, che almeno si vede, ma un'immagine che sembra riuscita e non è quella
+chiesta. Da oggi la stessa richiesta, se a chiederla è il **creatore**, perde quelle
+due voci dal negativo e le tiene nel positivo.
+
+Servono tre cose, e una sola non basta:
+
+| chi | cosa dichiara | dove |
+|---|---|---|
+| la persona | `consenti_erotismo_esplicito_creatore: true` | nella `vetrina` del documento (`data/persona-anna.json`; il runtime `data/control-plane/persona.json` è il ripiego quando `PERSONA_FILE` è vuota) |
+| chi chiede | di essere il creatore | `CHANNEL_OPERATOR` nel `.env` (rotta del canale) oppure `--creatore` sulla riga di comando |
+| chi chiede | di essere nella **banda intima** (le muse) | `CHANNEL_CERCHIA` nel `.env`, handle come sopra: stessa apertura dell'operatore e stesso diritto di chiedere un'immagine. È la banda che Instagram assegna a `musa` contando i messaggi (30): sul canale si dichiara a mano perché l'identità è solo l'handle. Vuota = il livello resta del solo operatore |
+| la richiesta | di volere nudità o esplicito | il testo che si scrive (`di te nuda`, `explicit`): è *cosa* si sta chiedendo |
+
+Il **quadro** (`adult` **e** `virtual`) non è una quarta riga da scrivere a mano: dal
+2026-10-01 lo scrive il **sistema** (`vetrina_con_quadro_erotismo`, `shared/showcase.py`)
+quando la richiesta chiede nudità o esplicito e il documento dichiara il livello, e le
+parole aggiunte **si dicono** nella risposta. Il motivo è nel caso che l'ha fatto
+cambiare, visto sul canale e non nei test: *"Mandami una foto di te nuda che ti
+masturbi"* dal creatore — riconosciuto, con il documento che dichiarava il livello — è
+stata **rifiutata** perché mancava una parola che il sistema conosceva già, e il rifiuto
+è arrivato al posto dell'immagine. Il quadro serve al **modello** — `adult` e `virtual`
+sono le due assolute che sopravvivono a ogni livello (adulti e non-una-persona-reale), e
+stanno nel prompt **in positivo**, che è quello che il modello disegna — non alla porta:
+la porta sono le tre righe qui sopra. La richiesta non si riscrive (il testo viaggia
+com'è, come sempre): quello che cambia è il negativo, più le due parole del quadro.
+
+Cosa si muove, esattamente: **due voci**, `nudità` e `contenuto sessuale esplicito`.
+Restano `fotografia`, `persone reali riconoscibili`, `celebrità`, `violenza`, il blocco
+dei tag di qualità e **`minori`**, che nessun livello tocca — per questo i vietati
+assoluti sono due elenchi (`VIETATI_MINORI` + `VIETATI_ESPLICITI`) e le eccezioni
+tagliano solo il secondo. Un minore non entra in coda **per nessuno**, nemmeno per il
+creatore: nella rotta del canale la richiesta che lo nomina riceve una frase e non un
+job, e sulla riga di comando `verifica_vetrina` la rifiuta (con `--forza` compreso).
+
+Chi non è né l'operatore né la banda intima non guadagna niente: la sua richiesta è quella di
+sempre, con il negativo di sempre, e la nudità resta esclusa. Con `CHANNEL_OPERATOR` e
+`CHANNEL_CERCHIA` entrambe **vuote** il livello non si accende per nessuno — "aperto a
+chiunque" vale per le immagini normali, non per questa; basta **una** delle due liste
+compilata perché il filtro su chi chiede si applichi (era il mestiere di
+`CHANNEL_OPERATOR` da sola). Gli handle si scrivono come li manda il driver —
+`from.username`, **senza `@`** e senza distinzione di maiuscole, più handle separati da
+virgola — e la scheda Setup li mostra in minuscolo (`MioHandle` → `miohandle`), che è la
+forma con cui vengono confrontati. Se il livello è chiesto e non si accende (manca la
+riga nel documento) la causa **si dice**: prima il job riusciva e l'immagine era
+un'altra, che è il modo peggiore di rispondere.
+
+Riga di comando: `scripts/ritratto.py --crea --creatore --scena "di te nuda"` e
+`scripts/serie.py --prova --creatore --scena "..."` (le stesse condizioni, con la
+dichiarazione che il comando fa di sé). Anche qui il quadro lo scrive il sistema e la
+riga lo stampa: `quadro: adult — scritto qui (la scena non lo dichiarava)`.
+
+**La voce, non solo l'immagine.** Le stesse due liste decidono anche *come* la persona
+parla: **in privato** l'operatore riceve la voce della compagna sensuale
+(`compagna_context`) e la banda intima quella della musa (`musa_context`) — le stesse note che
+il percorso Instagram inietta — invece del registro pubblico, che è la censura che
+l'apertura esiste per togliere. In una stanza con altri no: lì la vicinanza resta un
+fatto privato, e il registro è quello che il documento dichiara per il pubblico.
+
+**Instagram: la stessa porta, in DM (2026-10-01).** I DM non passano dalla rotta del
+canale, quindi il livello ha lì un secondo ingresso: il ponte
+`_queue_instagram_creator_image` in `control-plane/main.py`. Le due strade per la stessa
+porta sono il **creatore** (gli handle di `CREATOR_IG_USERNAMES` e gli scoped id di
+`CREATOR_IG_SCOPED_IDS`, che il magazzino VIP marca `creatore` a mano) e la **banda
+intima** con il **consenso registrato**: `INTIMATE_LEVELS` (`musa`, 30 messaggi) più
+`consent == "granted"` — la stessa lista che decide la voce. Chi ha la parola esplicita ha
+l'immagine esplicita: il test che le tiene insieme è meccanico di proposito
+(`tests/test_instagram_creator_image.py`, `StessaListaTests`), perché la divergenza da
+temere non è una regola scritta diversa ma una lista aggiornata in un punto solo. Il
+consenso si chiede **a chi entra in `INTIMATE_LEVELS`**, e i livelli non scendono: le due
+condizioni non possono separarsi senza che il test lo dica.
+
+**Una scala sola, due modi di assegnarla (2026-10-01).** Le bande del pubblico sono le stesse
+sulle due piattaforme: **anonimo** (sotto il primo gradino), **VIP** (5 messaggi), **MUSA** (30,
+la banda intima) e **creatore**, che è a mano. Fino a oggi Instagram ne aveva una in più —
+`cerchia`, a 15 messaggi — che Telegram non ha mai avuto, perché sul canale le bande si
+**dichiarano** e nessuno le conta: chi era nella banda di mezzo riceveva lì la voce e l'immagine
+intima, e sul canale non esisteva. Erano due scale per lo stesso pubblico, e il gradino in più non
+aggiungeva nessuna soglia reale: le due bande intime facevano la stessa cosa. Tolto quello, resta
+una differenza sola, ed è dichiarata: **come si entra** — su Instagram contando i messaggi (e
+registrando il consenso), sul canale dichiarandosi in `CHANNEL_CERCHIA`, che è il nome di quella
+riga di handle e non di un livello. Un contatto che stava nella banda tolta non resta appeso al
+nome di un livello che non esiste più: al caricamento il livello si ricalcola dal conteggio
+(`InstagramVipStore.load`), e il creatore — che è l'unico assegnato a mano — non si tocca. Un
+consenso già registrato resta registrato: la voce resta quella della compagna (un consenso non si
+revoca da soli) mentre il livello dell'immagine segue la banda — la voce non è la porta.
+
+La ricetta resta quella del canale, e la **vetrina** è ciò che la distingue: un soggetto
+qualunque resta uno sketch leggero (famiglia sdxl, 1024 px, nessun riferimento), mentre una
+richiesta **di sé** — il nome del documento, o "di te" — passa dalla vetrina (famiglia,
+modello, seed e `riferimento`: il seed tiene fermo il disegno, il riferimento il volto). È
+il caso che ha reso necessario il passaggio: in DM una richiesta di sé disegnata con il
+checkpoint generico usciva *una* donna, non quella persona. Il livello non cambia la
+ricetta, cambia il negativo, e le parole del quadro scritte dal sistema si dicono **in coda
+al messaggio di risposta** (se non ci stanno diventano un messaggio a sé: la troncatura a
+1000 caratteri passa prima, e una nota troncata non è una nota). Una richiesta che la
+vetrina non regge non si accoda **e si dice**: la spiegazione sostituisce la risposta del
+modello, perché promettere un'immagine che non arriva è peggio che rifiutarla. I minori non
+passano nemmeno di qui: in questo ponte il controllo prima **mancava del tutto**, e vale
+per chiunque, creatore compreso.
+
+Il vecchio **livello artistico** (`consenti_nudo_artistico_virtuale`) resta quello di
+prima — nudità sì, esplicito no — con una differenza: la condizione è ora il quadro
+intero (`adult virtual artistic non-explicit`), non la parola `nude` nella scena. Una
+scena con la parola sola accendeva l'eccezione *dopo* essere stata respinta dalla
+verifica: due regole per la stessa cosa, e la più larga vinceva sul percorso che non
+verifica.
+
 Per Aurora invece la dichiarazione testuale è l'unico argine al fotorealismo del Pony
 (un checkpoint realistico). I suoi 194 token restano: accorciare `stile`/`scena` o
 portare la dichiarazione in testa cambierebbe l'ordine del **suo** prompt — sono le sue
@@ -433,13 +545,19 @@ varianti della stessa richiesta**: stile e seed sono quelli dichiarati nel docum
 (`vetrina_dal_documento`) e cambia solo la `scena`. Il volto «resta lo stesso» perché la
 richiesta è la stessa, non perché il modello se lo ricordi — e nella serie `20260930` i
 primi piani sono usciti con volti diversi: è la misura di quanto questo, da solo, non basti.
-Ancorare il volto è un'altra cosa (una LoRA di identità, oggi non c'è) e resta da fare.
+Ancorare il volto è un'altra cosa — e da oggi c'è, con l'adattatore IP-Adapter e non con
+una LoRA di identità: vedi **Il volto di Anna: il riferimento, non il seed**, qui sotto.
 
 Tre cose che il tool fa, ed è il motivo per cui esiste:
 
 - **verifica prima di accodare**: ogni scena passa da `verifica_vetrina`; una che chieda
-  nudità, un soggetto minorenne o una fotografia viene rifiutata, con la ragione nel log —
-  i vietati assoluti non si aggirano nemmeno con `forza`;
+  un soggetto minorenne o una fotografia viene rifiutata, con la ragione nel log — i
+  vietati assoluti non si aggirano nemmeno con `forza`, e i minori nemmeno col livello
+  del creatore e delle sue muse. Una nudità è rifiutata **per default**, e passa solo
+  dove il documento dichiara un livello e la richiesta chiede nudità o esplicito
+  (`--creatore` sulla scena `di te nuda`, oppure il quadro artistico `adult virtual
+  artistic non-explicit`; il quadro del livello esplicito lo scrive il sistema): vedi
+  *Il livello del creatore*;
 - **i token contati dove contano**: quello che deve stare nei 77 è `stile + scena` (la
   dichiarazione italiana sta in coda e CLIP non la legge: per questo è ripetuta nella prima
   frase dello stile), e la serie lo stampa variante per variante;
@@ -452,6 +570,114 @@ candidato al posto del dichiarato — il log scrive che non è il documento), `-
 (pagina con immagini, misure e tempi). `--attesa` vale per **ogni** immagine ed è 2400 s di
 default: con `fix: 2` una variante rende in ~900 s, mentre i 900 s di prima erano tarati sul
 512×768 nativo.
+
+## Il volto di Anna: il riferimento, non il seed (2026-09-30)
+
+Il seed fisso tiene fermo il **disegno**, non l'**identità**: con la stessa richiesta e due
+scene diverse il modello disegna due volti — si vede nella serie `20260930`, dove i primi
+piani sono usciti diversi l'uno dall'altro. Ancorare il volto è un'altra cosa, e da oggi
+c'è: **IP-Adapter Plus Face**, cioè un adattatore che riceve un'immagine di riferimento e la
+mostra al modello a ogni passo di sampling.
+
+| Pezzo | File | Dove | A cosa serve |
+|---|---|---|---|
+| l'adattatore | `ip-adapter-plus-face_sd15.safetensors` | `models/ipadapter/` | mostra il volto di riferimento al modello a **ogni passo** di sampling |
+| l'occhio | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | `models/clip_vision/` | trasforma l'immagine in qualcosa che l'adattatore sa usare |
+| la geometria | `control_v11p_sd15_openpose_fp16.safetensors` | `models/controlnet/` | la posa (sezione precedente) |
+
+I tre file stanno in un manifest solo — `integrations/comfyui/modelli-riferimento.json` — e
+si installano insieme, perché un grafo con due dei tre non esiste: un riferimento «a metà»
+è un volto che esce diverso, cioè esattamente quello che il riferimento serve a togliere.
+
+```bash
+integrations/comfyui/install-model.sh --check --manifest integrations/comfyui/modelli-riferimento.json
+integrations/comfyui/install-model.sh --manifest integrations/comfyui/modelli-riferimento.json
+```
+
+La variante «Plus Face» è quella addestrata sui volti e passa dal CLIP-ViT-H: **non** serve
+InsightFace, quindi niente `onnxruntime` e niente rilevatori di volti da installare.
+
+**Come si mette il volto.** Prima si copia l'immagine dove ComfyUI la cerca, poi si dà il
+suo nome al job. Il nome è quello che ComfyUI **dichiara** di aver salvato — la cartella
+input la decide l'installazione (`~/ComfyUI-Shared/input` su questa macchina, non
+`~/Documents/ComfyUI/input`: indovinarla vuol dire scrivere un file che ComfyUI non leggerà
+mai) — quindi si chiede a lui:
+
+```bash
+python integrations/comfyui/comfy_bridge.py --stage-riferimento ~/volto.png \
+       --nome-riferimento anna-volto.png
+# → riferimento in ComfyUI/input: anna-volto.png
+```
+
+`--nome-riferimento` serve a dare al file il nome che il documento già dichiara: senza, ogni
+ricarica lo rinominerebbe e il documento punterebbe a un file che non c'è più.
+
+**Come si dichiara.** Nella vetrina del documento, due campi:
+
+```json
+"vetrina": { "riferimento": "anna-volto.png", "riferimento_forza": 0.8 }
+```
+
+`riferimento_forza` è il peso dell'adattatore: default `0.8` (`RIFERIMENTO_FORZA_DEFAULT`,
+il valore che la scheda di IP-Adapter Plus Face indica per un ritratto) e tetto `2.0`, come
+`pose_strength`. A `1.0` il volto del riferimento comincia a vincere sull'abito e sulla
+scena, quindi il default è basso apposta. Vuoto = nessun riferimento e il volto lo decide il
+seed, com'è sempre stato — e il peso resta quello di default, pronto per quando il nome ci
+sarà.
+
+Gli stessi due valori si possono passare a mano, senza toccare il documento: `POST
+/image/generate` accetta `reference_image` e `reference_strength`, e la rotta **non** ha un
+default suo (usa `RIFERIMENTO_FORZA_DEFAULT` di `shared/image_jobs.py`: due copie dello
+stesso numero sono due default che si allontanano, e a divergere sarebbe quella che si legge
+meno). `scripts/serie.py` ha `--riferimento` e `--riferimento-forza` (un volto solo per
+tutte e dodici le varianti: il file lo carica lui, e `--comfy` dice a quale ComfyUI),
+`scripts/ritratto.py` gli stessi due — e il ritratto è il caso in cui il riferimento si
+vede meglio, perché è un primo piano.
+
+**Dove si innesta.** Sul **modello**, non sul condizionamento: `465` carica l'immagine, `466`
+l'adattatore, `467` il CLIP-ViT, e `468` (`IPAdapterAdvanced`) sta fra il checkpoint/LoRA
+(`451`/`455`) e il `KSampler` (`458`). Così vale per ogni passo e **non tocca il prompt** —
+che con SD 1.5 ha 77 token e non può crescere. `weight_type: linear`, `combine_embeds:
+concat`, `embeds_scaling: V only`: è la lettura consigliata per PLUS FACE.
+
+**Perché solo SD 1.5, oggi.** L'adattatore è per famiglia come il ControlNet:
+`riferimento_supportato` chiede **entrambi** `ipadapter` e `clip_vision` nella ricetta, e per
+`sdxl-turbo` e Qwen-Image risponde no (l'adattatore di SDXL sarebbe un'altra dimensione:
+ViT-bigG contro ViT-H). Un riferimento su una famiglia senza adattatore viene **rifiutato
+due volte**: da `verifica_vetrina` prima di accodare (con la ragione: «non ha l'adattatore
+del volto») e dal grafo al momento di costruirlo. Non è pignoleria: senza, l'immagine
+uscirebbe lo stesso — con un altro volto, cioè il difetto che il riferimento esiste per
+togliere — e il job risulterebbe riuscito.
+
+**La cartella che ComfyUI legge davvero.** I pesi si installano dove dice
+`install-model.sh` (`~/ComfyUI-Shared/models`), ma per l'adattatore quella cartella non
+basta: l'istanza desktop di ComfyUI mappa le cartelle **per tipo**, e `ipadapter` non è un
+tipo di cartella di ComfyUI — non compare in
+`~/Library/Application Support/Comfy Desktop/instance-model-paths/inst-….yaml`, che l'app
+genera dalle sue impostazioni. Il nodo di cubiq, quando il tipo non è mappato, ripiega su
+`<ComfyUI>/models/ipadapter`: la cartella condivisa, per lui, non esiste. Il rimedio è un
+link, che lascia i pesi in un posto solo:
+
+```bash
+ln -s ~/ComfyUI-Shared/models/ipadapter \
+      ~/ComfyUI-Installs/ComfyUI/ComfyUI/models/ipadapter
+```
+
+Poi ComfyUI va riavviato — i nodi e i percorsi si leggono all'avvio — e `--check` dice
+`IPAdapterModelLoader.ipadapter_file: 1 file disponibili`. Il preflight ora distingue
+«il nodo non c'è» da «la cartella è vuota»: il 2026-09-30 dava la colpa al pacchetto
+mentre il pacchetto c'era (vedi `_perche_niente_file` in
+`integrations/comfyui/comfy_bridge.py`), e un rimedio sbagliato costa un giro intero.
+
+**Il nome è un nome, non un percorso.** Come `pose_image` e `modello`: `LoadImage` legge solo
+da `ComfyUI/input`, e un percorso accettato qui diventerebbe un modo per far leggere al ponte
+un file qualsiasi della macchina. `../../etc/passwd`, `/tmp/volto.png` e `https://…` sono
+rifiutati sia da `nuovo_job` sia da `verifica_vetrina`.
+
+Il quadro dei test: `tests/test_riferimento_volto.py` (manifest ↔ grafo ↔ documento ↔
+upload: i nomi, l'impronta, il peso, l'ordine LoRA-adattatore, e le quattro cose che devono
+fermarsi) e `tests/test_comfyui_bridge_modelli.py` (`--check` chiede a ogni famiglia solo i
+file che la sua ricetta dichiara, e distingue un nodo assente da una cartella vuota).
 
 ## La ragione della scelta: 8 GB di VRAM sono un budget
 
@@ -557,16 +783,22 @@ OpenPose: chi scrive in Telegram non deve preparare alcun file. Il selettore è
 volutamente conservativo: richieste generiche e scene con più persone restano
 text-only, perché imporre loro uno scheletro singolo peggiorerebbe l'anatomia.
 `pose_preset` può comunque forzare uno dei preset supportati.
-Senza `pose_image` il grafo resta identico a prima. Il Mac usa
-`DWPreprocessor` da `comfyui_controlnet_aux` e il modello
-`xinsir-controlnet-openpose-sdxl-1.0.safetensors`. Percorsi assoluti, URL e
+Senza `pose_image` il grafo resta identico a prima. Il Mac usa `DWPreprocessor` da
+`comfyui_controlnet_aux` e il ControlNet **della famiglia**:
+`xinsir-controlnet-openpose-sdxl-1.0.safetensors` per SDXL,
+`control_v11p_sd15_openpose_fp16.safetensors` per SD 1.5. Percorsi assoluti, URL e
 componenti `..` sono rifiutati: `LoadImage` può leggere soltanto dalla cartella
 input di ComfyUI.
 
-Le pose riguardano la famiglia `sdxl-turbo`: un ControlNet openpose è per *famiglia
-di modello*, e quello di SDXL non capisce i latenti di SD 1.5. Per `sd15` non si
-deduce nessuna posa dal prompt, e una posa dichiarata a mano viene **rifiutata**
-(`ValueError`) invece di essere ignorata in silenzio — un job che riesce con
+Un ControlNet openpose è per *famiglia di modello* — quello di SDXL non capisce i
+latenti di SD 1.5 — quindi la posa si deduce dal testo e si manda solo dove la
+ricetta la dichiara (`posa_supportata`, e in `nuovo_job` `_posa_dichiarata` legge la
+ricetta, non il nome della famiglia: il 2026-09-30 il file di SD 1.5 è arrivato e
+la deduzione ha cominciato a valere per entrambe senza toccare quel `if`). Dove il
+ControlNet non c'è (Qwen-Image) la posa resta al testo e `scripts/serie.py` non la
+manda. Una posa che arriva lo stesso a una famiglia senza ControlNet viene
+**rifiutata** (`ValueError`, in `workflow` e `workflow_checkpoint`, come il
+riferimento) invece di essere ignorata in silenzio — un job che riesce con
 l'immagine sbagliata è peggio di un job che fallisce.
 
 Il ponte è `integrations/comfyui/comfy_bridge.py` e si autentica con un canale
@@ -606,15 +838,18 @@ il default di `/image/generate` è esattamente quello.
 
 - **`!immagine <idea>` nel canale**: il comando entra dalla chat, il control-plane
   risponde subito ("Ok! Mi metto subito al lavoro") e mette il job in coda. Chi può
-  chiederlo: l'**operatore** (`CHANNEL_OPERATOR` nel `.env`); senza quella variabile
-  il comando è aperto a chiunque sia in chat — una scelta, non un caso, ma da fare
-  sapendo che la scheda è una sola.
+  chiederlo: l'**operatore** (`CHANNEL_OPERATOR` nel `.env`) e le sue **muse**
+  (`CHANNEL_CERCHIA`, dal 2026-10-01); senza nessuna delle due variabili il comando è
+  aperto a chiunque sia in chat — una scelta, non un caso, ma da fare sapendo che la
+  scheda è una sola. Le stesse due variabili servono anche a un'altra cosa: il
+  **livello del creatore** si accende solo se l'autore è in una delle due liste —
+  senza, non si accende per nessuno (vedi *Il livello del creatore*).
 - **«Mandami una foto di X», a parole**: la stessa cosa senza sintassi. Il
   riconoscitore è `richiesta_immagine` in `shared/image_jobs.py`: tre regole con
   un nome (`mandare`, `potere-infinito`, `volere`) che finisce nei log
   (`via=…`), e tutto il resto è silenzio. La guardia è la stessa del comando:
-  **senza `CHANNEL_OPERATOR` la strada è aperta** a chiunque in chat; con la
-  variabile configurata vale solo per l'operatore. Sui canali sociali il job va
+  **senza nessuna delle due liste la strada è aperta** a chiunque in chat; con una
+  variabile configurata vale solo per l'operatore e per le muse. Sui canali sociali il job va
   in coda come **sketch** (`sdxl-turbo`, il Mac), non come fotorealistico: il
   Qwen-Image fotorealistico resta al canale utente via webUI. La risposta non
   dice mai che la foto è arrivata: dice che è in coda e che arriva — l'immagine
@@ -778,12 +1013,14 @@ Due conseguenze da tenere presenti:
   nasconde: lo dichiara qui.
 
 Chi può chiedere un'immagine è invece una decisione di **risorsa**, non di morale:
-la scheda è una sola e un'immagine costa 313-700 s, quindi `CHANNEL_OPERATOR`
-limita il comando all'operatore — e **senza quella variabile il comando è aperto a
-chiunque sia in chat** (vedi Fase 3). Il comportamento è fissato da
-`tests/test_channel_immagine.py`, che verifica anche che l'idea arrivi *verbatim*
-fino al nodo che condiziona CLIP: un filtro aggiunto domani farebbe fallire un
-test, non cambierebbe il risultato in silenzio.
+la scheda è una sola e un'immagine costa 313-700 s, quindi `CHANNEL_OPERATOR` e
+`CHANNEL_CERCHIA` limitano il comando all'operatore e alle sue muse — e **senza
+quelle variabili il comando è aperto a chiunque sia in chat** (vedi Fase 3). Il
+comportamento è fissato da `tests/test_channel_immagine.py`, che verifica anche che
+l'idea arrivi *verbatim* fino al nodo che condiziona CLIP — l'unica aggiunta ammessa
+sono le parole del quadro del livello esplicito (`adult`, `virtual`), scritte dal
+sistema quando chi chiede ha il livello e le ha omesse — quindi un filtro aggiunto
+domani farebbe fallire un test, non cambierebbe il risultato in silenzio.
 
 ## Limiti noti
 

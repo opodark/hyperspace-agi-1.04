@@ -18,7 +18,7 @@ voce — non un tool. Tutta la strategia parte da qui.
 | Identità | due sorelle IA, **dichiarate** (la disclosure non si aggira) |
 | Voce | Aurora affilata/filosofica, Anna riflessiva che "chiede alla sorella" |
 | Tema pubblico | arte, poesia, filosofia, sogno — l'erotismo come conoscenza, non consumo |
-| Tema privato | compagna sensuale **solo** per la cerchia che lo richiede (consenso registrato) |
+| Tema privato | compagna sensuale **solo** per la banda intima (`musa`) che lo richiede (consenso registrato) |
 | Diversificatore | l'onestà + la relazione a due voci + l'arte generata (volto stabile via seed) |
 
 Regola: **guidare con il pensiero, lasciare il sensuale come sottofondo** nel
@@ -34,7 +34,7 @@ Obiettivi (ipotesi da validare, non promesse):
 
 - **30 giorni**: un canale principale con cadenza costante, 1 serie che funziona
   (misurata), primi follower attivi (non bot).
-- **60 giorni**: 2 serie consolidate, funnel DM→cerchia→newsletter attivo.
+- **60 giorni**: 2 serie consolidate, funnel DM→musa→newsletter attivo.
 - **90 giorni**: decidere con i numeri se scalare (secondo canale) o correggere.
 
 ## 3. Canali e ruoli
@@ -62,7 +62,7 @@ corsia immagine+poesia, che è dove il progetto è già forte. Il sogno illustra
 | **Anna chiede / Aurora risponde** | dialogo fra le due, da screenshot | `post_loop`/`post_gen` | 3/settimana |
 | **La poesia del giorno** | immagine tipografica con versi | `post_gen` (versi in didascalia+immagine) | 3/settimana |
 | **Il ritratto** | il volto stabile che evolve | `ritratto.py`/`showcase.py` (seed) | 1/settimana |
-| **La cerchia** | Q&A, risposta pubblica a una domanda scelta | DM + memoria | 1/settimana |
+| **Le muse** | Q&A, risposta pubblica a una domanda scelta | DM + memoria | 1/settimana |
 
 Cadenza totale consigliata: **1 post/giorno** (il sogno) + 1-2 serie a rotazione.
 La costanza vale più del volume: è l'algoritmo più affidabile che esista.
@@ -71,7 +71,7 @@ La costanza vale più del volume: è l'algoritmo più affidabile che esista.
 
 1. **Rispondere a ogni DM** — già automatizzato (`instagram_outbox` con retry).
    Su IG i DM alimentano la reach.
-2. **Cerchia/VIP + consenso** — già implementato (`instagram_vip` + tier
+2. **VIP → musa + consenso** — già implementato (`instagram_vip` + tier
    intima): riconoscere per nome chi partecipa ("il merito va riconosciuto a
    voce"), e il sensuale esplicito si sblocca solo con consenso registrato.
 3. **Commentare i post altrui** (`instagram_add_comment`) nella nicchia AI art /
@@ -86,7 +86,7 @@ scoperta (feed + commenti)
       ↓
 DM (risposta calda, sempre)
       ↓
-cerchia (15 messaggi) + consenso → compagna sensuale
+musa (30 messaggi) + consenso → compagna sensuale
       ↓
 newsletter (il sogno/la poesia della settimana)
 ```
@@ -103,7 +103,7 @@ coi numeri.
 |---|---|---|
 | follower nuovi/settimana | attrazione | > 0 costante, non bot |
 | engagement rate (salvataggi+condivisioni/reach) | risonanza | > 2-3% |
-| DM → cerchia (conversione) | il legame funziona | in crescita |
+| DM → musa (conversione) | il legame funziona | in crescita |
 | ritorno (contatti che tornano) | ritenzione | > 20% |
 | performance per serie | cosa raddoppiare/cosa togliere | — |
 
@@ -116,7 +116,7 @@ vips, diario). Un piccolo script di report (lo stesso pattern di
 - **Niente Reels/Storie** (Graph API): non inseguire il video, possedere
   immagine+poesia.
 - **Shadowban** per contenuti suggestivi: guidare con arte/filosofia, tenere il
-  sensuale nel privato (DM/cerchia), dove è già gated.
+  sensuale nel privato (DM, la banda intima), dove è già gated.
 - **Automazione outbound** (polsia.com o simili): il cold-contact automatico su
   Instagram è fuori dalle API legittime del progetto e può costare l'account.
   Se si usa, limitarlo a scoperta/manualità, mai a DM di massa ai non-follower.
@@ -130,14 +130,15 @@ vips, diario). Un piccolo script di report (lo stesso pattern di
 - Attivare `INSTAGRAM_DREAM_PUBLISH_ENABLED` e pubblicare il sogno ogni notte.
 - Rispondere a ogni DM; cominciare i commenti nella nicchia (5-10/giorno).
 - Telegram: stesso contenuto, per collaudare tono/ritmo senza rischiare IG.
-- KPI: follower, engagement rate, DM→cerchia.
+- KPI: follower, engagement rate, DM→musa.
 
 **60 giorni — consolida il funnel**
 - Newsletter settimanale (il sogno + la poesia della settimana), link-in-bio al
   sito.
-- Formalizzare la cerchia: riconoscimento pubblico dei VIP (col consenso).
+- Formalizzare la banda intima (le muse): riconoscimento pubblico dei VIP (col
+  consenso).
 - Tenere le 2 serie che rendono di più, spegnere le altre.
-- KPI: conversione DM→cerchia→newsletter, ritorno.
+- KPI: conversione DM→musa→newsletter, ritorno.
 
 **90 giorni — decidi coi numeri**
 - Se il ritmo tiene: secondo canale o più volume.

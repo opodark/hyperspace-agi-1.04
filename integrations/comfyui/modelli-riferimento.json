@@ -1,0 +1,64 @@
+{
+  "$commento": [
+    "Manifest degli accessori del volto di Anna: la POSA (ControlNet openpose di",
+    "SD 1.5) e il RIFERIMENTO (IP-Adapter Plus Face + il CLIP che lo legge).",
+    "",
+    "Tre file da due repository, perche' sono tre cose diverse: chi vincola la",
+    "geometria del corpo, chi legge il volto di riferimento, e l'occhio (CLIP-ViT-H)",
+    "che lo trasforma in qualcosa che il modello sa usare.",
+    "",
+    "Perche' un manifest MULTI-FILE e non tre manifest: i tre file si installano",
+    "insieme — un grafo con due dei tre non esiste, e un riferimento a meta' e' un",
+    "volto che esce diverso. Con tre comandi separati, meta' installazione sarebbe lo",
+    "stato piu' probabile, e a scoprirlo sarebbe il preflight del ponte al primo",
+    "riferimento, non questa riga.",
+    "",
+    "I nomi sono gli stessi che shared/image_jobs.py carica (MODELLO_SD15:",
+    "`controlnet_openpose`, `ipadapter`, `clip_vision`) e i test li confrontano:",
+    "rinominare un file da un lato solo fa fallire un test, non un ritratto.",
+    "",
+    "`file_remoto` e' il percorso dentro il repository, `file` e' il nome con cui il",
+    "file vive nella cartella di ComfyUI. Per il CLIP vision i due differiscono: nel",
+    "repository di IP-Adapter il file e' il generico `models/image_encoder/model.safetensors`,",
+    "mentre il nome che serve a chi lo trova su disco fra un anno e' il nome vero del",
+    "modello, CLIP-ViT-H-14-laion2B-s32B-b79K."
+  ],
+  "sorgente": "Hugging Face — comfyanonymous/ControlNet-v1-1_fp16_safetensors e h94/IP-Adapter (entrambi pinnati a un commit)",
+  "modello_base": "SD 1.5",
+  "licenza": "Open RAIL-M (ControlNet 1.1, lllyasviel) · Apache-2.0 (IP-Adapter, h94)",
+  "nota_licenza": "I pesi NON sono distribuiti con HyperSpace: si scaricano a parte e conservano la licenza del proprio autore (THIRD-PARTY-NOTICES.md). Il repository della conversione fp16 (comfyanonymous) non dichiara una licenza propria: sono gli stessi pesi di lllyasviel/ControlNet-v1-1, ricodificati in fp16, e la licenza di quelli e' Open RAIL-M. Il repository h94/IP-Adapter (Tencent AI Lab) dichiara Apache-2.0. Nessuno dei due passa da un volto reale: il riferimento e' un'immagine di Anna, cioe' di una persona virtuale dichiarata tale.",
+  "file": [
+    {
+      "ruolo": "controlnet_openpose",
+      "descrizione": "ControlNet 1.1 openpose: vincola la geometria del corpo (spalle, fianchi, arti) senza copiare volto, abiti o sfondo della sorgente. E' la variante fp16 (689 MiB invece di 1,38 GiB): stesso grafo, meta' memoria — su un Mac con 18 GB di RAM condivisa la differenza si vede.",
+      "repo": "comfyanonymous/ControlNet-v1-1_fp16_safetensors",
+      "revisione": "ab830a51c5c573a5b85bfdbaa3ae0ab7e1baf5f7",
+      "file": "control_v11p_sd15_openpose_fp16.safetensors",
+      "destinazione": "controlnet",
+      "byte": 722601100,
+      "sha256": "4003c1da17b0e4ba444e02140e1c0d83bb24b79e4dcfd613c3a554d38f0f89c7"
+    },
+    {
+      "ruolo": "ipadapter",
+      "descrizione": "IP-Adapter Plus Face per SD 1.5: mostra al modello il volto di riferimento a ogni passo di sampling. La variante «Plus Face» e' quella addestrata sui volti (l'identita' conta piu' della scena), e passa dal CLIP-ViT-H — non da InsightFace, quindi niente onnxruntime ne' rilevatori di volti da installare.",
+      "repo": "h94/IP-Adapter",
+      "revisione": "018e402774aeeddd60609b4ecdb7e298259dc729",
+      "file_remoto": "models/ip-adapter-plus-face_sd15.safetensors",
+      "file": "ip-adapter-plus-face_sd15.safetensors",
+      "destinazione": "ipadapter",
+      "byte": 98183288,
+      "sha256": "1c9edc21af6f737dc1d6e0e734190e976cfacf802d6b024b77aa3be922f7569b"
+    },
+    {
+      "ruolo": "clip_vision",
+      "descrizione": "CLIP-ViT-H-14 (laion2B-s32B-b79K): l'encoder con cui IP-Adapter legge il riferimento e con cui legge la richiesta «piu' simile a quello». E' il file che il repository chiama `models/image_encoder/model.safetensors`, salvato con il suo nome vero — lo stesso che cerca anche il caricatore unificato di ComfyUI_IPAdapter_plus.",
+      "repo": "h94/IP-Adapter",
+      "revisione": "018e402774aeeddd60609b4ecdb7e298259dc729",
+      "file_remoto": "models/image_encoder/model.safetensors",
+      "file": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+      "destinazione": "clip_vision",
+      "byte": 2528372448,
+      "sha256": "6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030"
+    }
+  ]
+}

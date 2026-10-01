@@ -28,17 +28,22 @@ def test_conta_le_serie_e_lo_stato_pubblicazione():
     assert r["published"]["published"] == 1
 
 
-def test_conta_i_livelli_della_cerchia_e_la_ritenzione():
+def test_conta_le_bande_del_pubblico_e_la_ritenzione():
     people = {
         "1": {"level": "vip", "messages": 6, "last_seen": "2026-09-29T09:00:00+00:00"},
-        "2": {"level": "cerchia", "messages": 15, "last_seen": "2026-09-10T09:00:00+00:00"},
+        "2": {"level": "musa", "messages": 30, "last_seen": "2026-09-10T09:00:00+00:00"},
         "3": {"level": "", "messages": 2, "last_seen": "2026-09-29T09:00:00+00:00"},
+        "4": {"level": "creatore", "messages": 1, "last_seen": "2026-09-29T09:00:00+00:00"},
     }
     now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
     r = compute_growth([], people, days=7, now=now)
-    assert r["vips"]["total_contacts"] == 3
+    assert r["vips"]["total_contacts"] == 4
     assert r["vips"]["levels"]["vip"] == 1
-    assert r["vips"]["levels"]["cerchia"] == 1
+    assert r["vips"]["levels"]["musa"] == 1
+    assert r["vips"]["levels"]["creatore"] == 1
     assert r["vips"]["levels"]["none"] == 1
-    assert r["vips"]["active_last_n_days"] == 2
-    assert r["vips"]["total_messages"] == 23
+    # Le bande del report sono quelle della scala: un gradino tolto (`cerchia`) non
+    # resta come riga a zero, e chi non ha banda non finisce in una banda per sbaglio.
+    assert "cerchia" not in r["vips"]["levels"]
+    assert r["vips"]["active_last_n_days"] == 3
+    assert r["vips"]["total_messages"] == 39

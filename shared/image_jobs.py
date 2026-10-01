@@ -141,12 +141,60 @@ def scegli_pose_preset(prompt: str) -> str:
     return ""
 
 
+def _posa_dichiarata(famiglia: str) -> bool:
+    """True se la ricetta di questa famiglia dichiara un ControlNet openpose.
+
+    La domanda giusta non è «è SDXL?» ma «c'è il ControlNet?»: il 2026-09-30 SD 1.5
+    non ce l'aveva e la deduzione dal testo valeva solo per il Pony; ora il file c'è
+    (`control_v11p_sd15_openpose_fp16`, vedi `MODELLO_SD15`) e la stessa deduzione
+    vale per entrambe. Legarla al NOME della famiglia avrebbe voluto dire riscrivere
+    quel `if` il giorno in cui il file arrivava — o dimenticarsene, e avere una
+    famiglia che sa posare e non posa mai.
+    """
+    ricetta = RICETTE_CHECKPOINT.get(str(famiglia or "").strip().lower()) or {}
+    return bool(ricetta.get("controlnet_openpose"))
+
+
+def posa_supportata(famiglia: str) -> bool:
+    """Vero se la famiglia ha il ControlNet che sa fare una posa (openpose).
+
+    È `_posa_dichiarata` con un nome pubblico, e serve a chi decide le pose FUORI
+    da qui: la serie di Anna sceglie variante per variante quale posa chiedere, e
+    deve poter fare la stessa domanda che fa `nuovo_job` senza importare una
+    funzione privata. La domanda resta «c'è il ControlNet?», non «è SDXL?».
+    """
+    return _posa_dichiarata(famiglia)
+
+
+def riferimento_supportato(famiglia: str) -> bool:
+    """Vero se la famiglia ha l'adattatore del volto (IP-Adapter + CLIP-ViT).
+
+    Servono entrambi: l'adattatore è ciò che aggancia il riferimento al modello, il
+    CLIP-ViT è l'occhio che lo legge. Una famiglia che ne dichiara uno solo non è
+    «quasi pronta» — è una famiglia che un riferimento non lo sa usare, e il grafo
+    lo direbbe fallendo a ogni job. Dirlo PRIMA di accodare (lo fa la vetrina) è la
+    differenza fra un documento che si corregge e dodici varianti morte.
+    """
+    ricetta = RICETTE_CHECKPOINT.get(str(famiglia or "").strip().lower()) or {}
+    return bool(ricetta.get("ipadapter") and ricetta.get("clip_vision"))
+
+
+# Il peso del riferimento (0..2). Il default 0.8 è quello che la scheda di
+# IP-Adapter Plus Face indica per un ritratto: a 1.0 il volto del riferimento
+# comincia a vincere sull'abito e sulla scena. Sta qui e non due volte nel modulo
+# (la firma di `nuovo_job` e il grafo) perché due copie dello stesso numero sono
+# due default che si allontanano: il grafo usava 0.8 anche quando il job ne
+# dichiarava un altro solo perché qualcuno se ne ricordava.
+RIFERIMENTO_FORZA_DEFAULT = 0.8
+
+
 def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
               altezza: int = 768, passi: int = 25, seed: int = 0,
               fix: int = 0,
               richiedente: str = "", canale: str = "", modello: str = "",
               destinazione: str = "", famiglia: str = "",
               pose_image: str = "", pose_preset: str = "", pose_strength: float = 1.0,
+              reference_image: str = "", reference_strength: float = RIFERIMENTO_FORZA_DEFAULT,
               lora_name: str = "", lora_strength: float = 0.8,
               adesso: float | None = None) -> dict:
     """Costruisce un job valido. Solleva ValueError se il prompt è vuoto.
@@ -166,6 +214,10 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
     `famiglia` dice quale modello eseguirà il job (default Qwen-Image 2.1;
     `sdxl-turbo` per i job leggeri del Mac). Una famiglia sconosciuta cade sul
     default invece di essere rifiutata.
+
+    `reference_image` è il volto di riferimento, un nome dentro ComfyUI/input (come
+    `pose_image`): l'adattatore lo mostra al modello a ogni passo di sampling, ed è
+    ciò che tiene la stessa identità fra due generazioni — il seed da solo no.
     """
     testo = " ".join(str(prompt or "").split())
     if not testo:
@@ -181,13 +233,18 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
     pose_preset = str(pose_preset or "").strip().lower()
     if pose_preset and pose_preset not in POSE_PRESET:
         raise ValueError("pose_preset sconosciuto")
-    if famiglia == FAMIGLIA_SDXL and not pose_image and not pose_preset:
-        pose_preset = scegli_pose_preset(testo)
-    # Per SD 1.5 la posa NON si deduce da sola: il ControlNet openpose di SDXL
-    # (`xinsir-controlnet-openpose-sdxl-1.0`) non è quello di SD 1.5, e un preset
-    # senza il suo ControlNet non farebbe una posa — farebbe un'immagine diversa.
-    # Una posa dichiarata a mano arriva al grafo e lì `workflow_checkpoint`
-    # solleva: meglio un job fallito e visibile che un ritratto sbagliato.
+    # La posa si deduce dal testo SOLO dove la famiglia ha il ControlNet che la sa
+    # fare (`_posa_dichiarata`): un preset senza il suo ControlNet non farebbe una
+    # posa — farebbe un'immagine diversa. Dove il ControlNet manca, una posa chiesta
+    # a mano arriva comunque al grafo e lì `workflow_checkpoint` solleva: meglio un
+    # job fallito e visibile che un ritratto sbagliato.
+    reference_image = str(reference_image or "").strip().replace("\\", "/")
+    # Stessa regola di pose_image, e per la stessa ragione: `LoadImage` legge
+    # esclusivamente da ComfyUI/input, e un nome relativo impedisce a un job remoto
+    # di trasformare il ponte in un lettore di file arbitrari.
+    if (reference_image.startswith("/") or ".." in reference_image.split("/")
+            or "://" in reference_image):
+        raise ValueError("reference_image deve essere un nome relativo dentro ComfyUI/input")
     lora_name = str(lora_name or "").strip().replace("\\", "/")
     if lora_name.startswith("/") or ".." in lora_name.split("/") or "://" in lora_name:
         raise ValueError("lora_name deve essere un nome relativo dentro ComfyUI/models/loras")
@@ -215,6 +272,11 @@ def nuovo_job(prompt: str, *, negativo: str = "", larghezza: int = 768,
         "pose_image": pose_image[:240],
         "pose_preset": pose_preset,
         "pose_strength": max(0.0, min(float(pose_strength), 2.0)),
+        # Il peso del riferimento: 0..2, come la posa. Il default 0.8 è quello che
+        # la scheda di IP-Adapter Plus Face indica per un ritratto: a 1.0 il volto
+        # del riferimento comincia a vincere sull'abito e sulla scena.
+        "reference_image": reference_image[:240],
+        "reference_strength": max(0.0, min(float(reference_strength), 2.0)),
         "lora_name": lora_name[:240],
         "lora_strength": max(-2.0, min(float(lora_strength), 2.0)),
         "destinazione": str(destinazione or "")[:64],
@@ -574,8 +636,16 @@ MODELLO_SDXL = {
     "sampler": "dpmpp_2m",
     "scheduler": "karras",
     "controlnet_openpose": "xinsir-controlnet-openpose-sdxl-1.0.safetensors",
+    # `scale_stick_for_xinsr_cn` è l'accorgimento che il ControlNet di xinsir
+    # chiede a DWPose (scheletri addestrati con lo «stick» largo). È una proprietà
+    # del FILE, non della posa: per questo sta nella ricetta e non nel grafo.
+    "dw_scale_stick": "enable",
     "lora": os.getenv("SDXL_LORA_NAME", "").strip(),
     "lora_strength": float(os.getenv("SDXL_LORA_STRENGTH", "0.8")),
+    # Niente `ipadapter`/`clip_vision`: su questa macchina i pesi del riferimento
+    # esistono per SD 1.5 (`modelli-riferimento.json`), e l'adattatore di un'altra
+    # famiglia non è «quasi giusto» — ViT-bigG contro ViT-H, altre dimensioni. Chi
+    # chiede un riferimento al Pony riceve un errore, non un volto diverso.
 }
 
 # La ricetta ChickMixFlat v1.0 (SD 1.5): il volto di Anna. Stesso grafo del Pony
@@ -586,15 +656,32 @@ MODELLO_SDXL = {
 # della famiglia è qui: due posti che dicono lo stesso nome, tenuti allineati dal
 # test del manifest, come per il Pony.
 #
-# Niente `controlnet_openpose`: quello di SDXL non è compatibile con SD 1.5, e un
-# ControlNet sbagliato deforma invece di posare. Finché non c'è il file giusto la
-# famiglia non fa pose, e lo dice (vedi il controllo in `workflow_checkpoint`).
+# Il ControlNet openpose di SD 1.5 (2026-09-30). Fino a qui la famiglia non faceva
+# pose, e lo diceva: `xinsir-controlnet-openpose-sdxl-1.0` non è quello di SD 1.5,
+# e un ControlNet sbagliato deforma invece di posare. Il file giusto è
+# `control_v11p_sd15_openpose_fp16`: il ControlNet 1.1 ufficiale, nella variante
+# fp16 di comfyanonymous (689 MiB invece di 1,38 GiB, stesso grafo). DWPose lo
+# alimenta con `dw_scale_stick: disable` — lo stick largo è una richiesta del
+# modello di xinsir, non di questo.
+#
+# `ipadapter`/`clip_vision` sono il RIFERIMENTO, ed è la cosa che il seed non sa
+# fare: il volto resta lo stesso perché il modello lo **rivede** a ogni
+# generazione, non perché ricorda il numero. Il file è
+# `ip-adapter-plus-face_sd15`, la variante per i volti di IP-Adapter Plus: passa
+# dal CLIP-ViT-H e **non** da InsightFace, quindi niente onnxruntime, niente
+# rilevatore di volti, e nessuna impronta di un volto reale nel giro — il
+# riferimento è un disegno di Anna. FaceID sarebbe la strada se un giorno
+# servisse agganciare un volto *fotografico*: qui sarebbe un'altra cosa.
 MODELLO_SD15 = {
     "ckpt": "chickmixflat_v10.ckpt",
     "cfg": 7.0,
     "clip_skip": -2,
     "sampler": "dpmpp_sde",
     "scheduler": "karras",
+    "controlnet_openpose": "control_v11p_sd15_openpose_fp16.safetensors",
+    "dw_scale_stick": "disable",
+    "ipadapter": "ip-adapter-plus-face_sd15.safetensors",
+    "clip_vision": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
     "lora": os.getenv("SD15_LORA_NAME", "").strip(),
     "lora_strength": float(os.getenv("SD15_LORA_STRENGTH", "0.8")),
 }
@@ -653,9 +740,33 @@ def workflow(job: dict, *, modello: dict | None = None, prefisso: str = "HyperSp
     (GGUF + text encoder su CPU, default) oppure un checkpoint unico — SDXL/Pony
     (``sdxl-turbo``) o SD 1.5 (``sd15``), che condividono il grafo e cambiano solo
     i numeri della ricetta.
+
+    Un ``reference_image`` su Qwen-Image non è un campo da ignorare: quel grafo non
+    ha un IP-Adapter, quindi il volto uscirebbe qualunque — e il job riuscirebbe.
+    Qui si solleva, come fa ``workflow_checkpoint`` per le famiglie senza adattatore.
     """
     if usa_checkpoint((job or {}).get("famiglia")):
         return workflow_checkpoint(job, modello=modello, prefisso=prefisso, jpeg=jpeg)
+    # Il riferimento è per famiglia come la posa: Qwen-Image non ha un IP-Adapter,
+    # quindi il campo non arriverebbe al modello. Ignorarlo darebbe un ritratto che
+    # *sembra* riuscito con un altro volto — cioè il difetto che il riferimento
+    # esiste per togliere — e in silenzio. La vetrina lo rifiuta già prima di
+    # accodare (`verifica_vetrina`), ma un job può arrivare da un client che non è
+    # la vetrina: il grafo è l'ultima difesa, e l'ultima difesa non tace.
+    if str((job or {}).get("reference_image") or "").strip():
+        raise ValueError(
+            f"riferimento richiesto per la famiglia {FAMIGLIA_DEFAULT!r}, che non ha un "
+            "IP-Adapter dichiarato in shared/image_jobs.py")
+    # Stessa regola per la posa: qui non c'è nessun ControlNet (`workflow_checkpoint`
+    # solleva per le famiglie che non lo dichiarano, e questa è una di quelle), quindi
+    # un `pose_preset` non sposterebbe lo scheletro — non farebbe niente, e il job
+    # tornerebbe "done" con l'immagine di prima. `scripts/serie.py` manda la posa solo
+    # dove `posa_supportata` è vero; chi scrive l'API a mano non ha quel filtro.
+    if (str((job or {}).get("pose_image") or "").strip()
+            or str((job or {}).get("pose_preset") or "").strip()):
+        raise ValueError(
+            f"posa richiesta per la famiglia {FAMIGLIA_DEFAULT!r}, che non ha un "
+            "ControlNet openpose dichiarato in shared/image_jobs.py")
     scelte = {**MODELLO_DEFAULT, **(modello or {})}
     if str(job.get("modello") or "").strip():
         scelte["unet"] = str(job["modello"]).strip()
@@ -777,7 +888,10 @@ def workflow_checkpoint(job: dict, *, modello: dict | None = None,
                     "resolution": max(int(job["larghezza"]), int(job["altezza"])),
                     "bbox_detector": "yolox_l.onnx",
                     "pose_estimator": "dw-ll_ucoco_384.onnx",
-                    "scale_stick_for_xinsr_cn": "enable"}},
+                    # Lo «stick» largo è quello che chiede il ControlNet di xinsir
+                    # (SDXL): per il ControlNet 1.1 di SD 1.5 sarebbe uno scheletro
+                    # troppo grosso, cioè una posa peggiore. La ricetta lo dichiara.
+                    "scale_stick_for_xinsr_cn": scelte.get("dw_scale_stick", "disable")}},
                 "464": {"class_type": "ImageScale", "inputs": {
                     "image": ["461", 0], "upscale_method": "nearest-exact",
                     "width": int(job["larghezza"]), "height": int(job["altezza"]),
@@ -789,6 +903,41 @@ def workflow_checkpoint(job: dict, *, modello: dict | None = None,
                 "height": int(job["altezza"])}}
         grafo["458"]["inputs"]["positive"] = ["463", 0]
         grafo["458"]["inputs"]["negative"] = ["463", 1]
+    reference_image = str(job.get("reference_image") or "").strip()
+    if reference_image and not scelte.get("ipadapter"):
+        # Il riferimento è per famiglia come il ControlNet: l'adattatore di SDXL
+        # non è quello di SD 1.5 (CLIP-ViT-H contro ViT-bigG, altre dimensioni).
+        # Senza questo controllo l'immagine uscirebbe lo stesso — con un altro
+        # volto, cioè il difetto che il riferimento esiste per togliere, e in
+        # silenzio. Lo stesso vale per il CLIP-ViT: se manca quello, l'adattatore
+        # non ha da cosa leggere il riferimento.
+        raise ValueError(
+            f"riferimento richiesto per la famiglia {famiglia!r}, che non ha un "
+            "IP-Adapter dichiarato in shared/image_jobs.py")
+    if reference_image:
+        if not scelte.get("clip_vision"):
+            raise ValueError(
+                f"riferimento richiesto per la famiglia {famiglia!r}, che dichiara "
+                "un IP-Adapter ma non il CLIP-ViT da cui leggere il riferimento")
+        # Il riferimento si innesta sul MODELLO (non sul condizionamento): entra fra
+        # il checkpoint/LoRA e il KSampler, così vale per ogni passo di sampling
+        # senza toccare il prompt — che con SD 1.5 ha 77 token e non può crescere.
+        # `weight_type: linear` con `embeds_scaling: V only` è la lettura consigliata
+        # per PLUS FACE; il peso lo decide il job (default 0.8), non il grafo.
+        grafo.update({
+            "465": {"class_type": "LoadImage", "inputs": {"image": reference_image}},
+            "466": {"class_type": "IPAdapterModelLoader",
+                    "inputs": {"ipadapter_file": scelte["ipadapter"]}},
+            "467": {"class_type": "CLIPVisionLoader",
+                    "inputs": {"clip_name": scelte["clip_vision"]}},
+            "468": {"class_type": "IPAdapterAdvanced", "inputs": {
+                "model": modello_ref, "ipadapter": ["466", 0], "image": ["465", 0],
+                "clip_vision": ["467", 0],
+                "weight": float(job.get("reference_strength", RIFERIMENTO_FORZA_DEFAULT)),
+                "weight_type": "linear", "combine_embeds": "concat",
+                "start_at": 0.0, "end_at": 1.0, "embeds_scaling": "V only"}},
+        })
+        grafo["458"]["inputs"]["model"] = ["468", 0]
     fattore = int(job.get("fix") or 0)
     if fattore > 1:
         # L'R-ESRGAN genera il dettaglio del fix; ricampionare a 1024×1536 con
@@ -820,7 +969,7 @@ def workflow_sdxl(job: dict, *, modello: dict | None = None,
 
 def workflow_sd15(job: dict, *, modello: dict | None = None,
                   prefisso: str = "HyperSpace", jpeg: bool = True) -> dict:
-    """Il grafo ChickMixFlat (SD 1.5): CFG 7, Clip Skip 2, 768, niente pose."""
+    """Il grafo ChickMixFlat (SD 1.5): CFG 7, Clip Skip 2, 768, posa e riferimento."""
     return workflow_checkpoint(job, modello=modello, prefisso=prefisso, jpeg=jpeg,
                                famiglia=FAMIGLIA_SD15)
 

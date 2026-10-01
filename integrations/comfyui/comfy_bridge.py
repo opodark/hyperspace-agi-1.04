@@ -30,6 +30,7 @@ Config (variabili d'ambiente):
 
 Uso:
   python integrations/comfyui/comfy_bridge.py --check    # non genera nulla
+  python integrations/comfyui/comfy_bridge.py --stage-riferimento volto.png
   python integrations/comfyui/comfy_bridge.py --once     # un job e esce
   python integrations/comfyui/comfy_bridge.py            # in attesa, in ciclo
 """
@@ -114,6 +115,93 @@ def _richiesta(url: str, *, payload=None, timeout: float = 30.0,
         # cioè in silenzio. Osservato davvero il 2026-09-22 reconstruendo il CP.
         return 0, {"errore": f"connessione interrotta: {errore}"}
 
+def _carica_immagine(comfy_url: str, percorso: Path, nome: str = "",
+                     timeout: float = 120.0) -> tuple[int, dict]:
+    """Mette un'immagine nella cartella input di ComfyUI (`POST /upload/image`).
+
+    Perché non copiarla nella cartella a mano: la cartella input la decide
+    l'installazione (su questo Mac `~/ComfyUI-Shared/input`, non
+    `~/Documents/ComfyUI/input`), e indovinarla è il modo di scrivere un file che
+    ComfyUI non leggerà mai — con il job che poi fallisce su `LoadImage`. Si usa lo
+    stesso endpoint del pannello web, e la risposta dice il nome con cui il file è
+    stato salvato: è quello che va nel job, non il nome del file di partenza.
+
+    Il corpo multipart si compone a mano perché il ponte ha una sola dipendenza:
+    la libreria standard.
+    """
+    contenuto = percorso.read_bytes()
+    nome = (nome or percorso.name).strip()
+    confine = f"----HyperSpace{os.getpid()}{int(time.time() * 1000)}"
+    pezzi = [
+        f'--{confine}\r\nContent-Disposition: form-data; name="image"; '
+        f'filename="{nome}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode("utf-8"),
+        contenuto,
+        b"\r\n",
+    ]
+    for campo, valore in (("type", "input"), ("overwrite", "true")):
+        pezzi.append(f'--{confine}\r\nContent-Disposition: form-data; name="{campo}"'
+                     f"\r\n\r\n{valore}\r\n".encode("utf-8"))
+    pezzi.append(f"--{confine}--\r\n".encode("utf-8"))
+    corpo = b"".join(pezzi)
+    richiesta = urllib.request.Request(
+        f"{comfy_url}/upload/image", data=corpo, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={confine}",
+                 "Content-Length": str(len(corpo))})
+    try:
+        with urllib.request.urlopen(richiesta, timeout=timeout) as risposta:
+            testo = risposta.read().decode("utf-8", errors="replace")
+            return risposta.status, (json.loads(testo) if testo.strip() else {})
+    except urllib.error.HTTPError as errore:
+        corpo_errore = errore.read().decode("utf-8", errors="replace")[:300]
+        return int(errore.code), {"errore": corpo_errore}
+    except (urllib.error.URLError, TimeoutError, OSError) as errore:
+        return 0, {"errore": f"ComfyUI non raggiungibile: {errore}"}
+
+
+def carica_riferimento(percorso: str | Path, *, comfy_url: str = COMFY_DEFAULT,
+                       nome: str = "") -> tuple[str, str]:
+    """Mette un'immagine in ComfyUI/input e torna (nome per il job, motivo).
+
+    Il nome è quello che ComfyUI dichiara di aver salvato — con la sottocartella, se
+    c'è — perché è esattamente ciò che `LoadImage` si aspetta, e non il nome del file
+    di partenza. Nome vuoto = non caricata, e il perché sta nel secondo pezzo: chi
+    chiama decide se è fatale (questo ponte stampa ed esce, `scripts/ritratto.py`
+    ferma il ritratto prima di accodarlo).
+
+    Vive qui, e non in ogni client, perché è lo stesso upload di `_carica_immagine`:
+    una seconda implementazione del multipart sarebbe una seconda cosa da tenere
+    allineata a ComfyUI — e a sbagliarsi sarebbe il client, in silenzio.
+    """
+    file = Path(percorso).expanduser()
+    if not file.is_file():
+        return "", f"file non trovato: {file}"
+    stato, risposta = _carica_immagine(comfy_url, file, nome)
+    if stato != 200:
+        return "", (f"caricamento fallito su {comfy_url}: HTTP {stato} "
+                    f"{risposta.get('errore', '')}").strip()
+    salvato = str(risposta.get("name") or nome or file.name)
+    sottocartella = str(risposta.get("subfolder") or "").strip("/")
+    return f"{sottocartella}/{salvato}".lstrip("/"), ""
+
+
+def _esegui_stage(comfy_url: str, percorso: str, nome: str = "") -> int:
+    """Copia il volto di riferimento in ComfyUI/input e dice come nominarlo.
+
+    Non genera e non tocca la coda: mette il file dove il grafo lo cerca e stampa
+    le due righe da incollare (il campo `reference_image` di un job, e la chiave
+    `riferimento` della vetrina di Anna).
+    """
+    riferimento, motivo = carica_riferimento(percorso, comfy_url=comfy_url, nome=nome)
+    if not riferimento:
+        log(motivo)
+        return 1
+    log(f"riferimento in ComfyUI/input: {riferimento}")
+    log(f'  in un job:    "reference_image": "{riferimento}"')
+    log(f'  in Anna:      "vetrina": {{"riferimento": "{riferimento}"}}')
+    return 0
+
+
+
 
 def _file_attesi(modello: str) -> list[tuple[str, str, str]]:
     """I file che devono esistere in ComfyUI perché i job di questo ponte riescano.
@@ -142,6 +230,19 @@ def _file_attesi(modello: str) -> list[tuple[str, str, str]]:
         ricetta = RICETTE_CHECKPOINT.get(famiglia)
         if ricetta:
             attesi.append(("CheckpointLoaderSimple", "ckpt_name", ricetta["ckpt"]))
+            # Posa e riferimento non sono accessori: sono file che il grafo carica
+            # nel mezzo della generazione, quindi un file assente non dà un
+            # ritratto senza posa — dà un job morto dentro ComfyUI, con l'errore
+            # dall'altra parte. Si verificano qui, e solo per le famiglie che li
+            # DICHIARANO: chiedere il ControlNet a una famiglia che non fa pose
+            # sarebbe un problema inventato (e fermerebbe l'avvio del ponte).
+            if ricetta.get("controlnet_openpose"):
+                attesi.append(("ControlNetLoader", "control_net_name",
+                               ricetta["controlnet_openpose"]))
+            if ricetta.get("ipadapter"):
+                attesi.append(("IPAdapterModelLoader", "ipadapter_file", ricetta["ipadapter"]))
+            if ricetta.get("clip_vision"):
+                attesi.append(("CLIPVisionLoader", "clip_name", ricetta["clip_vision"]))
             if famiglia == FAMIGLIA_SD15:
                 # `model_name`: il campo d'ingresso di UpscaleModelLoader, non
                 # `upscale_model` (che è il nome del suo OUTPUT, e chiederlo
@@ -176,6 +277,51 @@ def _elenco_file(scelte) -> list:
     return []
 
 
+# Chi installa un nodo di terze parti. Serve nel messaggio del preflight: «ComfyUI
+# non dichiara nessun file» da solo manda a cercare un file, quando il problema è
+# un pacchetto che non c'è. Il 2026-09-30 i nodi IPAdapter non erano installati su
+# questa macchina e la risposta di ComfyUI era `{}` — indistinguibile, per il
+# messaggio, da una cartella vuota.
+PACCHETTI_NODI = {
+    "IPAdapterModelLoader": "ComfyUI_IPAdapter_plus "
+                            "(integrations/comfyui/install-nodes.sh)",
+    "IPAdapterAdvanced": "ComfyUI_IPAdapter_plus "
+                         "(integrations/comfyui/install-nodes.sh)",
+    "DWPreprocessor": "comfyui_controlnet_aux "
+                      "(integrations/comfyui/install-nodes.sh)",
+    "HyperSpacePosePreset": "il nodo del repo "
+                            "(integrations/comfyui/install-nodes.sh)",
+}
+
+
+def _perche_niente_file(nodo: str, nodo_info: dict) -> str:
+    """Perché un input a elenco è vuoto: il nodo manca, o la cartella è vuota.
+
+    ComfyUI risponde la stessa cosa — nessun file — in due casi che hanno rimedi
+    opposti, e il preflight deve dire quale dei due è: il **nodo** non c'è (manca
+    il pacchetto: `install-nodes.sh`) oppure il nodo c'è e la cartella che legge è
+    vuota (mancano i pesi: `install-model.sh`). La differenza si vede nella
+    risposta di `/object_info`: quando il nodo non esiste la risposta è `{}`, e il
+    nodo non compare.
+
+    Il 2026-09-30 il messaggio dava la colpa al pacchetto in un caso in cui il
+    pacchetto c'era: `ComfyUI_IPAdapter_plus` era installato e `IPAdapterModelLoader`
+    cercava `<ComfyUI>/models/ipadapter`, una cartella che l'istanza desktop non
+    mappa sulla cartella condivisa — quindi vuota per ComfyUI e piena su disco.
+    Un messaggio che manda a reinstallare il nodo sbaglia il rimedio, e il rimedio
+    sbagliato costa un giro intero.
+    """
+    if nodo not in (nodo_info or {}):
+        pacchetto = PACCHETTI_NODI.get(nodo)
+        extra = (f" — il nodo non è installato: serve {pacchetto}" if pacchetto
+                 else " — il nodo non è installato in questa versione di ComfyUI")
+        return f"ComfyUI non dichiara nessun file{extra}"
+    return ("ComfyUI non dichiara nessun file — il nodo c'è ma la cartella che "
+            "legge è vuota: scaricalo con integrations/comfyui/install-model.sh "
+            "(su Windows: install-model.ps1), o rendi raggiungibile la cartella "
+            "dove il file è già (integrations/comfyui/README.md)")
+
+
 def _verifiche(comfy_url: str, output_dir: str, modello: str = "") -> list:
     """Cosa manca perché una generazione possa riuscire. Vuoto = si può fare."""
     problemi = []
@@ -206,7 +352,10 @@ def _verifiche(comfy_url: str, output_dir: str, modello: str = "") -> list:
             scelte = (((nodo_info.get("input") or {}).get("required") or {}).get(campo) or [])
             disponibili_per_nodo[(nodo, campo)] = _elenco_file(scelte)
             if not disponibili_per_nodo[(nodo, campo)]:
-                problemi.append(f"{nodo}.{campo}: ComfyUI non dichiara nessun file")
+                # «Nessun file» ha due cause con rimedi opposti (nodo assente /
+                # cartella vuota) e le distingue `_perche_niente_file`: la colpa
+                # data al pacchetto sbagliato costa un giro intero.
+                problemi.append(f"{nodo}.{campo}: {_perche_niente_file(nodo, nodo_info)}")
             else:
                 log(f"{nodo}.{campo}: {len(disponibili_per_nodo[(nodo, campo)])} file disponibili")
         disponibili = disponibili_per_nodo[(nodo, campo)]
@@ -349,6 +498,13 @@ def main(argv=None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Ponte HyperSpace -> ComfyUI.")
     parser.add_argument("--check", action="store_true", help="verifica e basta")
+    parser.add_argument("--stage-riferimento", default="", metavar="FILE",
+                        help="copia un'immagine in ComfyUI/input e stampa il nome da "
+                             "usare come riferimento (non genera nulla, non serve "
+                             "il token)")
+    parser.add_argument("--nome-riferimento", default="",
+                        help="nome con cui salvare il riferimento (default: quello "
+                             "del file di partenza)")
     parser.add_argument("--once", action="store_true", help="esegui un job ed esci")
     parser.add_argument("--url", default=os.getenv("CHANNEL_URL", CONTROL_PLANE_DEFAULT))
     parser.add_argument("--token", default=os.getenv("CHANNEL_TOKEN", ""))
@@ -373,6 +529,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
     intestazioni = {"X-Hyperspace-Channel-Token": args.token} if args.token else {}
+
+    if args.stage_riferimento:
+        # Solo ComfyUI, niente token e niente preflight: chi prepara il riferimento
+        # non sta generando, e un file mancante da qualche altra parte non c'entra.
+        return _esegui_stage(args.comfy, args.stage_riferimento, args.nome_riferimento)
 
     problemi = _verifiche(args.comfy, args.output, args.model)
     stato, salute = _richiesta(f"{base}/image/status", timeout=10, headers=intestazioni)

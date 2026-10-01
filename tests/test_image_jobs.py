@@ -10,15 +10,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from shared.image_jobs import (DEFAULT_CLAIM_TTL_S, DEFAULT_JOB_TTL_S,  # noqa: E402
                                FAMIGLIA_SD15, FAMIGLIE, FAMIGLIE_CHECKPOINT,
-                               FIX_UPSCALER, LIMITE_LATO, MODELLO_SD15, ImmagineQueue,
+                               FIX_UPSCALER, LIMITE_LATO, MODELLO_SD15,
+                               RICETTE_CHECKPOINT, ImmagineQueue,
                                famiglie_capaci, immagini_da_history, nuovo_job,
-                               scegli_pose_preset, usa_checkpoint, workflow)
+                               posa_supportata, scegli_pose_preset, usa_checkpoint,
+                               workflow)
 
 
 class OrologioFinto:
@@ -284,6 +287,17 @@ class GrafoTests(unittest.TestCase):
         self.assertEqual(jpeg["inputs"]["quality"], 92)
         self.assertEqual(png["class_type"], "SaveImage")
 
+    def test_una_posa_su_qwen_non_sparisce_in_silenzio(self):
+        """Questo grafo non ha un ControlNet: un preset qui non darebbe una posa
+        diversa, darebbe la STESSA immagine — e il job riuscirebbe. Come per il
+        riferimento, il grafo si ferma invece di ignorare il campo: `scripts/serie.py`
+        la posa la manda solo dove serve, l'API a mano non ha quel filtro.
+        """
+        with self.assertRaises(ValueError):
+            workflow(nuovo_job("x", pose_preset="seated"))
+        with self.assertRaises(ValueError):
+            workflow(nuovo_job("x", pose_image="pose/dancer.jpg"))
+
 
 class FamigliaTests(unittest.TestCase):
     def test_una_famiglia_sconosciuta_cade_sul_default(self):
@@ -423,13 +437,20 @@ class GrafoSdxlTests(unittest.TestCase):
     def test_non_applica_un_corpo_singolo_a_due_persone(self):
         self.assertEqual(scegli_pose_preset("a couple sitting on a sofa"), "")
 
-    def test_preset_automatico_entra_nel_grafo_senza_foto(self):
+    def test_un_preset_non_dichiarato_non_entra_nel_grafo(self):
+        """La posa non si mette da sola: `nuovo_job` non deduce dal testo.
+
+        La deduzione vive in `scegli_pose_preset`, che il chiamante invoca quando
+        vuole (la serie di Anna sceglie variante per variante): un job che nessuno ha
+        chiesto posato non porta né il nodo della posa (464) né il ControlNet
+        applicato (460) — e il sampler legge il testo, non una posa.
+        """
         job = nuovo_job("adult woman sitting on a chair", famiglia="sdxl-turbo")
-        self.assertEqual(job["pose_preset"], "seated")
+        self.assertEqual(job["pose_preset"], "")
         grafo = workflow(job)
-        self.assertEqual(grafo["464"]["class_type"], "HyperSpacePosePreset")
-        self.assertEqual(grafo["464"]["inputs"]["preset"], "seated")
+        self.assertNotIn("464", grafo)
         self.assertNotIn("460", grafo)
+        self.assertEqual(grafo["458"]["inputs"]["positive"], ["452", 0])
 
 
 class AffinitaTests(unittest.TestCase):
@@ -513,17 +534,42 @@ class GrafoSd15Tests(unittest.TestCase):
                          "CyberRealisticPony_V18.0_F16.safetensors")
         self.assertEqual(pony["458"]["inputs"]["cfg"], 5.0)
 
-    def test_la_posa_non_si_deduce_da_sola(self):
-        """Il ControlNet openpose e' per famiglia di modello: quello di SDXL non
-        capisce i latenti di SD 1.5. Quindi per sd15 non si sceglie una posa da
-        soli, e una posa dichiarata si FERMA invece di essere ignorata in silenzio
-        (un job che riesce con l'immagine sbagliata e' peggio di un job fallito).
+    def test_la_posa_adesso_e_anche_di_sd15(self):
+        """Il 2026-09-30 SD 1.5 non aveva il ControlNet openpose, e la posa valeva solo
+        per il Pony — quello di SDXL non capisce i latenti di SD 1.5, e un ControlNet
+        sbagliato deforma invece di posare. Ora il file c'e'
+        (`control_v11p_sd15_openpose_fp16`, vedi `MODELLO_SD15`), la famiglia lo
+        dichiara (`posa_supportata`), il grafo lo carica, e la stessa posa vale per
+        entrambe. Senza posa chiesta resta la strada di prima: il sampler legge il
+        testo.
         """
         automatico = nuovo_job("a woman sitting on a chair", famiglia=FAMIGLIA_SD15)
         self.assertEqual(automatico["pose_preset"], "")
-        dichiarato = nuovo_job("x", famiglia=FAMIGLIA_SD15, pose_preset="seated")
-        with self.assertRaises(ValueError):
-            workflow(dichiarato)
+        self.assertNotIn("464", workflow(automatico))
+        self.assertTrue(posa_supportata(FAMIGLIA_SD15))
+        dichiarato = nuovo_job("x", famiglia=FAMIGLIA_SD15, pose_preset="seated",
+                              larghezza=512, altezza=512)
+        grafo = workflow(dichiarato)
+        self.assertEqual(grafo["464"]["class_type"], "HyperSpacePosePreset")
+        self.assertEqual(grafo["464"]["inputs"]["preset"], "seated")
+        # Con il preset la condizione positiva passa dal nodo della posa.
+        self.assertEqual(grafo["458"]["inputs"]["positive"], ["463", 0])
+
+    def test_una_famiglia_senza_il_controlnet_non_finge_di_posare(self):
+        """Senza il ControlNet il preset non farebbe una posa: farebbe un'immagine
+        diversa. Quindi non si deduce dal testo, e un preset chiesto a mano FERMA il
+        grafo invece di essere ignorato in silenzio (un job che riesce con l'immagine
+        sbagliata e' peggio di un job fallito).
+        """
+        senza = {chiave: valore
+                 for chiave, valore in RICETTE_CHECKPOINT[FAMIGLIA_SD15].items()
+                 if chiave != "controlnet_openpose"}
+        with mock.patch.dict(RICETTE_CHECKPOINT, {FAMIGLIA_SD15: senza}):
+            automatico = nuovo_job("a woman sitting on a chair", famiglia=FAMIGLIA_SD15)
+            self.assertEqual(automatico["pose_preset"], "")
+            dichiarato = nuovo_job("x", famiglia=FAMIGLIA_SD15, pose_preset="seated")
+            with self.assertRaises(ValueError):
+                workflow(dichiarato)
 
     def test_la_posa_del_pony_funziona_ancora(self):
         job = nuovo_job("x", famiglia="sdxl-turbo", pose_preset="seated",

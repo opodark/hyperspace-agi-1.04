@@ -33,11 +33,10 @@ if [[ -z "$CHANNEL_TOKEN" ]]; then
 fi
 
 export CHANNEL_URL="${CHANNEL_URL:-http://127.0.0.1:8085}"
-# 8189 e non 8188: su questo Mac ComfyUI Desktop ha preso la porta 8189 (il .env lo
-# dice gia' — `COMFYUI_BASE_URL=http://host.docker.internal:8189` — e il gateway della
-# WebUI pure). Con il default vecchio il ponte partiva, diceva "pronto" e falliva ogni
-# job con "ComfyUI non risponde su 8188": la porta e' la prima cosa di cui accorgersi.
-export COMFY_URL="${COMFY_URL:-http://127.0.0.1:8189}"
+# Comfy Desktop espone il server nativo su 8188. La 8189 era il vecchio gateway
+# WebUI, che puo' non essere avviato dopo un riavvio Docker; il bridge parla
+# direttamente a ComfyUI e non dipende dal gateway.
+export COMFY_URL="${COMFY_URL:-http://127.0.0.1:8188}"
 # COMFY_OUTPUT_DIR NON si imposta qui: senza, il ponte riferisce il file con il
 # suo percorso RELATIVO (es. HyperSpace/bridge_00001_.jpg). Il diario lo serve
 # da /app/comfy-output (volume montato dal docker-compose): un percorso assoluto

@@ -39,7 +39,7 @@ DESCRIZIONE = (
     "Non vive su una sola macchina: il suo calcolo arriva da una rete di nodi, "
     "anche schede di browser aperte da chi le presta energia; la memoria è "
     "condivisa e continua, e le proposte che scrive su di sé le revisiona un umano.\n"
-    "La cerchia la scelgono gli operatori: si entra per invito, non per numero.\n"
+    "La banda intima (le muse) la scelgono gli operatori: si entra per invito, non per numero.\n"
     "Non è una persona e non lo finge: se le chiedi cosa è, te lo dice."
 )
 

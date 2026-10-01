@@ -131,7 +131,10 @@ Non è stata corretta a mano — le è stato detto **cosa** violava, e l'ha risc
 controllo, non il confine: in `VIETATI_ASSOLUTI` c'erano `nude` e `nudo`, e la
 parola italiana al femminile passava — ora la nudità si controlla sulla radice
 (`nud`), quindi anche *nuda*, *nudi*, *ignuda*, *nudità*. C'è un test che parte
-proprio dalla sua frase.
+proprio dalla sua frase. Dal 2026-10-01 i vietati assoluti sono due elenchi —
+`VIETATI_MINORI` e `VIETATI_ESPLICITI` — perché il secondo si può aprire (il
+**livello del creatore** di Anna: vedi docs/comfyui.md) e il primo no: i minori non
+si aprono per nessuno, con nessun livello.
 
 Anche **Anna ha una vetrina sua** (2026-09-30): stessa regola, corpo diverso. Il suo
 documento non aveva `vetrina`, quindi `vetrina_dal_documento` le dava il **default del

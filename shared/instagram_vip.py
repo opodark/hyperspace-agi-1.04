@@ -9,11 +9,23 @@ import threading
 from datetime import datetime, timezone
 
 
-LEVELS = ((30, "musa"), (15, "cerchia"), (5, "vip"))
+# Le bande del pubblico Instagram, dall'engagement: pubblico/anonimo (sotto il primo
+# gradino), VIP, MUSA. Il creatore è a parte, assegnato a mano.
+#
+# Il 2026-10-01 il gradino intermedio `cerchia` (15 messaggi) è stato tolto: le bande
+# erano quattro — tre contate più il creatore — mentre il disegno ne prevede tre, e
+# Telegram, che le bande le **dichiara** a mano, non ne ha mai avuta una. Un pubblico
+# diviso in due modi non è lo stesso pubblico: ora la scala è questa su entrambe le
+# piattaforme, e la differenza che resta è chi le assegna (il conteggio qui, la
+# dichiarazione sul canale), non **quali** sono.
+LEVELS = ((30, "musa"), (5, "vip"))
 
-# Livelli che costituiscono la "cerchia più stretta": l'ingresso in questi
-# livelli apre la possibilità della modalità intima (sempre con consenso).
-INTIMATE_LEVELS = ("cerchia", "musa")
+# I nomi che la scala sa produrre (`record`); il livello del creatore è fuori, è a mano.
+LEVEL_NAMES = tuple(name for _, name in LEVELS)
+
+# La banda intima: l'ingresso qui apre la possibilità della modalità intima (sempre
+# con consenso registrato). È una sola, ed è quella che decide anche la voce.
+INTIMATE_LEVELS = ("musa",)
 
 # Il livello del creatore (l'operatore): sopra "musa", assegnato a mano, mai
 # derivato dal conteggio dei messaggi e mai degradato da `record`.
@@ -41,8 +53,33 @@ class InstagramVipStore:
         except (OSError, json.JSONDecodeError):
             rows = {}
         with self._lock:
-            self._people = {str(key): value for key, value in rows.items()
-                            if str(key).isdigit() and isinstance(value, dict)}
+            self._people = {}
+            for key, value in rows.items():
+                if not str(key).isdigit() or not isinstance(value, dict):
+                    continue
+                row = dict(value)
+                # Un nome che la scala non produce più non resta appeso al contatto: si
+                # ricalcola dal conteggio. Serve alla banda `cerchia`, tolta il
+                # 2026-10-01: chi ci stava dentro non deve restare per sempre in un
+                # livello che non esiste più — né sparire dal conteggio come "none". Il
+                # livello del creatore è a mano e non si tocca; se il file è stato
+                # scritto a mano, un conteggio illeggibile vale "nessuna banda".
+                level = str(row.get("level") or "")
+                if level and level != CREATOR_LEVEL and level not in LEVEL_NAMES:
+                    try:
+                        row["level"] = level_for(int(row.get("messages", 0)))
+                    except (TypeError, ValueError):
+                        row["level"] = ""
+                # Stessa cosa per il diario dei traguardi: le tappe sono le **soglie
+                # della scala**, non tre numeri che c'erano una volta. Un 15 rimasto lì
+                # racconterebbe una banda che non esiste più (e `promoted` lo
+                # confronta).
+                if isinstance(row.get("milestones"), list):
+                    row["milestones"] = sorted(
+                        {int(p) for p in row["milestones"]
+                         if str(p).lstrip("-").isdigit()
+                         and int(p) in {passo for passo, _ in LEVELS}})
+                self._people[str(key)] = row
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -74,8 +111,8 @@ class InstagramVipStore:
             if promoted:
                 milestones.append(after)
             row["milestones"] = milestones
-            # Ingresso nella cerchia più stretta: solo il primo varco conta.
-            # cerchia -> musa non è un nuovo ingresso, è già dentro.
+            # Ingresso nella banda intima: il varco è uno solo (vip -> musa) e conta
+            # solo la prima volta.
             entered_intimate = (new_level in INTIMATE_LEVELS
                                 and old_level not in INTIMATE_LEVELS)
             self._people[scoped_id] = row
@@ -118,7 +155,9 @@ class InstagramVipStore:
                 row["username"] = str(username).lstrip("@")[:64]
             row["level"] = CREATOR_LEVEL
             row.setdefault("messages", 0)
-            row["milestones"] = [5, 15, 30]
+            # Le soglie della scala, non tre numeri scritti a mano: se la scala cambia,
+            # i traguardi del creatore la seguono invece di restare indietro.
+            row["milestones"] = sorted(passo for passo, _ in LEVELS)
             self._people[scoped_id] = row
             self.save()
             return dict(row)

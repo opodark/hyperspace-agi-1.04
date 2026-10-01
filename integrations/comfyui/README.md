@@ -143,6 +143,22 @@ python -m pytest tests\test_comfyui_client.py -q # la logica del client
   destinazione di ogni file. Lo leggono `install-model.ps1` e i test.
 - `install-model.ps1` — scarica e **verifica** i pesi (riprende un download
   interrotto, non installa un file la cui impronta non torna).
+- `install-model.sh` — lo stesso installer per il Mac, che legge lo stesso
+  manifest: scarica in `<nome>.parziale` (un file che ComfyUI non vede nemmeno) e
+  rinomina solo quando l'impronta torna. `--check` dice cosa farebbe, senza
+  scaricare.
+- `modelli-riferimento.json` — i tre file del volto di Anna che non sono
+  checkpoint: il ControlNet openpose di SD 1.5, l'IP-Adapter Plus Face e il
+  CLIP-ViT-H che lo legge. Un manifest solo perché un grafo con due dei tre non
+  esiste.
+- `install-nodes.sh` — i nodi che i pesi non bastano a far esistere:
+  `ComfyUI_IPAdapter_plus` (pinnato a un commit: il grafo passa campi precisi e i
+  campi di `IPAdapterAdvanced` cambiano nel tempo), `comfyui_controlnet_aux`, e i
+  link ai nodi del repo. InsightFace e onnxruntime **non** servono: sono per
+  IPAdapter-FaceID, e il riferimento di Anna non è una foto da riconoscere.
+- `tests/test_riferimento_volto.py` (nel repo) — manifest, grafo, documento e
+  upload dello **stesso** riferimento: un nome accettato da uno e rifiutato
+  dall'altro è un job che fallisce dopo il sampling.
 - `webui_gateway.py` — il proxy che Open WebUI attraversa per disegnare: libera la
   scheda prima del diffusion. Vedi la sezione qui sotto.
 - `start-gateway.ps1` — l'avvio del gateway con le chiavi lette da `.env`
@@ -171,6 +187,62 @@ CFG 7), dichiarate in `RICETTE_CHECKPOINT` e allineate ai manifest
 con lo script bash: `integrations/comfyui/install-model.sh --manifest
 integrations/comfyui/modelli-sd15.json`. `--check` verifica i file di ogni
 famiglia dichiarata **per nome** e dice quale manca.
+
+Il volto di Anna ha poi due accessori che non sono modelli: la **posa** e il
+**riferimento**. Il ControlNet openpose di SD 1.5, l'IP-Adapter Plus Face e il
+CLIP-ViT-H che lo legge stanno in un manifest solo —
+`integrations/comfyui/modelli-riferimento.json`, tre file da due repository — e si
+installano insieme:
+
+```bash
+integrations/comfyui/install-model.sh --check --manifest integrations/comfyui/modelli-riferimento.json
+integrations/comfyui/install-model.sh       --manifest integrations/comfyui/modelli-riferimento.json
+```
+
+Perché un manifest multi-file e non tre manifest: un grafo con due dei tre file non
+esiste, e con tre comandi separati «metà installazione» sarebbe lo stato più
+probabile — a scoprirlo sarebbe il preflight del ponte al primo riferimento, non
+l'installazione. I nodi che li caricano (`IPAdapterModelLoader`, `IPAdapterAdvanced`,
+`DWPreprocessor`) sono l'altro pezzo, e li installa
+`integrations/comfyui/install-nodes.sh` (che collega anche i nodi del repo): sono due
+rimedi diversi per due sintomi che ComfyUI descrive allo stesso modo, perché risponde
+`{}` a `/object_info` sia per un nodo assente sia per una cartella vuota.
+
+E l'adattatore non è come il ControlNet per un altro verso: ComfyUI mappa le cartelle per
+**tipo**, e `ipadapter` non è un tipo di ComfyUI — non compare nel file
+`instance-model-paths/inst-….yaml` che l'istanza desktop genera — mentre `controlnet` e
+`clip_vision` sì. Il nodo di cubiq ripiega su `<ComfyUI>/models/ipadapter`, quindi i pesi
+nella cartella condivisa vanno resi visibili con un link (i pesi restano in un posto solo,
+come per i nodi del repo):
+
+```bash
+ln -s ~/ComfyUI-Shared/models/ipadapter \
+      ~/ComfyUI-Installs/ComfyUI/ComfyUI/models/ipadapter
+```
+
+Poi ComfyUI va riavviato (nodi e percorsi si leggono all'avvio): il preflight passa da
+«il nodo non è installato» a `IPAdapterModelLoader.ipadapter_file: 1 file disponibili`. La
+prima lettura è quella che il preflight faceva prima del fix: dava la colpa al pacchetto
+quando il pacchetto c'era, e il rimedio sbagliato costa un giro intero.
+
+Il volto da tenere si copia dove ComfyUI lo cerca, e il nome per il job è quello che
+**lui** dichiara di aver salvato (la cartella input la decide l'installazione):
+
+```bash
+python integrations/comfyui/comfy_bridge.py --stage-riferimento ~/volto.png \
+       --nome-riferimento anna-volto.png      # non genera nulla, non serve il token
+python scripts/serie.py --prova --riferimento ~/volto.png      # dodici varianti, un volto
+python scripts/ritratto.py --crea --riferimento ~/volto.png    # il ritratto, un volto
+```
+
+Il peso dell'adattatore è `0.8` di default (`RIFERIMENTO_FORZA_DEFAULT`, il valore che
+la scheda di Plus Face indica per un ritratto) e si alza con `--riferimento-forza` o
+con `vetrina.riferimento_forza` nel documento di identità. Oggi l'adattatore ce l'ha
+solo la famiglia `sd15`: per SDXL e Qwen-Image un riferimento viene **rifiutato**
+(`verifica_vetrina` prima di accodare, il grafo al momento di costruirlo) invece di
+essere ignorato — senza adattatore l'immagine uscirebbe lo stesso, con un altro volto,
+e il job risulterebbe riuscito. Il quadro completo è in
+[`docs/comfyui.md`](../../docs/comfyui.md#il-volto-di-anna-il-riferimento-non-il-seed-2026-09-30).
 
 ```powershell
 python scripts\channel_token.py comfy --write     # una volta: crea il canale del ponte
