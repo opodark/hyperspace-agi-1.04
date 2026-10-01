@@ -27,3 +27,4 @@ Architecture and deployment notes for HyperSpace-AGI. Mission, lexicon and phase
 - [network-profiles.md](network-profiles.md) — Enterprise Local vs Public Hub deployment profiles.
 - [web-node.md](web-node.md) — browser-first worker path design intent (see also [web-node/README.md](../web-node/README.md) for the fuller technical spec and current implementation status).
 - [growth-strategy.md](growth-strategy.md) — come Aurora e Anna passano da presenza privata a presenza seguita: posizionamento, canali, serie di contenuti, funnel e metriche.
+- [sandbox-vita.md](sandbox-vita.md) — la simulazione della loro vita (post, poesia, sogni) su file isolati e un pubblico finto: la stessa giornata dei loop di produzione senza toccare Instagram, e il canale Telegram separato per vederla.
