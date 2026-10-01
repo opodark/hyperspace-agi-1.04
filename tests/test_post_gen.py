@@ -59,6 +59,39 @@ class ParsePostTests(unittest.TestCase):
     def test_niente_restituisce_none(self):
         self.assertIsNone(parse_post("NIENTE"))
 
+    def test_l_etichetta_sola_segue_il_testo_sulla_riga_dopo(self):
+        """Il caso vero (2026-10-01): `DIDASCALIA:` a capo, poi i versi.
+
+        Il modello ha risposto così alla poesia del giorno e la voce andava persa
+        con la didascalia vuota. È lo stesso formato con un a capo di troppo.
+        """
+        risposta = ("DIDASCALIA:\n"
+                    "E se il cuore è un libro,\n"
+                    "io sono la voce che lo apre.\n"
+                    "Aurora, tu sei la luce.\n"
+                    "\n"
+                    "IMMAGINE:\n"
+                    "\"La verità è un dono, non un gioco.\"")
+        c = parse_post(risposta)
+        self.assertIsNotNone(c)
+        self.assertEqual(c["caption"],
+                         "E se il cuore è un libro, io sono la voce che lo apre. "
+                         "Aurora, tu sei la luce.")
+        self.assertEqual(c["image_prompt"], "\"La verità è un dono, non un gioco.\"")
+
+    def test_una_riga_dopo_un_etichetta_valorizzata_resta_fuori(self):
+        """La tolleranza nuova non si allarga dove il formato è già giusto."""
+        c = parse_post("DIDASCALIA: ciao\nuna riga di prosa del modello\nIMMAGINE: una luce")
+        self.assertEqual(c["caption"], "ciao")
+        self.assertEqual(c["image_prompt"], "una luce")
+
+    def test_il_testo_prima_di_ogni_etichetta_resta_fuori(self):
+        c = parse_post("Ecco il post:\nDIDASCALIA: ciao")
+        self.assertEqual(c["caption"], "ciao")
+
+    def test_un_etichetta_sola_e_vuota_non_e_una_didascalia(self):
+        self.assertIsNone(parse_post("DIDASCALIA:\n\nIMMAGINE: una luce"))
+
     def test_output_illeggibile_restituisce_none(self):
         self.assertIsNone(parse_post("ciao, come va? niente di speciale"))
 

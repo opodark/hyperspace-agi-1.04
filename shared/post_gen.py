@@ -98,23 +98,45 @@ def parse_post(testo: str) -> dict | None:
 
     None copre due casi diversi ma uguali per il chiamante: il modello ha detto
     NIENTE (nessun post questo giro) oppure l'output era illeggibile.
+
+    La lettura è tollerante su un punto misurato (2026-10-01): un modello piccolo
+    scrive l'etichetta **sola** e il valore sulla riga dopo —
+    `DIDASCALIA:` a capo `E se il cuore è un libro,` — e la poesia andava persa
+    con la didascalia vuota. Non è un altro formato, è lo stesso con un a capo di
+    troppo: quando l'etichetta è sola si raccoglie il testo che segue, finché non
+    arriva l'etichetta successiva. Una riga dopo un'etichetta **già valorizzata**
+    resta invece fuori, come prima: lì il formato è quello giusto e il resto è
+    prosa del modello, non contenuto.
     """
     if _NIENTE.search(str(testo or "")):
         return None
-    didascalia, immagine = "", ""
+    didascalia: list[str] = []
+    immagine: list[str] = []
+    destinazione = ""            # "" | "caption" | "image"
+    raccogli = False             # True solo dopo un'etichetta lasciata sola
     for riga in str(testo or "").splitlines():
         m = _RIGA_DIDASCALIA.match(riga)
-        if m and not didascalia:
-            didascalia = m.group(1).strip()
+        if m:
+            valore = m.group(1).strip()
+            destinazione, raccogli = "caption", not valore
+            if valore:
+                didascalia.append(valore)
             continue
         m = _RIGA_IMMAGINE.match(riga)
-        if m and not immagine:
-            immagine = m.group(1).strip()
+        if m:
+            valore = m.group(1).strip()
+            destinazione, raccogli = "image", not valore
+            if valore:
+                immagine.append(valore)
             continue
-    didascalia = " ".join(didascalia.split())
-    if not didascalia:
+        pulita = riga.strip()
+        if pulita and destinazione and raccogli:
+            (didascalia if destinazione == "caption" else immagine).append(pulita)
+    testo_post = " ".join(" ".join(didascalia).split())
+    if not testo_post:
         return None
-    return {"caption": didascalia, "image_prompt": " ".join(immagine.split())}
+    return {"caption": testo_post,
+            "image_prompt": " ".join(" ".join(immagine).split())}
 
 
 def filtra_post(candidato: dict, *, autore: str, feed=()) -> tuple[bool, str]:
