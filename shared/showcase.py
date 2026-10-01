@@ -98,6 +98,7 @@ NEGATIVO_BASE = (
     "extra digits, extra fingers, missing digits, missing fingers, fused fingers, "
     "extra limbs, missing limbs, duplicate limbs, duplicate shoes, extra shoes, "
     "cropped head, cropped feet, out of frame, cut off, deformed eyes, "
+    "plastic doll, wax figure, glossy plastic skin, synthetic mannequin, "
     "no text, no watermark, no logo, no signature, "
     "fotografia, ritratto fotografico, pelle realistica, pori, trucco pesante, "
     "selfie, fotogramma di film, persone reali riconoscibili, celebrità, "

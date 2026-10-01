@@ -28,6 +28,7 @@ Flask. `nuovo_job` e `workflow` sono quelli VERI di `shared/image_jobs.py`,
 perche' sono quegli oggetti a finire nel grafo che ComfyUI esegue.
 """
 import ast
+import re
 import sys
 import unittest
 import uuid
@@ -111,6 +112,7 @@ def _load(operator=(), cerchia=(), coda=None, vetrina=None):
         "conflitti": conflitti,
         "VIETATI_MINORI": VIETATI_MINORI,
         "uuid": uuid,
+        "re": re,
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
     exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
@@ -494,6 +496,27 @@ class LivelloCreatoreTests(unittest.TestCase):
         semi = [job["seed"] for job in scope["image_queue"].job]
         self.assertNotEqual(semi[0], semi[1])
         self.assertNotIn(VETRINA_ANNA["seed"], semi)
+
+    def test_in_pm_la_figura_sottintesa_del_creatore_e_anna(self):
+        """Il seguito "nuda figura intera" non deve diventare una donna generica."""
+        scope = _load(operator={"alberto"})
+
+        scope["_channel_immagine"](
+            _contesto("Mandami una foto nuda figura intera", autore="Alberto"),
+            channel="telegram", destinazione="1", surface="pm")
+        job = scope["image_queue"].job[0]
+        self.assertEqual(job["famiglia"], "sd15")
+        self.assertEqual(job["reference_image"], "anna-volto-canonico.jpg")
+        self.assertNotIn("nude", job["negativo"])
+        self.assertNotIn("nsfw", job["negativo"])
+
+    def test_in_pm_un_altro_soggetto_esplicito_resta_generico(self):
+        scope = _load(operator={"alberto"})
+
+        scope["_channel_immagine"](
+            _contesto("Mandami una foto di una statua nuda", autore="Alberto"),
+            channel="telegram", destinazione="1", surface="pm")
+        self.assertEqual(scope["image_queue"].job[0]["reference_image"], "")
 
     def test_il_quadro_gia_scritto_non_si_ripete_nel_prompt(self):
         """Un quadro dichiarato a mano resta quello: niente parole in più, e niente

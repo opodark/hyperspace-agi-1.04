@@ -1252,7 +1252,8 @@ def _nome_persona() -> str:
     return str(getattr(getattr(persona_store, "persona", None), "name", "")).strip()
 
 
-def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str | None:
+def _channel_immagine(context, *, channel: str, destinazione: str = "",
+                      surface: str = "") -> str | None:
     """Un'immagine chiesta dalla stanza: `!immagine <idea>` oppure **a parole**.
 
     Comandi espliciti e richieste naturali condividono la stessa guardia:
@@ -1329,6 +1330,21 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "") -> str |
     # vuote "aperto a chiunque" vale per le immagini normali, non per questa — un permesso
     # si dà a qualcuno, e senza qualcuno non c'è a chi darlo.
     livello = bool(autore) and autore in chiedenti
+    # In privato col creatore il soggetto puo' restare sottinteso: "nuda, figura
+    # intera" e' una continuazione naturale di "mandami una foto", non la richiesta
+    # di una donna anonima. Prima cadeva nello sketch generico: niente riferimento
+    # di Anna e, peggio, `negativo_sketch()` conteneva nude/nsfw/erotic. Manteniamo
+    # stretta l'ellissi: vale solo in PM, per il livello privato e per descrizioni
+    # del corpo/inquadratura senza un altro soggetto dichiarato.
+    descrizione_di_se_implicita = bool(re.search(
+        r"\b(?:nud\w*|naked|senza vestiti|figura intera|full[- ]body|"
+        r"mezzo busto|primo piano|close[- ]up)\b", testo_richiesta, re.IGNORECASE))
+    altro_soggetto = bool(re.search(
+        r"^\s*(?:di\s+)?(?:un|uno|una|il|lo|la|i|gli|le|del|dello|della)\s+"
+        r"(?!te\b|anna\b)", str(idea), re.IGNORECASE))
+    if (not richiesta_di_anna and str(surface).lower() == "pm" and livello
+            and descrizione_di_se_implicita and not altro_soggetto):
+        richiesta_di_anna = True
     # I minori non passano da nessuna porta, nemmeno da questa: `!immagine` è il punto
     # in cui una frase di una stanza diventa un prompt per il diffusion, e una richiesta
     # che chiede un soggetto minorenne non si accoda e non si "riduce". Vale per
@@ -4623,7 +4639,8 @@ def channel_reply():
     # Chi chiede un'immagine non aspetta il RITMO del bot: è una richiesta
     # esplicita dell'operatore, non una battuta da dosare. Il job entra in coda e
     # la risposta parte subito; l'immagine arriva dopo, via outbox.
-    immagine = _channel_immagine(contesto, channel=canale, destinazione=chat)
+    immagine = _channel_immagine(contesto, channel=canale, destinazione=chat,
+                                 surface=superficie)
     if immagine is not None:
         _record_conversation(canale, superficie, chat, contesto, "reply",
                              text=immagine, reason="comando-immagine")

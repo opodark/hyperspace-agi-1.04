@@ -52,7 +52,7 @@
     "famiglia": "sd15",
     "modello": "chickmixflat_v10.ckpt",
     "riferimento": "anna-volto-canonico.jpg",
-    "riferimento_forza": 0.7,
+    "riferimento_forza": 1.0,
     "consenti_nudo_artistico_virtuale": true,
     "consenti_erotismo_esplicito_creatore": true,
     "seed": 20260930,
@@ -61,7 +61,7 @@
       "altezza": 768
     },
     "passi": 48,
-    "stile": "virtuale digital 2.5D K-doll illustration, drawn, not a photo, no human being. 1girl, semi-realistic K-doll rendering, glossy painted skin with soft specular highlights, almond eyes, green and violet aurora accents",
+    "stile": "digitale virtual illustration, clearly drawn, not a photo. 1girl, refined semi-realistic illustration, soft matte skin shading, natural facial proportions, expressive almond eyes, black hair with purple tips, green and violet aurora accents",
     "scena": "upper body, front view, calm gaze at viewer, black hair with purple tips, dark background, glowing light particles"
   },
   "version": 6,
