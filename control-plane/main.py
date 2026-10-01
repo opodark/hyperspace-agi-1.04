@@ -107,7 +107,7 @@ from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,
 from shared.prompt_immagine import (chiama_ollama, configura_modello,
                                    prepara_prompt_canale, richiesta_immagine_smart)
 from shared.feed import Feed, nuovo_post
-from shared.post_gen import (build_poem_prompt, build_post_prompt, filtra_post,
+from shared.post_gen import (MOTIVO_ECO, build_poem_prompt, build_post_prompt, filtra_post,
                              parse_post, prossima_mossa)
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, negativo_sketch, puo_generare
 from shared.diario import (Diario, file_da_job, instagram_backfill_candidate,
@@ -3261,8 +3261,14 @@ def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool
     """
     if not _livello_immagine_intima(vip, sender_id):
         return False
-    richiesta = richiesta_immagine_smart(
-        text, identita=persona_store.system_block())
+    # Una richiesta che la regola riconosce gia' non passa dal modello che riscrive
+    # i prompt. Nel DM del creatore quel modello non deve essere ne' portiere ne'
+    # coautore: puo' attenuare una scena prima ancora che arrivi alla vetrina. Lo
+    # usiamo soltanto per una forma davvero libera che la regola non conosce.
+    richiesta = richiesta_immagine(text)
+    if richiesta is None:
+        richiesta = richiesta_immagine_smart(
+            text, identita=persona_store.system_block())
     if not richiesta or not richiesta.get("idea"):
         return False
     idea = str(richiesta["idea"])
@@ -4293,7 +4299,18 @@ def _run_post_once(turno: int) -> bool:
     if candidato is None:
         push_log('feed', f'{autore}: nessun post', source='post-loop', status='warn')
         return False
-    ok, motivo = filtra_post(candidato, autore=autore, feed=feed.list(20))
+    ok, motivo = filtra_post(candidato, autore=autore, feed=feed.list(20),
+                             replica_a=mossa["replica_a"])
+    if not ok and motivo == MOTIVO_ECO:
+        # L'eco è l'unico scarto che una seconda richiesta può riparare: una
+        # didascalia vuota o un meta-rumore si riproporrebbero identici, ma qui il
+        # modello **non sa** di aver ricopiato la sorella — e glielo si dice.
+        prompt = build_post_prompt(sistema, feed_recente=feed.list(5),
+                                   replica_a=mossa["replica_a"], insisti=True)
+        candidato = parse_post(_genera_post(prompt))
+        if candidato is not None:
+            ok, motivo = filtra_post(candidato, autore=autore, feed=feed.list(20),
+                                     replica_a=mossa["replica_a"])
     if not ok:
         push_log('feed', f'{autore}: post scartato ({motivo})', source='post-loop', status='warn')
         return False

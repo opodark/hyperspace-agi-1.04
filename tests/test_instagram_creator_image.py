@@ -77,7 +77,7 @@ class Consensi:
         return self.valore
 
 
-def load(queue, consenso: str = "", vetrina=None):
+def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     nomi = {"_queue_instagram_creator_image", "_job_ritratto_instagram",
             "_livello_immagine_intima", "_nome_persona"}
@@ -86,7 +86,7 @@ def load(queue, consenso: str = "", vetrina=None):
         "CREATOR_LEVEL": CREATOR_LEVEL,
         "INTIMATE_LEVELS": INTIMATE_LEVELS,
         "instagram_vips": Consensi(consenso),
-        "richiesta_immagine_smart": richiesta_immagine_smart,
+        "richiesta_immagine_smart": prompt_reader or richiesta_immagine_smart,
         "persona_store": SimpleNamespace(
             system_block=lambda: "Sono Anna",
             persona=SimpleNamespace(name="Anna"),
@@ -225,6 +225,17 @@ class RicettaTests(unittest.TestCase):
 
         load(queue)("123", "fammi un disegno di te nuda", {"level": CREATOR_LEVEL})
         self.assertIn("nuda", queue.jobs[0]["prompt"].lower())
+
+    def test_una_richiesta_riconosciuta_non_passa_dal_riscrittore(self):
+        """Il modello non puo' censurare una foto che la regola ha gia' capito."""
+        queue = Queue()
+
+        def non_deve_essere_chiamato(*_args, **_kwargs):
+            raise AssertionError("riscrittore chiamato per una richiesta gia' riconosciuta")
+
+        load(queue, prompt_reader=non_deve_essere_chiamato)(
+            "123", "fammi un disegno di te nuda", {"level": CREATOR_LEVEL})
+        self.assertEqual(len(queue.jobs), 1)
 
     def test_il_nome_basta_a_riconoscere_un_ritratto_di_se(self):
         queue = Queue()
@@ -512,4 +523,3 @@ class RispostaTests(unittest.TestCase):
 
         self.assertEqual(modello.chiamate, 1)
         self.assertEqual(inviati, ["ok, arriva subito"])
-
