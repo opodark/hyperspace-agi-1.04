@@ -32,13 +32,14 @@ async function check(label, fn) {
 }
 
 console.log("== pagina pubblica ==");
-await check("la pagina join usa un gateway fissato e non espone token o URL editabili", () => {
+await check("la pagina join usa un gateway fissato ma non espone la chat della mesh", () => {
   assert.match(PUBLIC_JOIN, /join-config\.js/);
   assert.match(PUBLIC_JOIN, /config\.gatewayUrl/);
   assert.doesNotMatch(PUBLIC_JOIN, /id=["']baseUrl["']/);
   assert.doesNotMatch(PUBLIC_JOIN, /\bTOKEN\b|web\/tasks/i);
-  assert.match(PUBLIC_JOIN, /v1\/models/);
-  assert.match(PUBLIC_JOIN, /v1\/chat\/completions/);
+  assert.doesNotMatch(PUBLIC_JOIN, /v1\/models|v1\/chat\/completions/);
+  assert.match(PUBLIC_JOIN, /createWebLlmChat/);
+  assert.match(PUBLIC_JOIN, /id="llmSend"/);
   assert.match(PUBLIC_JOIN, /meshCanvas/);
   assert.match(PUBLIC_JOIN, /baseUrls:gatewayUrls/);
   assert.match(PUBLIC_CONFIG, /https:\/\/mesh\.zerozerocomputer\.it/);

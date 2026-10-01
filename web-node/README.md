@@ -23,55 +23,17 @@ It allows devices that cannot run Docker or heavy local runtimes to participate 
 
 **Important**: Heavy inference or long-running tasks are **not** routed to web nodes.
 
-## Chat — usare la mesh da questa pagina
+## Chat — solo locale, temporaneamente
 
-La pagina ha due funzioni separate, e conviene tenerle tali:
+La chat verso i modelli della mesh e' disattivata nelle due pagine del web node:
+non caricano `/v1/models` e non inviano richieste a `/v1/chat/completions`.
+Questo evita che visitatori anonimi occupino le macchine della mesh.
 
-| | Cosa fa | Dove sta la logica |
-|---|---|---|
-| **Nodo** | mette a disposizione della mesh i 5 tipi di task qui sopra | `src/index.js`, `src/task-runner.js` |
-| **Chat** | usa la mesh: manda la richiesta al control-plane, che la instrada al nodo che ha quel modello | `src/chat.js` |
-
-Il pannello 5 carica i modelli da `/v1/models`, poi invia a
-`/v1/chat/completions` in streaming e disegna i pezzi man mano. L'id del modello
-si manda **come lo restituisce il CP** (arriva decorato, `"🕸️ qwen3:8b"`): il CP
-lo normalizza da solo — verificato — e ripulirlo nel client sarebbe una
-supposizione in piu' sul server. Nel setup attuale `/v1` non chiede token
-(verificato senza header: e' l'endpoint aperto per compatibilita' con Open WebUI).
-
-**Perche' il parsing SSE e' un modulo e non codice nella pagina**: e' la parte che
-si rompe, e uno script inline non si testa. `src/chat.js` copre i casi che si
-vedono **solo in produzione**, tutti verificati sui **byte reali** del
-control-plane invece che su esempi immaginati (`tests/chat.test.mjs`):
-
-- un evento **spezzato a meta'** fra due chunk di rete — il caso normale su
-  connessioni lente, e quello che fa comparire testo doppio o mutilato;
-- gli **errori a meta' stream**, che arrivano come evento SSE con chiave `error`
-  e NON come errore HTTP: un client che non li guarda resta appeso per sempre;
-- il **ramo nativo**, che manda l'intera risposta in **un solo delta** con
-  `finish_reason: "stop"` invece che token per token;
-- `[DONE]`, eventi non JSON (keepalive), delta con il solo `role`, e CRLF.
-
-Verificato anche contro un control-plane vivo: `listModels()` legge le voci del CP
-(blocco `hyperspace` compreso), un invio reale restituisce il testo atteso, e un
-invio **pinnato** su una macchina precisa (`qwen3.5:4b::win11`) e' stato servito
-da quella macchina. Test: `npm test` (26 + 22 + 9 check).
-
-**La tendina conserva modello e destinazione in ogni voce** (`src/models.js`): il CP pubblica lo stesso modello
-una volta per OGNI nodo che ce l'ha (`modello::ref`), piu' la voce senza suffisso
-del routing automatico — sulla mesh reale 17 voci per 8 modelli su 2 macchine.
-La catalogazione elimina i doppioni e associa ogni id alla macchina. La UI
-genera poi vere `<option>` con etichette `modello · automatico` e
-`modello · pin: macchina`: Chrome Android mostra così il controllo di selezione
-anche sui nomi lunghi, invece di renderli come intestazioni `<optgroup>` senza
-pallino. Catalogo e option sono funzioni pure coperte da test su voci reali di
-`/v1/models`. Il `ref` e' l'alias del nodo se impostato
-(`POST /nodes/<id>/alias`), altrimenti i primi 8 caratteri del `node_id`.
-
-**Il limite da conoscere**: da una pagina in **HTTPS** il browser blocca una
-richiesta verso un control-plane in `http://` (mixed content). La chat quindi
-funziona aprendo la pagina in HTTP, oppure con un CP raggiungibile in HTTPS — e
-per quest'ultimo caso vale l'avvertenza della sezione di deploy.
+Resta disponibile la chat locale WebLLM/WebGPU: il modello viene scaricato al
+primo messaggio e l'inferenza avviene interamente nel browser del visitatore.
+Transformers.js resta disponibile per gli embedding, la traduzione e i task
+web-safe opzionali del nodo. La chat remota potra' essere rivalutata insieme a
+un'autenticazione e a limiti per utente.
 
 ## Architecture
 
@@ -213,8 +175,9 @@ This component is intentionally kept small and optional. It is an **addition** t
 
 ## Pagina pubblica di ingresso
 
-`join.html` e' la UI ridotta per un dominio pubblico: espone soltanto consenso,
-nome del nodo e stato. L'endpoint non e' modificabile dal visitatore e arriva da
+`join.html` e' la UI ridotta per un dominio pubblico: espone consenso, nome del
+nodo, stato e una chat WebGPU esclusivamente locale. L'endpoint non e'
+modificabile dal visitatore e arriva da
 `join-config.js`; deve puntare al federation gateway HTTPS, mai alla porta del
 control-plane. La procedura Aruba e la topologia sono in
 [`docs/public-web-node.md`](../docs/public-web-node.md).

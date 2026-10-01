@@ -94,37 +94,7 @@
   </section>
 
   <section>
-    <h2>5. Chat con la mesh</h2>
-    <p>La stessa pagina puo' anche <em>usare</em> la mesh: le richieste vanno al
-      control-plane, che le instrada al nodo che ha quel modello. E' una funzione
-      separata dal nodo: non passa di qui il lavoro che questo tab riceve.</p>
-    <div class="row">
-      <label for="model" style="margin:0">Modello</label>
-      <select id="model" class="model-select" aria-label="Modello e destinazione"></select>
-      <button id="loadModels">Carica modelli</button>
-      <span class="warn" id="chatNote"></span>
-    </div>
-    <div class="chat" id="chatLog"></div>
-    <label for="prompt">Messaggio</label>
-    <textarea id="prompt" rows="3" placeholder="Scrivi, poi Invia (oppure Ctrl+Invio)"></textarea>
-    <div class="row">
-      <button class="primary" id="send" disabled>Invia</button>
-      <button id="clearChat">Pulisci</button>
-      <span class="warn" id="chatStatus"></span>
-    </div>
-    <p>Ogni riga della tendina contiene il modello e la destinazione:
-      <em>automatico</em> lascia scegliere al CP fra i nodi che ce l'hanno,
-      <em>pin: macchina</em> forza quella macchina.
-      Dietro le quinte il suffisso <code>::</code> e' il pin: se la macchina
-      pinnata non e' disponibile il CP torna da solo allo scoring automatico,
-      invece di far fallire la richiesta.</p>
-    <p class="warn">Se non si connette: su una pagina in HTTPS il browser blocca un
-      control-plane in <code>http://</code> (mixed content). Serve un CP raggiungibile
-      in HTTPS, oppure aprire questa pagina in HTTP.</p>
-  </section>
-
-  <section>
-    <h2>6. Modelli locali (WebGPU)</h2>
+    <h2>5. Modelli locali (WebGPU)</h2>
     <p>Opzionale e separato dal nodo: puoi caricare un runtime di modelli che gira
       <em>dentro questo browser</em> (pesi scaricati da Hugging Face, inferenza su
       WebGPU). Quando e' caricato, il nodo puo' dichiarare anche
@@ -138,7 +108,7 @@
   </section>
 
   <section>
-    <h2>7. Chat locale (WebLLM)</h2>
+    <h2>6. Chat locale (WebLLM)</h2>
     <p>Un LLM che gira interamente nel browser via WebGPU, indipendente dalla mesh:
       qui non passano ne' il control-plane ne' il nodo. I pesi sono in GB anche
       quantizzati: caricalo solo se serve.</p>
@@ -160,8 +130,6 @@
 
 <script type="module">
   import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
-  import { ChatClient, ChatError } from "./src/chat.js";
-  import { buildCatalog, selectableModelOptions } from "./src/models.js";
   import { createTransformersRuntime, createWebLlmChat, loadTransformers, loadWebLlm,
            requestWebGpuAdapter } from "./src/webgpu.js";
 
@@ -170,105 +138,14 @@
     $("log").textContent = `${new Date().toLocaleTimeString()}  ${message}\n` + $("log").textContent;
   };
 
-  // ── chat: usare la mesh, non servirla ─────────────────────────────────────
-  // Funzione separata dal nodo. La logica che si rompe (streaming SSE) sta in
-  // src/chat.js ed e' testata; qui c'e' solo il disegno e il cablaggio.
-  let history = [];
-
-  const bubble = (role, text) => {
-    const div = document.createElement("div");
-    div.className = `msg ${role}`;
-    const who = document.createElement("span");
-    who.className = "who";
-    who.textContent = role === "user" ? "tu" : "mesh";
-    const body = document.createElement("span");
-    body.textContent = text;
-    div.append(who, body);
-    $("chatLog").append(div);
-    $("chatLog").scrollTop = $("chatLog").scrollHeight;
-    return body;
-  };
-
-  // L'id si manda come lo da' il CP, emoji compresa: il CP lo normalizza da solo
-  // (verificato), e ripulirlo qui sarebbe una supposizione in piu' sul server.
-  const chatClient = () => {
-    const baseUrl = $("baseUrl").value.trim();
-    if (!baseUrl) throw new ChatError("serve l'URL del control-plane");
-    return new ChatClient({ baseUrl, model: $("model").value });
-  };
-
-  // Ogni option ripete modello e destinazione. I picker mobili rendono le
-  // intestazioni optgroup senza pallino, facendo sembrare il modello
-  // disabilitato: qui si disegnano soltanto vere option selezionabili.
+  // Opzioni vere anche sui picker mobili, che rendono le intestazioni optgroup
+  // senza pallino e possono far sembrare un modello disabilitato.
   const option = (value, text) => {
     const el = document.createElement("option");
     el.value = value;
     el.textContent = text;
     return el;
   };
-
-  const loadModels = async () => {
-    $("chatNote").textContent = "carico...";
-    try {
-      const catalog = buildCatalog(await chatClient().listModels());
-      const entries = selectableModelOptions(catalog);
-      const previous = $("model").value;
-      $("model").replaceChildren(...entries.map((entry) => option(entry.value, entry.label)));
-      if (entries.some((entry) => entry.value === previous)) $("model").value = previous;
-      const { models, pinned, machines, external } = catalog.counts;
-      $("send").disabled = !entries.length;
-      $("chatNote").textContent = `${models} modelli su ${machines} macchine`
-        + (pinned ? ` · ${pinned} pin diretti` : "")
-        + (external ? ` · ${external} esterno` : "");
-    } catch (error) {
-      $("model").replaceChildren();
-      $("send").disabled = true;
-      $("chatNote").textContent = error.message;
-    }
-  };
-
-  const sendMessage = async () => {
-    const text = $("prompt").value.trim();
-    if (!text) return;
-    $("prompt").value = "";
-    bubble("user", text);
-    history.push({ role: "user", content: text });
-    const target = bubble("assistant", "");
-    $("send").disabled = true;
-    $("chatStatus").textContent = "in corso...";
-    try {
-      const result = await chatClient().send(history, {
-        onDelta: (_piece, whole) => {
-          target.textContent = whole;
-          $("chatLog").scrollTop = $("chatLog").scrollHeight;
-        },
-      });
-      history.push({ role: "assistant", content: result.text });
-      $("chatStatus").textContent = `${result.text.length} caratteri in ${result.chunks} pezzi`;
-    } catch (error) {
-      target.parentElement.classList.add("error");
-      target.textContent = error.message;
-      // Il turno fallito non entra nella storia: ritentare non deve duplicare.
-      history.pop();
-      $("chatStatus").textContent = "errore";
-    } finally {
-      $("send").disabled = false;
-    }
-  };
-
-  $("loadModels").addEventListener("click", loadModels);
-  $("send").addEventListener("click", sendMessage);
-  $("clearChat").addEventListener("click", () => {
-    history = [];
-    $("chatLog").replaceChildren();
-    $("chatStatus").textContent = "";
-  });
-  $("prompt").addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-      event.preventDefault();
-      sendMessage();
-    }
-  });
 
   // Il runtime di modelli (Transformers.js) e' caricato su richiesta dal pannello
   // "Modelli locali": finche' non c'e', embed_texts e translate non si dichiarano.
@@ -402,6 +279,12 @@
     llmHistory = [];
     $("llmChat").replaceChildren();
     $("llmStatus").textContent = "";
+  });
+  $("llmPrompt").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      $("llmSend").click();
+    }
   });
 
   const nodeId = localStorage.getItem("hyperspace.webNodeId") || newNodeId();

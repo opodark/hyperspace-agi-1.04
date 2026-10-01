@@ -56,10 +56,10 @@
       <div class="card signal"><span class="pill" id="meshHealth">connessione in corso</span><p id="meshNote">Il catalogo si aggiorna dalla rete reale.</p></div>
     </div>
   </section>
-  <div class="section-head"><div><div class="eyebrow">Mesh chat</div><h2>Una chat, molti cervelli.</h2></div><p>Scegli il modello; HyperSpace decide il nodo migliore oppure rispetta il pin su una macchina precisa.</p></div>
+  <div class="section-head"><div><div class="eyebrow">Chat locale</div><h2>Un modello, sul tuo dispositivo.</h2></div><p>Questa chat usa WebGPU nel browser: non inoltra richieste ai modelli della mesh e non occupa le macchine collegate.</p></div>
   <section class="card chat-shell">
-    <aside class="chat-side"><h3>Destinazione</h3><p class="small">Modello e percorso di calcolo.</p><div class="field"><label for="model">Modello</label><select id="model"><option>Caricamento…</option></select></div><div class="model-meta" id="modelMeta">Interrogo la mesh.</div><button class="secondary" id="reloadModels">Aggiorna catalogo</button><button class="secondary" id="clearChat">Nuova conversazione</button></aside>
-    <div class="chat-main"><div class="chat-top"><b>Conversazione HyperSpace</b><span class="pill" id="chatStatus">pronta</span></div><div class="chat-log" id="chatLog"><div class="empty" id="emptyChat"><i></i><b>La mesh è in ascolto.</b><p>Fai una domanda o scegli un modello specifico.</p></div></div><div class="composer"><textarea id="prompt" placeholder="Scrivi alla mesh…"></textarea><div class="composer-row"><span>Invio per spedire · Shift+Invio per andare a capo</span><button id="send" disabled>Invia ↗</button></div></div></div>
+    <aside class="chat-side"><h3>Nel browser</h3><p class="small">WebLLM su WebGPU, senza control-plane.</p><div class="field"><label for="llmModel">Modello</label><select id="llmModel"></select></div><div class="model-meta" id="llmMeta">Il modello viene scaricato nel browser al primo avvio; può richiedere alcuni GB.</div><button class="secondary" id="loadLlm">Carica modello locale</button><button class="secondary" id="llmClear">Nuova conversazione</button></aside>
+    <div class="chat-main"><div class="chat-top"><b>Conversazione locale</b><span class="pill" id="llmStatus">modello non caricato</span></div><div class="chat-log" id="llmChat"><div class="empty" id="emptyChat"><i></i><b>Il tuo dispositivo è pronto.</b><p>Carica un modello locale per iniziare.</p></div></div><div class="composer"><textarea id="llmPrompt" placeholder="Scrivi al modello locale…"></textarea><div class="composer-row"><span>Invio per spedire · Shift+Invio per andare a capo</span><button id="llmSend" disabled>Invia ↗</button></div></div></div>
   </section>
   <section class="details">
     <div class="detail"><b>Consenso reversibile</b><p>Nessun collegamento automatico. Puoi uscire in ogni momento o semplicemente chiudere la scheda.</p></div>
@@ -71,25 +71,13 @@
 <script src="./join-config.js"></script>
 <script type="module">
   import { WebNode, detectCapabilities, newNodeId } from "./src/index.js";
-  import { requestWebGpuAdapter } from "./src/webgpu.js";
+  import { createWebLlmChat, loadWebLlm, requestWebGpuAdapter } from "./src/webgpu.js";
   const $ = id => document.getElementById(id);
   const config = window.HYPERSPACE_JOIN || {};
   const configuredGateways = Array.isArray(config.gatewayUrls) && config.gatewayUrls.length
     ? config.gatewayUrls : [config.gatewayUrl];
   const gatewayUrls = configuredGateways.map(value => String(value || "").replace(/\/+$/, "")).filter(Boolean);
   let gatewayUrl = gatewayUrls[0] || "";
-  async function gatewayFetch(path, options) {
-    let lastError;
-    const ordered = [gatewayUrl, ...gatewayUrls.filter(url => url !== gatewayUrl)].filter(Boolean);
-    for (const base of ordered) {
-      try {
-        const response = await fetch(`${base}${path}`, options);
-        if (response.ok || response.status < 500) { gatewayUrl = base; return response; }
-        lastError = new Error(`HTTP ${response.status}`);
-      } catch (error) { lastError = error; }
-    }
-    throw lastError || new Error("Nessun gateway raggiungibile");
-  }
   $("siteName").textContent = config.siteName || "ZeroZeroComputer";
   $("meshName").textContent = config.meshName || "HyperSpace";
   const nodeId = localStorage.getItem("hyperspace.publicNodeId") || newNodeId();
@@ -118,55 +106,22 @@
   $("leave").addEventListener("click",()=>{ node?.stop(); node=null; state("","Disconnesso dalla mesh"); buttons(); });
   window.addEventListener("beforeunload",()=>node?.stop());
 
-  // Catalogo reale, chat streaming e panoramica animata della mesh.
-  let history=[];
+  // La chat pubblica resta interamente nel browser: nessuna chiamata ai modelli
+  // della mesh. Il gateway serve solo alla registrazione volontaria del nodo.
   let catalog={models:[],machines:[]};
-  const cleanId=id=>String(id||"").replace(/^[^0-9A-Za-z]+/,"").trim();
-  function modelInfo(model){
-    const id=String(model.id||"");
-    const cut=id.indexOf("::");
-    const base=cleanId(cut<0?id:id.slice(0,cut));
-    const hs=model.hyperspace||{};
-    return {id,base,machine:String(hs.node_alias||hs.node_id||"").slice(0,18),tier:String(hs.tier||""),external:model.owned_by==="omniroute"};
-  }
-  function renderCatalog(raw){
-    const seen=new Set(), options=[], machines=new Set(), names=new Set();
-    for(const model of raw){const info=modelInfo(model);if(!info.id||seen.has(info.id))continue;seen.add(info.id);names.add(info.base);if(info.machine)machines.add(info.machine);options.push(info);}
-    catalog={models:[...names],machines:[...machines]};
-    $("model").replaceChildren(...options.map(info=>{const option=document.createElement("option");option.value=info.id;option.textContent=info.machine?`${info.base} · ${info.machine}${info.tier?` · ${info.tier}`:""}`:`${info.base} · ${info.external?"provider esterno":"routing automatico"}`;return option;}));
-    $("send").disabled=!options.length;$("machineCount").textContent=machines.size;$("modelCount").textContent=names.size;
-    $("modelStrip").replaceChildren(...[...names].slice(0,8).map(name=>{const chip=document.createElement("span");chip.className="model-chip";chip.textContent=name;return chip;}));
-    $("modelMeta").textContent=options.length?`${options.length} percorsi · ${names.size} modelli · ${machines.size} macchine`:"Nessun modello disponibile";
-    $("meshFreshness").textContent=`aggiornata alle ${new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;
-    $("meshHealth").className="pill live";$("meshHealth").textContent="mesh raggiungibile";$("meshNote").textContent="Topologia ricavata dal catalogo reale dei nodi.";
-  }
-  async function loadModels(){
-    if(!gatewayUrl)return;$("modelMeta").textContent="Aggiorno il catalogo…";
-    try{const response=await gatewayFetch("/v1/models");if(!response.ok)throw new Error(`HTTP ${response.status}`);const body=await response.json();renderCatalog(Array.isArray(body.data)?body.data:[]);}
-    catch(error){$("send").disabled=true;$("modelMeta").textContent=`Catalogo non disponibile: ${error.message}`;$("meshHealth").className="pill";$("meshHealth").textContent="mesh non raggiungibile";$("meshNote").textContent=error.message;}
-  }
-  function bubble(role,text){
-    $("emptyChat")?.remove();const box=document.createElement("div");box.className=`msg ${role}`;const who=document.createElement("span");who.className="who";who.textContent=role==="user"?"tu":"mesh";const body=document.createElement("span");body.textContent=text;box.append(who,body);$("chatLog").append(box);$("chatLog").scrollTop=$("chatLog").scrollHeight;return body;
-  }
-  function parseEvents(buffer,onText){
-    const parts=buffer.replace(/\r\n/g,"\n").split("\n\n"),rest=parts.pop()||"";
-    for(const part of parts){const data=part.split("\n").filter(line=>line.startsWith("data:")).map(line=>line.slice(5).trim()).join("");if(!data||data==="[DONE]")continue;const json=JSON.parse(data);if(json.error)throw new Error(String(json.error));const text=json.choices?.[0]?.delta?.content;if(text)onText(text);}
-    return rest;
-  }
-  async function sendMessage(){
-    const text=$("prompt").value.trim(),model=$("model").value;if(!text||!model)return;$("prompt").value="";bubble("user",text);history.push({role:"user",content:text});const target=bubble("assistant","");$("send").disabled=true;$("chatStatus").textContent="la mesh pensa…";
-    try{const response=await gatewayFetch("/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model,messages:history,stream:true,think:false,max_tokens:256,surface:"public-web"})});if(!response.ok)throw new Error(`HTTP ${response.status}`);let full="";if((response.headers.get("content-type")||"").includes("application/json")){const json=await response.json();if(json.error)throw new Error(json.error.message||json.error);full=String(json.choices?.[0]?.message?.content||"");target.textContent=full;}else{const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="";while(true){const{value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});buffer=parseEvents(buffer,piece=>{full+=piece;target.textContent=full;$("chatLog").scrollTop=$("chatLog").scrollHeight;});}}history.push({role:"assistant",content:full});$("chatStatus").textContent="risposta completata";}
-    catch(error){target.parentElement.classList.add("error");target.textContent=error.message;history.pop();$("chatStatus").textContent="errore";}finally{$("send").disabled=!$("model").options.length;}
-  }
-  $("reloadModels").addEventListener("click",loadModels);$("send").addEventListener("click",sendMessage);
-  $("prompt").addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();sendMessage();}});
-  $("clearChat").addEventListener("click",()=>{history=[];$("chatLog").innerHTML='<div class="empty" id="emptyChat"><i></i><b>La mesh è in ascolto.</b><p>Fai una domanda o scegli un modello specifico.</p></div>';$("chatStatus").textContent="pronta";});
+  const LLM_MODELS=["Qwen2.5-0.5B-Instruct-q4f16_1-MLC","Llama-3.2-1B-Instruct-q4f32_1-MLC","SmolLM2-1.7B-Instruct-q4f16_1-MLC"];
+  $("llmModel").replaceChildren(...LLM_MODELS.map(model=>{const option=document.createElement("option");option.value=model;option.textContent=model;return option;}));
+  let llmChat=null,llmHistory=[];
+  function bubble(role,text){$("emptyChat")?.remove();const box=document.createElement("div");box.className=`msg ${role}`;const who=document.createElement("span");who.className="who";who.textContent=role==="user"?"tu":"locale";const body=document.createElement("span");body.textContent=text;box.append(who,body);$("llmChat").append(box);$("llmChat").scrollTop=$("llmChat").scrollHeight;return body;}
+  $("loadLlm").addEventListener("click",async()=>{$("loadLlm").disabled=true;$("llmStatus").textContent="carico il motore…";try{const webllm=await loadWebLlm();llmChat=createWebLlmChat({webllm,model:$("llmModel").value,onStatus:({phase,progress})=>{$("llmStatus").textContent=phase==="progress"?`scarico… ${Math.round(Number(progress||0)*100)}%`:phase==="ready"?"modello pronto":"preparo il motore…";}});$("llmSend").disabled=false;$("llmStatus").textContent="pronto a scaricare il modello al primo messaggio";}catch(error){llmChat=null;$("llmStatus").textContent=`errore: ${error.message}`;}finally{$("loadLlm").disabled=false;}});
+  async function sendLocal(){const text=$("llmPrompt").value.trim();if(!text||!llmChat)return;$("llmPrompt").value="";bubble("user",text);llmHistory.push({role:"user",content:text});const target=bubble("assistant","");$("llmSend").disabled=true;$("llmStatus").textContent="genero…";try{const reply=await llmChat.generate(llmHistory,{onDelta:(_piece,whole)=>{target.textContent=whole;$("llmChat").scrollTop=$("llmChat").scrollHeight;}});target.textContent=reply||target.textContent;llmHistory.push({role:"assistant",content:reply});$("llmStatus").textContent="risposta completata";}catch(error){target.parentElement.classList.add("error");target.textContent=error.message;llmHistory.pop();$("llmStatus").textContent="errore";}finally{$("llmSend").disabled=!llmChat;}}
+  $("llmSend").addEventListener("click",sendLocal);$("llmPrompt").addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();sendLocal();}});$("llmClear").addEventListener("click",()=>{llmHistory=[];$("llmChat").innerHTML='<div class="empty" id="emptyChat"><i></i><b>Il tuo dispositivo è pronto.</b><p>Carica un modello locale per iniziare.</p></div>';$("llmStatus").textContent=llmChat?"modello pronto":"modello non caricato";});
 
   const canvas=$("meshCanvas"),ctx=canvas.getContext("2d");let tick=0;
   function drawMesh(now){const density=devicePixelRatio||1,width=canvas.clientWidth,height=canvas.clientHeight;if(canvas.width!==width*density||canvas.height!==height*density){canvas.width=width*density;canvas.height=height*density;}ctx.setTransform(density,0,0,density,0,0);ctx.clearRect(0,0,width,height);const centerX=width/2,centerY=height/2+10,count=Math.max(3,catalog.machines.length||3),nodes=[];ctx.strokeStyle="#263d66";ctx.lineWidth=1;for(let index=0;index<count;index++){const angle=now*.00018+index*Math.PI*2/count,radius=Math.min(width,height)*(.22+(index%2)*.12),x=centerX+Math.cos(angle)*radius,y=centerY+Math.sin(angle)*radius*.58;nodes.push([x,y]);ctx.beginPath();ctx.moveTo(centerX,centerY);ctx.lineTo(x,y);ctx.stroke();}ctx.fillStyle="#57e6d9";ctx.shadowColor="#57e6d9";ctx.shadowBlur=24;ctx.beginPath();ctx.arc(centerX,centerY,7,0,Math.PI*2);ctx.fill();for(let index=0;index<nodes.length;index++){const[x,y]=nodes[index];ctx.fillStyle="#57e6d9";ctx.shadowBlur=16;ctx.beginPath();ctx.arc(x,y,4.5,0,Math.PI*2);ctx.fill();const satellites=Math.max(1,Math.ceil((catalog.models.length||4)/nodes.length));for(let satellite=0;satellite<satellites;satellite++){const angle=now*.00035+satellite*Math.PI*2/satellites+index,radius=17+satellite*5;ctx.fillStyle="#9a7cff";ctx.shadowColor="#9a7cff";ctx.shadowBlur=10;ctx.beginPath();ctx.arc(x+Math.cos(angle)*radius,y+Math.sin(angle)*radius,2.2,0,Math.PI*2);ctx.fill();}}ctx.shadowBlur=0;tick=now;requestAnimationFrame(drawMesh);}requestAnimationFrame(drawMesh);
   if(!gatewayUrl){ state("error","Gateway non configurato"); }
   else if(location.protocol!=="https:"&&location.hostname!=="localhost"){ state("error","Apri la pagina in HTTPS"); }
-  else { loadModels(); setInterval(loadModels,60000); }
+  else { $("meshFreshness").textContent="nodo pronto per i task browser"; }
   buttons();
 </script>
 </body>
