@@ -150,6 +150,31 @@ def domanda(*tools):
             "stream": False}
 
 
+def _chiamate_a(nome: str, albero: ast.AST) -> list:
+    """Le chiamate a `nome`, con la funzione che le contiene.
+
+    `_stream_gen` è un generatore annidato dentro v1_chat_completions, quindi
+    non si trova con un indice di tree.body: serve scendere nell'albero e
+    risalire da ogni chiamata alla funzione che la contiene.
+    """
+    genitori = {}
+    for nodo in ast.walk(albero):
+        for figlio in ast.iter_child_nodes(nodo):
+            genitori[figlio] = nodo
+
+    def scope(nodo):
+        corrente = nodo
+        while corrente in genitori:
+            corrente = genitori[corrente]
+            if isinstance(corrente, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                return corrente.name
+        return "<modulo>"
+
+    return [(scope(chiamata), chiamata) for chiamata in ast.walk(albero)
+            if isinstance(chiamata, ast.Call) and isinstance(chiamata.func, ast.Name)
+            and chiamata.func.id == nome]
+
+
 class PassaggioTests(unittest.TestCase):
     """Chi esegue cosa, e cosa torna indietro."""
 
@@ -287,10 +312,16 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(scelta["delta"], {"role": "assistant", "content": "ciao"})
 
     def test_i_due_rami_dello_stream_passano_di_li(self):
-        sorgente = SOURCE.read_text(encoding="utf-8")
-        # Una è la definizione; le altre due sono i rami dello stream (mesh e
-        # ollama-diretto): entrambi devono costruire il chunk con la stessa funzione.
-        self.assertEqual(sorgente.count("_chunk_finale(result_json,"), 3)
+        # I due rami dello stream (mesh e ollama-diretto) devono costruire il
+        # chunk finale con la stessa funzione: se uno dei due se lo scrive a
+        # mano, i due rami divergono e lo stesso modello risponde in due modi.
+        chiamate = _chiamate_a("_chunk_finale", ast.parse(SOURCE.read_text(encoding="utf-8")))
+        self.assertEqual(len(chiamate), 2, "una chiamata per ramo dello stream")
+        for scope, chiamata in chiamate:
+            with self.subTest(scope=scope):
+                self.assertEqual(scope, "_stream_gen")
+                self.assertEqual([getattr(a, "id", "") for a in chiamata.args[:1]],
+                                 ["result_json"])
 
 
 if __name__ == "__main__":

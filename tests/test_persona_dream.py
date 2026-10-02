@@ -334,6 +334,9 @@ class WiringTests(unittest.TestCase):
         cls.source = MAIN_SOURCE.read_text(encoding="utf-8")
         tree = ast.parse(cls.source)
         cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        cls.assignments = {t.id: node.value for node in tree.body
+                           if isinstance(node, ast.Assign)
+                           for t in node.targets if isinstance(t, ast.Name)}
 
     def test_le_route_del_sogno_esistono(self):
         for nome in ("persona_dreams_list", "persona_dream_review", "persona_dream_run"):
@@ -385,13 +388,15 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(self.source.count("_safe_initialize_persona_dream()"), 3)
 
     def test_le_chiavi_del_sogno_sono_nella_sezione_persona(self):
-        sezione = self.source[self.source.index('"PERSONA_FILE"'):
-                              self.source.index('"Canali esterni"')]
-        for chiave in ("PERSONA_DREAM_ENABLED", "PERSONA_DREAM_START_HOUR",
+        # La sezione si legge dalla lista _ENV_META, non dalla posizione delle
+        # righe: il test precedente le tagliava dal testo tra due letterali,
+        # cosa che reggeva solo finche' la tabella stava tutta in main.py.
+        meta = {m["key"]: m for m in ast.literal_eval(self.assignments["_ENV_META"])}
+        for chiave in ("PERSONA_FILE", "PERSONA_DREAM_ENABLED", "PERSONA_DREAM_START_HOUR",
                        "PERSONA_DREAM_END_HOUR", "PERSONA_DREAM_IDLE_S",
                        "PERSONA_DREAM_MAX_TOKENS"):
             with self.subTest(chiave=chiave):
-                self.assertIn(f'"{chiave}"', sezione)
+                self.assertEqual(meta[chiave]["section"], "Persona")
 
     def test_lo_stato_del_sogno_e_visibile_in_persona(self):
         body = ast.unparse(self.functions["persona_status"])

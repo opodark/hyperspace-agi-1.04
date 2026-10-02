@@ -257,7 +257,9 @@ class ChannelWiringTests(unittest.TestCase):
         meta = {m["key"]: m for m in ast.literal_eval(self.assignments["_ENV_META"])}
         for chiave in ("CHANNEL_CLIENTS", "CHANNEL_ENABLED", "CHANNEL_MODEL",
                        "CHANNEL_MIN_REPLY_INTERVAL_S", "CHANNEL_REPLY_PROBABILITY",
-                       "CHANNEL_FLOOD_MAX", "CHANNEL_STRIKE_MUTE", "CHANNEL_STRIKE_BAN"):
+                       "CHANNEL_FLOOD_MAX", "CHANNEL_STRIKE_MUTE", "CHANNEL_STRIKE_BAN",
+                       "CHANNEL_CONTEXT_MESSAGES", "CHANNEL_CONTEXT_CHARS",
+                       "CHANNEL_NUM_CTX"):
             with self.subTest(key=chiave):
                 self.assertEqual(meta[chiave]["section"], "Canali esterni")
         self.assertEqual(meta["CHANNEL_CLIENTS"]["type"], "password")
@@ -469,14 +471,11 @@ class ContestoWiringTests(unittest.TestCase):
         # puo' puntare dove e' montato.
         self.assertIn('os.getenv("MEMORY_FILE"', self.source)
         self.assertIn("MEMORY_FILE", self.source)
-
-    def test_le_chiavi_del_contesto_sono_in_setup(self):
-        sezione = self.source[self.source.index('"Canali esterni"'):
-                              self.source.index("_PERSONA_ENV_SECTION") if "_PERSONA_ENV_SECTION" in self.source
-                              else len(self.source)]
-        for chiave in ("CHANNEL_CONTEXT_MESSAGES", "CHANNEL_CONTEXT_CHARS", "CHANNEL_NUM_CTX"):
-            with self.subTest(chiave=chiave):
-                self.assertIn(f'"{chiave}"', sezione)
+    # Le chiavi di contesto (CHANNEL_CONTEXT_*) sono controllate in
+    # ChannelWiringTests.test_la_sezione_env_dei_canali_e_configurabile, dove la
+    # sezione e' letta dalla lista _ENV_META e non dalla posizione delle righe:
+    # qui il test le cercava con uno slicing di testo, che reggeva solo finche'
+    # la tabella stava tutta in main.py.
 
 
 class RuntimeTests(unittest.TestCase):

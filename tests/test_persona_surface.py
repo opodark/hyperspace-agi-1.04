@@ -17,6 +17,39 @@ from shared.persona import (IDENTITY_TOOLS, INTRO_MAX_BOUNDARIES, SURFACE_CONTEX
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_SOURCE = ROOT / "control-plane" / "main.py"
 
+# Chi puo' leggere BUILTIN_TOOLS. `_catalogo_nativi` e' l'unico che FILTRA per
+# superficie; gli altri hanno un motivo proprio e dichiarato:
+_LEGGONO_BUILTIN_TOOLS = {
+    "<modulo>",                 # la definizione e CODE_SANDBOX_TOOL
+    "_sync_connector_tools",    # riallineamento quando i connettori cambiano
+    "_catalogo_nativi",         # il filtro per superficie
+    "_mcp_tools",               # il server MCP: superficie diversa, catalogo pieno
+}
+
+
+def _scope_che_toccano(nome: str, tree: ast.AST) -> set:
+    """Gli scope che toccano il globale `nome` (letture e scritture).
+
+    Conta gli scope, non i call site: un quarto percorso che offra i tool
+    leggendo BUILTIN_TOOLS in persona propria viene fuori qui anche se non
+    chiama nessuna delle funzioni che il test conosce.
+    """
+    genitori = {}
+    for nodo in ast.walk(tree):
+        for figlio in ast.iter_child_nodes(nodo):
+            genitori[figlio] = nodo
+
+    def scope(nodo):
+        corrente = nodo
+        while corrente in genitori:
+            corrente = genitori[corrente]
+            if isinstance(corrente, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                return corrente.name
+        return "<modulo>"
+
+    return {scope(nodo) for nodo in ast.walk(tree)
+            if isinstance(nodo, ast.Name) and nodo.id == nome}
+
 
 class NormalizeSurfaceTests(unittest.TestCase):
     def test_superficie_sconosciuta_senza_canale_e_vuota(self):
@@ -199,13 +232,14 @@ class SurfaceWiringTests(unittest.TestCase):
 
     def test_il_catalogo_dei_tool_si_filtra_per_superficie(self):
         """Il catalogo nativo passa da `_catalogo_nativi`, che chiede al modulo
-        quali tool nascondere: tre punti lo usano (loop, non-stream, stream) e
-        nessuno deve tornare a leggere `BUILTIN_TOOLS` per conto suo."""
+        quali tool nascondere. Il rischio non e' che `_catalogo_nativi` venga
+        usata poche volte: e' che qualcuno torni a leggere `BUILTIN_TOOLS` per
+        conto proprio e offra i tool dell'identita' dove non devono andare
+        (la superficie `workbench` dichiara di non volerne)."""
         corpo = ast.unparse(self.functions["_catalogo_nativi"])
         self.assertIn("identity_tools_hidden(superficie)", corpo)
-        sorgente = MAIN_SOURCE.read_text(encoding="utf-8")
-        self.assertEqual(sorgente.count("_catalogo_nativi("), 4,
-                         "una definizione + i tre punti che offrono i tool")
+        self.assertLessEqual(_scope_che_toccano("BUILTIN_TOOLS", self.tree),
+                             _LEGGONO_BUILTIN_TOOLS)
         # la superficie viaggia con la richiesta, o il loop non la saprebbe
         chat = ast.unparse(self.functions["v1_chat_completions"])
         self.assertIn("_hyperspace_surface", chat)
