@@ -17,6 +17,8 @@ Se node non c'e', il test 1 si salta invece di fallire: la suite Python non deve
 dipendere da node per tutto il resto.
 """
 import ast
+
+from tests import cp_source
 import __future__
 import json
 import shutil
@@ -25,7 +27,6 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-CP_MAIN = (ROOT / "control-plane" / "main.py").read_text(encoding="utf-8")
 BRIDGE = (ROOT / "infra-ui" / "server.py").read_text(encoding="utf-8")
 DASH = (ROOT / "infra-ui" / "dashboard.html").read_text(encoding="utf-8")
 CP_DASH = (ROOT / "control-plane" / "dashboard.html").read_text(encoding="utf-8")
@@ -41,7 +42,7 @@ def _log_types_cp() -> set:
     qualsiasi ("code_review" in un commento, o in un'altra riga) per far
     passare il controllo: qui conta solo una voce della lista.
     """
-    for nodo in ast.parse(CP_MAIN).body:
+    for nodo in cp_source.albero().body:
         if isinstance(nodo, ast.Assign) and any(
                 getattr(t, "id", "") == "LOG_TYPES" for t in nodo.targets):
             return set(ast.literal_eval(nodo.value))

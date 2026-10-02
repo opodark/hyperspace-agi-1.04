@@ -15,6 +15,8 @@ domanda su Formula 1 restituisce "Chi (letter) - Wikipedia"). Quindi la lingua Ã
 from __future__ import annotations
 
 import ast
+
+from tests import cp_source
 import sys
 import unittest
 from pathlib import Path
@@ -22,7 +24,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-SOURCE = ROOT / "control-plane" / "main.py"
 
 from shared import web_search  # noqa: E402
 
@@ -185,7 +186,7 @@ class CablaggioTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.sorgente = SOURCE.read_text(encoding="utf-8")
+        cls.sorgente = cp_source.SORGENTE()
         albero = ast.parse(cls.sorgente)
         cls.funzioni = {n.name: n for n in albero.body
                         if isinstance(n, ast.FunctionDef)}

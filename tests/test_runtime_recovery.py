@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regressions from the Mac runtime audit: auth, liveness, native routing, DB."""
 import ast
+
+from tests import cp_source
 import os
 import sqlite3
 import tempfile
@@ -16,13 +18,12 @@ from shared import db
 from shared.network_security import token_authorized
 
 
-SOURCE = Path(__file__).parents[1] / "control-plane/main.py"
 
 
 def load(names, scope):
-    nodes = [n for n in ast.parse(SOURCE.read_text()).body
+    nodes = [n for n in cp_source.albero().body
              if isinstance(n, ast.FunctionDef) and n.name in names]
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"), scope)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "cp", "exec"), scope)
     return scope
 
 
@@ -126,9 +127,9 @@ class DatabaseRecoveryTests(unittest.TestCase):
 
 class LocalFirstTests(unittest.TestCase):
     def run_fallback(self, direct):
-        tree = ast.parse(SOURCE.read_text())
-        route = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                     and n.name == "v1_chat_completions")
+        # fresco=True: qui sotto il nodo viene RINOMINATO e privato dei
+        # decorator per eseguire solo il ramo di fallback.
+        route = cp_source.nodo("v1_chat_completions", fresco=True)
         start = next(i for i, n in enumerate(route.body) if isinstance(n, ast.If)
                      and ast.unparse(n.test) == "not deadline.allows()")
         route.name = "fallback"
@@ -143,7 +144,7 @@ class LocalFirstTests(unittest.TestCase):
             "_finalize_task": Mock(), "_respond_result": lambda value: value,
             "_try_federated_execution": fed, "_try_omniroute_fallback": Mock(), "push_log": Mock(),
         }
-        exec(compile(ast.Module(body=[route], type_ignores=[]), str(SOURCE), "exec"), scope)
+        exec(compile(ast.Module(body=[route], type_ignores=[]), "cp", "exec"), scope)
         return scope["fallback"](), scope
 
     def test_available_local_model_does_not_wait_for_remote_fallback(self):

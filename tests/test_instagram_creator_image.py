@@ -24,6 +24,8 @@ Flask, e la richiesta viene riconosciuta dalla regex vera di `shared/prompt_imma
 regex, che e' la stessa strada della produzione quando Ollama non risponde).
 """
 import ast
+
+from tests import cp_source
 import json
 import os
 import re
@@ -44,7 +46,6 @@ from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,  # no
                              vetrina_con_quadro_erotismo, vetrina_dal_documento)
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, negativo_sketch  # noqa: E402
 
-SOURCE = ROOT / "control-plane" / "main.py"
 
 # La vetrina che il finto documento dichiara: la stessa di
 # `tests/test_channel_immagine.py`, così "acceso" e "spento" sono due casi scritti.
@@ -79,7 +80,7 @@ class Consensi:
 
 
 def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    tree = cp_source.albero()
     nomi = {"_queue_instagram_creator_image", "_job_ritratto_instagram",
             "_livello_immagine_intima", "_nome_persona"}
     nodi = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in nomi]
@@ -112,13 +113,13 @@ def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
         "re": re,
         "push_log": lambda *args, **kwargs: None,
     }
-    exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
+    exec(compile(ast.Module(body=nodi, type_ignores=[]), "cp", "exec"), scope)
     return scope["_queue_instagram_creator_image"]
 
 
 def _nomi_usati(funzione: str) -> set:
     """I nomi (costanti, attributi) che quella funzione legge, presi dall'AST."""
-    albero = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    albero = cp_source.albero()
     nodo = next(n for n in ast.walk(albero)
                 if isinstance(n, ast.FunctionDef) and n.name == funzione)
     return ({n.id for n in ast.walk(nodo) if isinstance(n, ast.Name)}
@@ -399,7 +400,7 @@ class StessaListaTests(unittest.TestCase):
         come stringa (`"musa"`) resterebbe fermo a una scala che non c'è più, e la voce
         andrebbe avanti per conto suo rispetto alla porta dell'immagine.
         """
-        albero = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        albero = cp_source.albero()
         nodo = next(n for n in ast.walk(albero)
                     if isinstance(n, ast.FunctionDef) and n.name == "_instagram_auto_reply")
         letterali = {n.value for n in ast.walk(nodo)
@@ -419,11 +420,11 @@ class NotaQuadroTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        albero = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        albero = cp_source.albero()
         nodi = [n for n in albero.body if isinstance(n, ast.FunctionDef)
                 and n.name in {"_nota_quadro", "_chunks_con_nota"}]
         scope = {}
-        exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
+        exec(compile(ast.Module(body=nodi, type_ignores=[]), "cp", "exec"), scope)
         cls.nota_quadro = staticmethod(scope["_nota_quadro"])
         cls.chunks_con_nota = staticmethod(scope["_chunks_con_nota"])
 
@@ -489,7 +490,7 @@ class RispostaTests(unittest.TestCase):
     """
 
     def _inviati(self, vip, testo="fammi un disegno di te nuda"):
-        albero = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        albero = cp_source.albero()
         nodi = [n for n in albero.body if isinstance(n, ast.FunctionDef)
                 and n.name in {"_instagram_auto_reply", "_nota_quadro", "_chunks_con_nota"}]
         inviati, modello = [], Modello()
@@ -529,7 +530,7 @@ class RispostaTests(unittest.TestCase):
             "os": os,
             "json": json,
         }
-        exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
+        exec(compile(ast.Module(body=nodi, type_ignores=[]), "cp", "exec"), scope)
         scope["_instagram_auto_reply"]("123", "m1", testo, vip)
         return inviati, modello
 

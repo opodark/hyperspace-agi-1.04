@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import ast
+
+from tests import cp_source
 import os
 import unittest
-from pathlib import Path
 
-SRC = Path(__file__).parents[1] / "control-plane/main.py"
 CONSTS = {
     "_TOOL_CAPABLE_OVERRIDE", "_TOOL_CAPABLE_PATTERNS", "_VISION_PATTERNS",
     "_NATIVE_CHAT_FALLBACK_OVERRIDE", "_NATIVE_CHAT_FALLBACK_PATTERNS",
@@ -22,7 +22,7 @@ def _load(tool_override="", native_override=""):
     os.environ["TOOL_CAPABLE_MODELS"] = tool_override
     os.environ["NATIVE_CHAT_FALLBACK_MODELS"] = native_override
     try:
-        tree = ast.parse(SRC.read_text(encoding="utf-8"))
+        tree = cp_source.albero()
         nodes = []
         for n in tree.body:
             if isinstance(n, ast.Assign):
@@ -36,13 +36,14 @@ def _load(tool_override="", native_override=""):
             elif isinstance(n, ast.FunctionDef) and n.name in FUNCS:
                 nodes.append(n)
         scope = {"os": os}
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SRC), "exec"), scope)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "cp", "exec"), scope)
     finally:
         os.environ.pop("TOOL_CAPABLE_MODELS", None)
         os.environ.pop("NATIVE_CHAT_FALLBACK_MODELS", None)
     missing = (CONSTS | FUNCS) - set(scope)
     if missing:
-        raise RuntimeError(f"nodi non trovati in {SRC.name}: {sorted(missing)}")
+        raise RuntimeError(
+            f"nodi non trovati in {cp_source.dove(sorted(missing)[0])}: {sorted(missing)}")
     return scope
 
 
@@ -174,7 +175,7 @@ class ToolOptOutTests(unittest.TestCase):
     def test_la_rotta_legge_l_header_e_lo_usa(self):
         """Se qualcuno toglie la lettura dell'header, il flag diventa un
         documento invece di un comportamento."""
-        tree = ast.parse(SRC.read_text(encoding="utf-8"))
+        tree = cp_source.albero()
         corpo = next(ast.unparse(n) for n in tree.body
                      if isinstance(n, ast.FunctionDef) and n.name == "v1_chat_completions")
         self.assertIn("X-Hyperspace-Tools", corpo)

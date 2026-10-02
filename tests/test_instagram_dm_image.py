@@ -6,6 +6,8 @@ diventava `/instagram/media/<token>/bridge_00048_.jpg` -> 404 dalla rotta media,
 e Instagram rispondeva "400 Caricamento non riuscito": nessun disegno consegnato.
 """
 import ast
+
+from tests import cp_source
 import os
 import re
 import sys
@@ -24,13 +26,12 @@ sys.path.insert(0, str(ROOT))
 # `shared/image_jobs.py` — non in una copia scritta qui.
 from shared.image_jobs import FAMIGLIE_CHECKPOINT, usa_checkpoint  # noqa: E402
 
-SOURCE = ROOT / "control-plane" / "main.py"
 ENV = {"INSTAGRAM_PUBLIC_BASE_URL": "https://media.example.test/",
        "INSTAGRAM_MEDIA_TOKEN": "tok123"}
 
 
 def _functions(*names):
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    tree = cp_source.albero()
     trovati = {}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:
@@ -83,7 +84,7 @@ def _run(tmp_path, file_esito, sent='{"message_id": "img.1"}'):
             execute=lambda tool, args: (calls.append((tool, args)), sent)[1]),
     }
     body = [funzioni["_percorso_disegno_servibile"], funzioni["image_result"]]
-    exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), scope)
+    exec(compile(ast.Module(body=body, type_ignores=[]), "cp", "exec"), scope)
     with mock.patch.dict(os.environ, ENV, clear=False):
         scope["image_result"]()
     return calls, logs, queue, scope["_percorso_disegno_servibile"]

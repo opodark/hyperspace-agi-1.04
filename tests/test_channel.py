@@ -6,6 +6,8 @@ che sta guardando la stanza, quindi i test fissano che al primo colpo non si
 punisce (si smette solo di rispondere) e che gli strike decadono da soli.
 """
 import ast
+
+from tests import cp_source
 import sys
 import unittest
 from pathlib import Path
@@ -16,7 +18,6 @@ sys.path.insert(0, str(ROOT))
 from shared.channel import (KNOWN_CHANNELS, ChannelGuard, ChannelPolicy, ReplyPacing,  # noqa: E402
                            classifica, known_channel, normalizza, parse_clients)
 
-MAIN_SOURCE = ROOT / "control-plane" / "main.py"
 TOKEN = "t" * 40
 
 
@@ -32,8 +33,7 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue({"telegram", "discord", "cam4", "cb"} <= keys)
 
     def test_la_route_social_espone_il_catalogo(self):
-        tree = ast.parse(MAIN_SOURCE.read_text(encoding="utf-8"))
-        funzioni = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        funzioni = cp_source.funzioni()
         self.assertIn("channels_overview", funzioni)
         body = ast.unparse(funzioni["channels_overview"])
         self.assertIn("KNOWN_CHANNELS", body)
@@ -234,11 +234,8 @@ class ChannelWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tree = ast.parse(MAIN_SOURCE.read_text(encoding="utf-8"))
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-        cls.assignments = {t.id: node.value for node in tree.body
-                           if isinstance(node, ast.Assign)
-                           for t in node.targets if isinstance(t, ast.Name)}
+        cls.functions = cp_source.funzioni()
+        cls.assignments = cp_source.assegnazioni()
 
     def test_le_route_dei_canali_esistono_e_autenticano(self):
         for nome in ("channel_status", "channel_ingest", "channel_reply", "channel_result"):
@@ -403,8 +400,7 @@ class ChannelMemoryWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tree = ast.parse(MAIN_SOURCE.read_text(encoding="utf-8"))
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        cls.functions = cp_source.funzioni()
 
     def test_l_ingest_accetta_i_tip_e_registra(self):
         body = ast.unparse(self.functions["channel_ingest"])
@@ -442,9 +438,8 @@ class ContestoWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.source = MAIN_SOURCE.read_text(encoding="utf-8")
-        tree = ast.parse(cls.source)
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        cls.source = cp_source.SORGENTE()
+        cls.functions = cp_source.funzioni()
 
     def test_il_contesto_si_legge_a_chiamata(self):
         for nome in ("_channel_context_messages", "_channel_context_chars", "_channel_num_ctx"):
@@ -547,9 +542,8 @@ class RuntimeWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.source = MAIN_SOURCE.read_text(encoding="utf-8")
-        tree = ast.parse(cls.source)
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        cls.source = cp_source.SORGENTE()
+        cls.functions = cp_source.funzioni()
 
     def test_route_stato_e_comandi(self):
         for nome in ("channel_state", "channel_commands"):

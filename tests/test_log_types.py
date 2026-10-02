@@ -11,10 +11,10 @@ con LOG_TYPES lato push_log), quindi qui si controllano solo le chiamate con
 primo argomento letterale fatte dal codice del control-plane.
 """
 import ast
-import unittest
-from pathlib import Path
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
+from tests import cp_source
+import unittest
+
 
 
 def _log_types(tree):
@@ -43,7 +43,7 @@ def _literal_log_types_used(tree):
 class LogTypeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        cls.tree = cp_source.albero()
         cls.declared = _log_types(cls.tree)
         cls.used = _literal_log_types_used(cls.tree)
 

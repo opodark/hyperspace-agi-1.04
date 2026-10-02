@@ -28,6 +28,8 @@ Flask. `nuovo_job` e `workflow` sono quelli VERI di `shared/image_jobs.py`,
 perche' sono quegli oggetti a finire nel grafo che ComfyUI esegue.
 """
 import ast
+
+from tests import cp_source
 import re
 import sys
 import unittest
@@ -45,7 +47,6 @@ from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,  # no
                              prompt_ritratto, richiesta_di_se, verifica_vetrina,
                              vetrina_con_quadro_erotismo, vetrina_dal_documento)
 
-SOURCE = ROOT / "control-plane" / "main.py"
 COSTANTI = {"COMANDI_IMMAGINE"}
 
 # La vetrina che la finta persona dichiara. I due livelli sono accesi come nel
@@ -76,7 +77,7 @@ class CodaFinta:
 
 
 def _load(operator=(), vip=(), cerchia=(), coda=None, vetrina=None):
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    tree = cp_source.albero()
     # `_nome_persona` sta con `_channel_immagine` perché è il suo unico lettore qui: la
     # rotta chiede al documento il nome con cui riconoscere un ritratto di sé.
     nodi = [n for n in tree.body
@@ -117,7 +118,7 @@ def _load(operator=(), vip=(), cerchia=(), coda=None, vetrina=None):
         "re": re,
         "push_log": lambda *a, **k: registrati.append((a, k)),
     }
-    exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
+    exec(compile(ast.Module(body=nodi, type_ignores=[]), "cp", "exec"), scope)
     scope["_log"] = registrati
     return scope
 

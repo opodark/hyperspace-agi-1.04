@@ -14,10 +14,10 @@ import ast
 import json
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
+from tests import cp_source
+
 
 PROMPT = "SEGRETO-PROMPT-non-deve-uscire"
 RESULT = "SEGRETO-RISPOSTA-non-deve-uscire"
@@ -25,8 +25,8 @@ DETAIL = "SEGRETO-DETAIL-non-deve-uscire"
 
 
 def _functions(names):
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-    wanted = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    wanted = [n for n in cp_source.albero().body
+              if isinstance(n, ast.FunctionDef) and n.name in names]
     found = {n.name for n in wanted}
     assert found == set(names), f"funzioni rinominate nel CP: mancano {set(names) - found}"
     return compile(ast.Module(body=wanted, type_ignores=[]), "cp", "exec")

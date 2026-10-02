@@ -19,7 +19,10 @@ import time
 import unittest
 from pathlib import Path
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
+from tests import cp_source
+
+ROOT = Path(__file__).parents[1]
+
 CONSTS = {"_REASONING_OVERRIDE", "_REASONING_PATTERNS", "INFERENCE_TIMEOUT_S",
           "INFERENCE_TIMEOUT_REASONING_S", "REQUEST_DEADLINE_S", "FALLBACK_MIN_ATTEMPT_S"}
 FUNCS = {"_is_reasoning_model", "_inference_timeout", "_is_error_payload", "_respond_result"}
@@ -37,7 +40,7 @@ def _load(env=None):
         else:
             os.environ.pop(key, None)
     try:
-        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        tree = cp_source.albero()
         nodes = []
         for n in tree.body:
             if isinstance(n, ast.Assign) and any(
@@ -48,7 +51,7 @@ def _load(env=None):
             elif isinstance(n, ast.FunctionDef) and n.name in FUNCS:
                 nodes.append(n)
         scope = {"time": time, "os": os, "jsonify": lambda payload: payload}
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"), scope)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "cp", "exec"), scope)
     finally:
         for key, value in saved.items():
             if value is None:
@@ -57,7 +60,8 @@ def _load(env=None):
                 os.environ[key] = value
     missing = (CONSTS | FUNCS | {"RequestDeadline"}) - set(scope)
     if missing:
-        raise RuntimeError(f"nodi non trovati in {SOURCE.name}: {sorted(missing)}")
+        raise RuntimeError(
+            f"nodi non trovati in {cp_source.donde(sorted(missing)[0])}: {sorted(missing)}")
     return scope
 
 
@@ -178,9 +182,8 @@ class WiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-        cls.module = SOURCE.read_text(encoding="utf-8")
+        cls.functions = cp_source.funzioni()
+        cls.module = cp_source.SORGENTE()
 
     def test_finalize_task_detects_the_error_before_registering(self):
         body = ast.unparse(self.functions["_finalize_task"])
@@ -208,7 +211,7 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(body.count("_inference_timeout("), 2, "entrambi i rami, firmato e non")
 
     def test_node_and_proxy_timeouts_are_above_the_cp(self):
-        root = SOURCE.parents[1]
+        root = ROOT
         node_main = (root / "node" / "main.py").read_text(encoding="utf-8")
         proxy = (root / "node" / "ollama_proxy.py").read_text(encoding="utf-8")
         self.assertIn("NODE_INFERENCE_TIMEOUT_S", node_main)

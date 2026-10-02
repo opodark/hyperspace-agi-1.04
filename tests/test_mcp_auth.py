@@ -6,15 +6,15 @@ guardie sulle route usano ast come tests/test_network_route_guards.py, cosi'
 girano anche senza flask installato.
 """
 import ast
+
+from tests import cp_source
 import json
 import unittest
-from pathlib import Path
 
 from shared.mcp_auth import (
     MIN_TOKEN_LENGTH, McpAuthPolicy, McpClient, parse_clients, parse_tool_allowlist,
 )
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
 TOKEN = "t" * MIN_TOKEN_LENGTH
 
 
@@ -167,8 +167,7 @@ class McpRouteGuardTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        cls.functions = cp_source.funzioni()
 
     @staticmethod
     def _called_names(node):
@@ -203,7 +202,7 @@ class McpRouteGuardTests(unittest.TestCase):
         self.assertIn("_mcp_policy.describe", source)
 
     def test_policy_is_built_from_env_once(self):
-        module = SOURCE.read_text(encoding="utf-8")
+        module = cp_source.SORGENTE()
         self.assertIn("_mcp_policy = McpAuthPolicy.from_env()", module)
 
 

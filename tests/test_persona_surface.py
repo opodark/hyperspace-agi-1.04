@@ -5,6 +5,8 @@ Difende l'invariante del requisito: l'identità NON cambia con il mezzo, il
 contesto è deterministico e non entra mai nel documento d'identità.
 """
 import ast
+
+from tests import cp_source
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -15,7 +17,6 @@ from shared.persona import (IDENTITY_TOOLS, INTRO_MAX_BOUNDARIES, SURFACE_CONTEX
                             identity_tools_hidden, normalize_surface, surface_context)
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN_SOURCE = ROOT / "control-plane" / "main.py"
 
 # Chi puo' leggere BUILTIN_TOOLS. `_catalogo_nativi` e' l'unico che FILTRA per
 # superficie; gli altri hanno un motivo proprio e dichiarato:
@@ -207,7 +208,7 @@ class SurfaceWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tree = ast.parse(MAIN_SOURCE.read_text(encoding="utf-8"))
+        cls.tree = cp_source.albero()
         cls.functions = {n.name: n for n in cls.tree.body if isinstance(n, ast.FunctionDef)}
 
     def test_la_chat_passa_la_superficie_alla_persona(self):

@@ -10,6 +10,8 @@ promozione richiede un umano con token (verificato sull'AST di main.py).
 Nessun LLM e nessuna rete: il modello è una funzione iniettata.
 """
 import ast
+
+from tests import cp_source
 import sys
 import tempfile
 import time
@@ -24,7 +26,6 @@ from shared.persona_dream import (MAX_CHARS, MAX_NEW_PER_RUN,  # noqa: E402
                                   PersonaDream, PersonaDreamJournal, filtra_proposte,
                                   istruzioni_dream, parse_candidati)
 
-MAIN_SOURCE = ROOT / "control-plane" / "main.py"
 BUONA = "Preferisco rispondere corto quando la chat è lenta"
 BUONA_2 = "Ho notato che tendo a chiedere il nome prima di rispondere"
 BUONA_3 = "Mi accorgo di sbagliare quando scrivo due battute insieme"
@@ -331,12 +332,9 @@ class DreamTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = MAIN_SOURCE.read_text(encoding="utf-8")
-        tree = ast.parse(cls.source)
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-        cls.assignments = {t.id: node.value for node in tree.body
-                           if isinstance(node, ast.Assign)
-                           for t in node.targets if isinstance(t, ast.Name)}
+        cls.source = cp_source.SORGENTE()
+        cls.functions = cp_source.funzioni()
+        cls.assignments = cp_source.assegnazioni()
 
     def test_le_route_del_sogno_esistono(self):
         for nome in ("persona_dreams_list", "persona_dream_review", "persona_dream_run"):

@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 import ast
+
+from tests import cp_source
 import unittest
 from pathlib import Path
 
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
 
 
 class NetworkRouteGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        cls.tree = cp_source.albero()
         cls.functions = {
             node.name: node for node in cls.tree.body if isinstance(node, ast.FunctionDef)
         }

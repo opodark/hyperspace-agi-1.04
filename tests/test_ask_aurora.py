@@ -3,9 +3,9 @@ import ast
 import json
 import os
 import unittest
-from pathlib import Path
 
-SRC = Path(__file__).parents[1] / "control-plane/main.py"
+from tests import cp_source
+
 FUNCS = {"_sister_peer", "_extract_federated_text", "_tool_ask_aurora"}
 
 
@@ -22,8 +22,7 @@ def _load(peers=(), federate_result=None):
     `ask_aurora` e le esegue in isolamento, iniettando un `db` finto e un
     `_federate_to_peer` finto (che cattura l'inoltro). Stesso approccio di
     tests/test_model_patterns.py: nessuna copia della logica."""
-    tree = ast.parse(SRC.read_text(encoding="utf-8"))
-    nodes = [n for n in tree.body
+    nodes = [n for n in cp_source.albero().body
              if isinstance(n, ast.FunctionDef) and n.name in FUNCS]
     captured = {}
 
@@ -39,10 +38,11 @@ def _load(peers=(), federate_result=None):
         "db": _FakeDB(list(peers)),
         "_federate_to_peer": _fake_federate,
     }
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SRC), "exec"), scope)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "cp", "exec"), scope)
     missing = FUNCS - set(scope)
     if missing:
-        raise RuntimeError(f"funzioni non trovate in {SRC.name}: {sorted(missing)}")
+        raise RuntimeError(
+            f"funzioni non trovate in {cp_source.donde(missing.pop())}: {sorted(missing)}")
     scope["_captured"] = captured
     return scope
 
@@ -126,12 +126,12 @@ class AskAuroraToolTests(unittest.TestCase):
 
 class RegistrationTests(unittest.TestCase):
     def test_il_tool_e_nel_catalogo_nativo_e_nel_dispatcher(self):
-        source = SRC.read_text(encoding="utf-8")
+        source = cp_source.SORGENTE()
         self.assertIn('"name": "ask_aurora"', source)
         self.assertIn('"ask_aurora":      _tool_ask_aurora,', source)
 
     def test_la_config_e_in_setup(self):
-        source = SRC.read_text(encoding="utf-8")
+        source = cp_source.SORGENTE()
         self.assertIn('"key": "SISTER_PEER_LABEL"', source)
 
 

@@ -10,6 +10,8 @@ Nessuna chiamata di rete: le librerie O365/google sono importate lazily dai
 connettori, quindi la suite gira con le sole dipendenze della CI.
 """
 import ast
+
+from tests import cp_source
 import contextlib
 import json
 import os
@@ -28,7 +30,6 @@ from connectors.manager import ConnectorManager          # noqa: E402
 from connectors.office365 import Office365Connector      # noqa: E402
 from shared.connector_policy import ConnectorPolicy      # noqa: E402
 
-SOURCE = ROOT / "control-plane" / "main.py"
 
 EXPECTED_CONNECTORS = {"github": GitHubConnector,
                        "google": GoogleWorkspaceConnector,
@@ -64,7 +65,7 @@ def connector_env(**overrides):
 
 def _module_assignments():
     """Assegnazioni di primo livello in main.py (per i test di cablaggio)."""
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    tree = cp_source.albero()
     out = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):

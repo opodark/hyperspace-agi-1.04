@@ -7,6 +7,8 @@ leggibile quando il chiamante crede di parlare con una shell, che nasca spento,
 e che output e tempo siano limitati dal server e non dal chiamante.
 """
 import ast
+
+from tests import cp_source
 import importlib.util
 import json
 import unittest
@@ -19,7 +21,6 @@ ROOT = Path(__file__).parents[1]
 SPEC = importlib.util.spec_from_file_location("hostctl_agent", ROOT / "hostctl" / "agent.py")
 agent = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(agent)
-MAIN_SOURCE = ROOT / "control-plane" / "main.py"
 
 
 def _settings(values, key, default=""):
@@ -348,7 +349,7 @@ class ControlPlaneToolTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.source = MAIN_SOURCE.read_text(encoding="utf-8")
+        cls.source = cp_source.SORGENTE()
         tree = ast.parse(cls.source)
         # I gate e i due handler, nell'ordine in cui stanno nel file: il percorso
         # governato e' condiviso, quindi si prova quello che c'e' davvero.

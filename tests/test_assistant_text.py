@@ -11,14 +11,18 @@ isolamento, con push_log sostituito da uno stub: nessuna dipendenza da Flask.
 """
 import ast
 import unittest
+
 from pathlib import Path
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
+from tests import cp_source
+
+ROOT = Path(__file__).parents[1]
+
 WANTED = {"_assistant_text", "_normalize_assistant_message"}
 
 
 def _load():
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    tree = cp_source.albero()
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in WANTED]
     # Le costanti di rate-limit del warning vivono a livello di modulo.
     for n in tree.body:
@@ -31,7 +35,7 @@ def _load():
         "time": __import__("time"),
         "push_log": lambda type_, summary, detail="", **kw: logged.append((type_, summary, kw)),
     }
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"), scope)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "cp", "exec"), scope)
     scope["_logged"] = logged
     return scope
 
@@ -114,8 +118,7 @@ class WiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-        cls.functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        cls.functions = cp_source.funzioni()
 
     def test_finalize_task_normalizes_before_reading(self):
         body = ast.unparse(self.functions["_finalize_task"])
@@ -144,7 +147,7 @@ class WiringTests(unittest.TestCase):
 
 class NodeProxyTests(unittest.TestCase):
     def test_node_proxy_uses_the_reasoning_fallback_too(self):
-        node_source = (SOURCE.parents[1] / "node" / "ollama_proxy.py").read_text(encoding="utf-8")
+        node_source = (ROOT / "node" / "ollama_proxy.py").read_text(encoding="utf-8")
         self.assertIn("def _message_text(", node_source)
         # I punti in cui il testo viene registrato devono usarlo.
         self.assertNotIn('msg.get("content", "")', node_source)

@@ -7,10 +7,11 @@ Cosi' il test gira anche dove flask/cryptography non sono installati, mentre la
 verifica end-to-end completa vive in scripts/verify_web_node_e2e.py.
 """
 import ast
+
+from tests import cp_source
 import unittest
 from pathlib import Path
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
 ROOT = Path(__file__).parents[1]
 
 WEB_ROUTES = {
@@ -29,12 +30,12 @@ class EndpointAddressabilityTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        tree = cp_source.albero()
         wanted = ("_normalize_endpoint", "_ep_to_url", "_best_endpoint")
         nodes = [n for n in tree.body
                  if isinstance(n, ast.FunctionDef) and n.name in wanted]
         cls.scope = {}
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"),
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "cp", "exec"),
              cls.scope)
 
     def test_web_node_has_no_callable_endpoint(self):
@@ -60,7 +61,7 @@ class EndpointAddressabilityTests(unittest.TestCase):
 class WebRouteGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        cls.tree = cp_source.albero()
         cls.functions = {n.name: n for n in cls.tree.body if isinstance(n, ast.FunctionDef)}
 
     def test_routes_are_defined(self):
@@ -83,7 +84,7 @@ class WebRouteGuardTests(unittest.TestCase):
                 self.assertNotIn("_network_admin_error", calls)
 
     def test_registry_is_built_from_env_limits(self):
-        source = SOURCE.read_text(encoding="utf-8")
+        source = cp_source.SORGENTE()
         self.assertIn("from shared.web_node import", source)
         self.assertIn("web_registry = WebNodeRegistry(", source)
         for key in ("WEB_NODE_MAX_QUEUE", "WEB_NODE_TASK_TTL_S", "WEB_NODE_MAX_POLL_S"):
@@ -93,8 +94,10 @@ class WebRouteGuardTests(unittest.TestCase):
         shared_source = (ROOT / "shared" / "web_node.py").read_text(encoding="utf-8")
         self.assertIn("WEB_SAFE_TASK_TYPES = {", shared_source)
         # Nessun elenco duplicato nel CP: i tipi ammessi vivono in un solo posto.
-        cp_source = SOURCE.read_text(encoding="utf-8")
-        self.assertNotIn("WEB_SAFE_TASK_TYPES = {", cp_source)
+        # La variabile non si chiama `cp_source`: quello e' il modulo, e un
+        # `cp_source = ...` qui dentro lo ombreggerebbe (UnboundLocalError).
+        testo_cp = cp_source.SORGENTE()
+        self.assertNotIn("WEB_SAFE_TASK_TYPES = {", testo_cp)
 
 
 if __name__ == "__main__":

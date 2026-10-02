@@ -7,21 +7,20 @@ copiare la logica. È pura (solo `str`), non serve iniettare nulla.
 """
 import ast
 import unittest
-from pathlib import Path
 
-SRC = Path(__file__).parents[1] / "control-plane/main.py"
+from tests import cp_source
+
 FUNCS = {"parse_inference_urls"}
 
 
 def _load():
-    tree = ast.parse(SRC.read_text(encoding="utf-8"))
-    nodes = [n for n in tree.body
+    nodes = [n for n in cp_source.albero().body
              if isinstance(n, ast.FunctionDef) and n.name in FUNCS]
     scope = {}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SRC), "exec"), scope)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "cp", "exec"), scope)
     missing = FUNCS - set(scope)
     if missing:
-        raise RuntimeError(f"funzioni non trovate in {SRC.name}: {sorted(missing)}")
+        raise RuntimeError(f"funzioni non trovate nel control-plane: {sorted(missing)}")
     return scope
 
 

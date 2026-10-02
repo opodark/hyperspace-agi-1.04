@@ -10,19 +10,17 @@ solo `[DONE]`. Con qwen2:0.5b la connessione si chiudeva a meta' (curl exit 56).
 """
 import ast
 import unittest
-from pathlib import Path
 
-SOURCE = Path(__file__).parents[1] / "control-plane" / "main.py"
+from tests import cp_source
+
 HOP_BY_HOP = {"Transfer-Encoding", "Connection", "Keep-Alive", "Proxy-Authenticate",
               "Proxy-Authorization", "TE", "Trailer", "Upgrade"}
 
 
 def _sse_headers_function():
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-    node = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "_sse_headers")
+    node = cp_source.nodo("_sse_headers")
     scope = {}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), "exec"), scope)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "cp", "exec"), scope)
     return scope["_sse_headers"]
 
 

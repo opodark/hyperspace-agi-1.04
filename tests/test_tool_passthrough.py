@@ -18,6 +18,8 @@ da Flask, nessuna rete, nessun modello vero. `_execute_tool_call` è quello vero
 from __future__ import annotations
 
 import ast
+
+from tests import cp_source
 import json
 import sys
 import time
@@ -30,7 +32,6 @@ sys.path.insert(0, str(ROOT))
 
 from shared.persona import IDENTITY_TOOLS, identity_tools_hidden  # noqa: E402
 
-SOURCE = ROOT / "control-plane" / "main.py"
 FUNZIONI = ("_handlers_nativi", "_execute_tool_call", "_tool_del_client",
             "_tool_calls_passthrough", "_risposta_solo_tool_del_client",
             "_chunk_finale", "_run_tool_loop", "_assistant_text", "_catalogo_nativi")
@@ -103,7 +104,7 @@ class NodeBusyError(Exception):
 
 def carica(risposte, client_tools=True):
     """Le funzioni vere, con un modello finto e gli strumenti nativi spiati."""
-    albero = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    albero = cp_source.albero()
     nodi = [n for n in albero.body
             if isinstance(n, ast.FunctionDef) and n.name in FUNZIONI]
     mancanti = set(FUNZIONI) - {n.name for n in nodi}
@@ -138,7 +139,7 @@ def carica(risposte, client_tools=True):
     }
     scope.update({funzione: _strumento(nome)
                   for nome, funzione in STRUMENTI_DEL_CP.items()})
-    exec(compile(ast.Module(body=nodi, type_ignores=[]), str(SOURCE), "exec"), scope)
+    exec(compile(ast.Module(body=nodi, type_ignores=[]), "cp", "exec"), scope)
     scope["_registrato"] = registrato
     return scope
 
@@ -276,7 +277,7 @@ class PassaggioTests(unittest.TestCase):
 
     def test_gli_handler_hanno_una_sola_fonte(self):
         """`_execute_tool_call` e la decisione leggono lo stesso elenco."""
-        albero = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        albero = cp_source.albero()
         corpi = {n.name: ast.unparse(n) for n in albero.body
                  if isinstance(n, ast.FunctionDef)}
         self.assertIn("_handlers_nativi()", corpi["_execute_tool_call"])
@@ -315,7 +316,7 @@ class ChunkTests(unittest.TestCase):
         # I due rami dello stream (mesh e ollama-diretto) devono costruire il
         # chunk finale con la stessa funzione: se uno dei due se lo scrive a
         # mano, i due rami divergono e lo stesso modello risponde in due modi.
-        chiamate = _chiamate_a("_chunk_finale", ast.parse(SOURCE.read_text(encoding="utf-8")))
+        chiamate = _chiamate_a("_chunk_finale", cp_source.albero())
         self.assertEqual(len(chiamate), 2, "una chiamata per ramo dello stream")
         for scope, chiamata in chiamate:
             with self.subTest(scope=scope):

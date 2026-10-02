@@ -21,21 +21,18 @@ import sys
 import unittest
 from pathlib import Path
 
+from tests import cp_source
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-MAIN = ROOT / "control-plane" / "main.py"
 CANALI = ROOT / "shared" / "channel.py"
 APPLICATORI = ("_apply_env_runtime", "_reload_channel_config")
 
 
-def _albero(percorso: Path) -> ast.Module:
-    return ast.parse(percorso.read_text(encoding="utf-8"))
-
-
 def _meta_canali() -> list:
     """Le chiavi dichiarate nella sezione "Canali esterni" della tab Setup."""
-    for nodo in _albero(MAIN).body:
+    for nodo in cp_source.albero().body:
         if isinstance(nodo, ast.Assign) and any(
                 getattr(t, "id", "") == "_ENV_META" for t in nodo.targets):
             return [m["key"] for m in ast.literal_eval(nodo.value)
@@ -43,12 +40,12 @@ def _meta_canali() -> list:
     raise AssertionError("_ENV_META non trovata: la tabella della tab Setup e' cambiata")
 
 
-def _stringhe_dentro_le_funzioni(percorso: Path) -> set:
+def _stringhe_dentro_le_funzioni() -> set:
     """Le stringhe che compaiono DENTRO una funzione: sono le chiavi lette a
     chiamata o riapplicate a caldo. Quello che sta solo a livello di modulo e'
     letto una volta all'import (ed e' li' che nasce il "salvato ma inerte")."""
     trovate = set()
-    for nodo in ast.walk(_albero(percorso)):
+    for nodo in ast.walk(cp_source.albero()):
         if isinstance(nodo, ast.FunctionDef):
             for dentro in ast.walk(nodo):
                 if isinstance(dentro, ast.Constant) and isinstance(dentro.value, str):
@@ -57,7 +54,7 @@ def _stringhe_dentro_le_funzioni(percorso: Path) -> set:
 
 
 def _fonte(funzione: str) -> str:
-    for nodo in _albero(MAIN).body:
+    for nodo in cp_source.albero().body:
         if isinstance(nodo, ast.FunctionDef) and nodo.name == funzione:
             return ast.unparse(nodo)
     raise AssertionError(f"{funzione} non esiste piu' in control-plane/main.py")
@@ -77,7 +74,7 @@ class CanaliATest(unittest.TestCase):
         self.assertIn("CHANNEL_MODEL", applicatori)
 
     def test_ogni_chiave_dei_canali_ha_un_punto_che_la_legge_a_caldo(self):
-        lette_a_chiamata = _stringhe_dentro_le_funzioni(MAIN)
+        lette_a_chiamata = _stringhe_dentro_le_funzioni()
         condiviso = CANALI.read_text(encoding="utf-8")
         for chiave in _meta_canali():
             with self.subTest(chiave=chiave):
@@ -88,7 +85,7 @@ class CanaliATest(unittest.TestCase):
 
     def test_ogni_chiave_dichiarata_e_almeno_letta(self):
         """Una chiave scritta nella UI e letta da nessuno e' una promessa falsa."""
-        tutto = MAIN.read_text(encoding="utf-8") + CANALI.read_text(encoding="utf-8")
+        tutto = cp_source.SORGENTE() + CANALI.read_text(encoding="utf-8")
         for chiave in _meta_canali():
             with self.subTest(chiave=chiave):
                 self.assertGreaterEqual(tutto.count(f'"{chiave}"'), 1, chiave)
