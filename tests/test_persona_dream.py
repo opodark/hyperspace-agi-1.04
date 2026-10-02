@@ -376,13 +376,13 @@ class WiringTests(unittest.TestCase):
         self.assertIn("persona_dream_loop", self.functions)
         body = ast.unparse(self.functions["persona_dream_loop"])
         self.assertIn("_persona_dream.due(_last_foreground_activity)", body)
-        # Un thread per ramo di avvio (app.run e import come WSGI).
-        self.assertEqual(self.source.count("threading.Thread(target=persona_dream_loop"), 2)
+        # Un solo ramo di avvio: il CP parte con `python main.py`, mai come WSGI.
+        self.assertEqual(self.source.count("threading.Thread(target=persona_dream_loop"), 1)
 
     def test_lo_startup_non_muore_se_il_sogno_e_storto(self):
         self.assertIn("_safe_initialize_persona_dream", self.functions)
-        # def + chiamata nel reload + due rami di avvio.
-        self.assertEqual(self.source.count("_safe_initialize_persona_dream()"), 4)
+        # def + chiamata nel reload + l'unico ramo di avvio.
+        self.assertEqual(self.source.count("_safe_initialize_persona_dream()"), 3)
 
     def test_le_chiavi_del_sogno_sono_nella_sezione_persona(self):
         sezione = self.source[self.source.index('"PERSONA_FILE"'):

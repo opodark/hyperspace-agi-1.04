@@ -9502,21 +9502,3 @@ if __name__ == '__main__':
     # importano main.py non tirano in mezzo Ollama.
     configura_modello(chiama_ollama)
     app.run(host='0.0.0.0', port=8085, debug=False, threaded=True)
-else:
-    _load_nodes_from_db()
-    _load_tasks_from_db()
-    _load_aliases_from_db()
-    _register_local_node()
-    _initialize_development_dream()
-    _safe_initialize_persona_dream()
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
-    threading.Thread(target=metrics_loop, daemon=True).start()
-    threading.Thread(target=development_dream_loop, daemon=True).start()
-    threading.Thread(target=persona_dream_loop, daemon=True).start()
-    threading.Thread(target=post_loop, daemon=True).start()
-    threading.Thread(target=dream_loop, daemon=True).start()
-    threading.Thread(target=poem_loop, daemon=True).start()
-    _ensure_instagram_reply_started()
-    _ensure_instagram_poll_started()
-    threading.Thread(target=_instagram_publish_latest, daemon=True,
-                     name="instagram-dream-backfill").start()
