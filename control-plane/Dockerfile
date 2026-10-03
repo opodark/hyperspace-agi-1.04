@@ -12,6 +12,7 @@ COPY control-plane/desktop.html .
 COPY control-plane/conversations.html .
 COPY control-plane/diario.html .
 COPY control-plane/connectors ./connectors
+COPY control-plane/cp ./cp
 
 COPY shared ./shared
 COPY vendor/ecc ./vendor/ecc
