@@ -17,6 +17,8 @@ vivono `ChannelPolicy.from_env()` e le sue costanti: `CHANNEL_ENABLED` e
 ricostruirla. Sono due origini legittime, non una scappatoia.
 """
 import ast
+import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -26,6 +28,8 @@ from tests import cp_source
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+MAIN = ROOT / "control-plane" / "main.py"
+CP_CONFIG = ROOT / "control-plane" / "cp" / "config.py"
 CANALI = ROOT / "shared" / "channel.py"
 APPLICATORI = ("_apply_env_runtime", "_reload_channel_config")
 
@@ -89,6 +93,51 @@ class CanaliATest(unittest.TestCase):
         for chiave in _meta_canali():
             with self.subTest(chiave=chiave):
                 self.assertGreaterEqual(tutto.count(f'"{chiave}"'), 1, chiave)
+
+class BaseDirCoincideTests(unittest.TestCase):
+    """`BASE_DIR` e' definito due volte, e i due calcoli devono concordare.
+
+    main.py lo calcola da se' perche' gli serve PRIMA di qualunque import: e'
+    quello che mette la root del repo in sys.path, e senza quello
+    `import shared` non riuscirebbe. cp/config.py lo ricalcola dal basso per non
+    dipendere dal monolite.
+
+    Sono due calcoli indipendenti della stessa directory: se uno dei due cambia,
+    i path di fallback di memoria, diario, VIP e Instagram puntano da due parti
+    diverse, e la differenza si vede solo su un'installazione reale.
+
+    Il test ESEGUE l'espressione di ciascun file con `__file__` messo a quel
+    file, invece di ricostruire il risultato a mano: altrimenti il controllo
+    direbbe "va bene" qualunque cosa sia scritto, e passerebbe anche se i due
+    calcoli puntassero a directory diverse.
+    """
+
+    @staticmethod
+    def _base_dir_reale(percorso: Path) -> Path:
+        testo = percorso.read_text(encoding="utf-8")
+        riga = re.search(r"(?m)^BASE_DIR = [^\n]+$", testo)
+        assert riga, f"{percorso.name} non calcola piu' BASE_DIR"
+        spazio = {"os": os, "__file__": str(percorso)}
+        exec(riga.group(0), spazio)          # noqa: S102 - eseguiamo una riga di config
+        return Path(spazio["BASE_DIR"]).resolve()
+
+    def test_i_due_BASE_DIR_puntano_alla_stessa_directory(self):
+        da_main = self._base_dir_reale(MAIN)
+        da_cp = self._base_dir_reale(CP_CONFIG)
+        self.assertEqual(da_main, da_cp,
+                         f"i due BASE_DIR divergono ({da_main} vs {da_cp}): i path "
+                         "di memoria, diario, VIP e Instagram cadrebbero altrove")
+        self.assertEqual(da_main.name, "control-plane",
+                         "BASE_DIR deve essere la cartella del control-plane")
+
+    def test_nessuno_dei_due_e_hardcoded(self):
+        for sorgente in (MAIN, CP_CONFIG):
+            with self.subTest(file=sorgente.name):
+                testo = sorgente.read_text(encoding="utf-8")
+                riga = re.search(r"(?m)^BASE_DIR = [^\n]+$", testo)
+                self.assertIn("__file__", riga.group(0),
+                              "BASE_DIR deve derivare da __file__: fra container e "
+                              "host il path e' diverso")
 
 
 if __name__ == "__main__":

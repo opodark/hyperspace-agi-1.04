@@ -94,8 +94,7 @@ from shared.persona import (PersonaStore, audit_reply, build_introduction,
                             identity_expected, identity_tools_hidden, should_disclose)
 from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
-from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard, ChannelPolicy,
-                            ChannelRuntime, ReplyPacing)
+from shared.channel import COMANDI_DRIVER, KNOWN_CHANNELS
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import (FAMIGLIA_SDXL, FAMIGLIE_CHECKPOINT, ImmagineQueue,
                                LATO_CONSIGLIATO, RIFERIMENTO_FORZA_DEFAULT,
@@ -138,40 +137,62 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-NODE_ENDPOINTS     = [e.strip() for e in os.getenv("NODE_ENDPOINTS", "node:8084").split(",") if e.strip()]
-OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
-DEFAULT_MODEL      = os.getenv("OLLAMA_MODEL", "")
-INFERENCE_BACKEND  = os.getenv("INFERENCE_BACKEND", "ollama")
-REGISTRY_URL       = os.getenv("REGISTRY_URL", "http://registry:8086")
-_AUTHORITY_URL     = os.getenv("AUTHORITY_URL", "http://authority:8080")
-_AUTHORITY_ENABLED = os.getenv("AUTHORITY_ENABLED", "false").lower() == "true"
-UI_BRIDGE_URL      = os.getenv("UI_BRIDGE_URL", "http://localhost:8099")
-FORGE_DIR          = os.getenv("FORGE_DIR", "/app/data/forge")
-FORGE_ADMIN_TOKEN  = os.getenv("FORGE_ADMIN_TOKEN", "").strip()
-FORGE_MODEL        = os.getenv("HS_MODEL_CODER", DEFAULT_MODEL)
-CODE_SERVER_PORT   = os.getenv("CODE_SERVER_PORT", "8443").strip()
-
-MEMORY_FILE_GZ     = (os.getenv("MEMORY_FILE", "").strip()
-                      or os.path.join(BASE_DIR, "memory.json.gz"))
-MEMORY_TTL_DAYS    = int(os.getenv("MEMORY_TTL_DAYS", "7"))
-MEMORY_MAX_ENTRIES = int(os.getenv("MEMORY_MAX_ENTRIES", "200"))
-MEMORY_BACKEND     = os.getenv("MEMORY_BACKEND", "hermes").strip().lower()
-_hermes_memory     = HermesMemoryClient()
-# Web node (worker nel browser): non e' indirizzabile, quindi si registra e poi
-# tira il lavoro con un long-poll — vedi shared/web_node.py. Tutti i limiti sono
-# env, perche' un web node e' per definizione su hardware sconosciuto.
-WEB_NODE_ENABLED         = os.getenv("WEB_NODE_ENABLED", "true").lower() == "true"
-WEB_NODE_MAX_NODES       = int(os.getenv("WEB_NODE_MAX_NODES", "64"))
-WEB_NODE_MAX_QUEUE       = int(os.getenv("WEB_NODE_MAX_QUEUE", "32"))
-WEB_NODE_MAX_PAYLOAD     = int(os.getenv("WEB_NODE_MAX_PAYLOAD_BYTES", str(64 * 1024)))
-WEB_NODE_TASK_TTL_S      = int(os.getenv("WEB_NODE_TASK_TTL_S", "60"))
-WEB_NODE_MAX_POLL_S      = int(os.getenv("WEB_NODE_MAX_POLL_S", "30"))
-WEB_NODE_HEARTBEAT_S     = int(os.getenv("WEB_NODE_HEARTBEAT_S", "30"))
-
-# SearXNG — motore di ricerca self-hosted (container searxng nella stessa rete Docker)
-# Override via env: SEARXNG_URL=http://searxng:8080
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080").rstrip("/")
-
+# Tutto quello che il CP legge dall'ambiente — 52 costanti — e' in
+# cp/config.py, con i default scritti accanto a ogni os.getenv. Stessa
+# BASE_DIR (dirname(dirname(__file__)) arriva allo stesso posto), quindi i
+# percorsi di fallback non cambiano.
+from cp.config import (CODE_SERVER_PORT,
+                      DEFAULT_MODEL,
+                      FEDERATION_ENABLED,
+                      FEDERATION_PUBLIC_URL,
+                      FEDERATION_VIEW_ENABLED,
+                      FEDERATION_VIEW_TTL_S,
+                      FORGE_ADMIN_TOKEN,
+                      FORGE_DIR,
+                      FORGE_MODEL,
+                      INFERENCE_BACKEND,
+                      MEMORY_BACKEND,
+                      MEMORY_FILE_GZ,
+                      MEMORY_MAX_ENTRIES,
+                      MEMORY_TTL_DAYS,
+                      MESH_MODEL_ICON,
+                      METRICS_BACKOFF_BASE_S,
+                      METRICS_MAX_BACKOFF_S,
+                      METRICS_MAX_WORKERS,
+                      METRICS_POLL_INTERVAL_S,
+                      METRICS_POLL_TIMEOUT_S,
+                      METRICS_WINDOW,
+                      NIGHTLY_DEV_DATA_DIR,
+                      NIGHTLY_DEV_ENABLED,
+                      NIGHTLY_DEV_END_HOUR,
+                      NIGHTLY_DEV_IDLE_SECONDS,
+                      NIGHTLY_DEV_MODEL,
+                      NIGHTLY_DEV_START_HOUR,
+                      NODE_ENDPOINTS,
+                      NODE_METRICS_SCHEMA_VERSION,
+                      OLLAMA_URL,
+                      OMNIROUTE_API_KEY,
+                      OMNIROUTE_ENABLED,
+                      OMNIROUTE_MODEL,
+                      OMNIROUTE_MODEL_ID,
+                      OMNIROUTE_URL,
+                      PROMPT_COMPRESSION_ENABLED,
+                      PROMPT_COMPRESSION_MIN_CHARS,
+                      PROMPT_COMPRESSION_MODE,
+                      REGISTRY_URL,
+                      ROUTING_MAX_CANDIDATES,
+                      SEARXNG_URL,
+                      UI_BRIDGE_URL,
+                      WEB_NODE_ENABLED,
+                      WEB_NODE_HEARTBEAT_S,
+                      WEB_NODE_MAX_NODES,
+                      WEB_NODE_MAX_PAYLOAD,
+                      WEB_NODE_MAX_POLL_S,
+                      WEB_NODE_MAX_QUEUE,
+                      WEB_NODE_TASK_TTL_S,
+                      _AUTHORITY_ENABLED,
+                      _AUTHORITY_URL,
+                      _hermes_memory)
 # ── ROUTING: PESI DELLO SCORING ─────────────────────────────────────────────
 # v1.05: scoring IBRIDO metric-driven (vedi control-plane/routing.py). Il
 # blocco QUALITÀ (latenza/throughput per modello, pressione VRAM motore)
@@ -216,95 +237,10 @@ _ROUTING_WEIGHTS = {
 _recent_routing_lock = threading.Lock()
 _recent_routing_picks: dict = {}
 
-# ── TELEMETRIA NODI: pull periodico di /metrics dai nodi ───────────────────
-# Il control-plane interroga ogni nodo attivo sul suo /metrics (payload
-# backend normalizzato, vedi node/backend_metrics.py) a cadenza indipendente
-# dall'heartbeat di /status: lo stato operativo (routing) e la telemetria
-# (diagnosi, score breakdown, futuri termini di scoring osservati) restano
-# separati. I campioni restano in una finestra volatile in-memory
-# (METRICS_WINDOW) per i mini-grafici della dashboard; lo storico persistente
-# è una fase successiva (niente DB qui per ora).
-METRICS_POLL_INTERVAL_S = int(os.getenv("METRICS_POLL_INTERVAL_S", "20"))
-METRICS_POLL_TIMEOUT_S  = int(os.getenv("METRICS_POLL_TIMEOUT_S", "4"))
-METRICS_WINDOW          = int(os.getenv("METRICS_WINDOW", "20"))
-# Fetch dei nodi in PARALLELO: la raccolta seriale (timeout l'uno) sforerebbe
-# l'intervallo con molti nodi. METRICS_MAX_WORKERS limita la concorrenza.
-METRICS_MAX_WORKERS = int(os.getenv("METRICS_MAX_WORKERS", "8"))
-# Backoff sui nodi irraggiungibili: un nodo giù NON va martellato a ogni ciclo.
-# next_try_at = now + min(BASE * 2^fail_streak, MAX). Lo stale sample resta
-# servito (stale=true) finché il nodo non torna raggiungibile.
-METRICS_BACKOFF_BASE_S = float(os.getenv("METRICS_BACKOFF_BASE_S", "10"))
-METRICS_MAX_BACKOFF_S  = float(os.getenv("METRICS_MAX_BACKOFF_S", "120"))
-# Versione dello schema /metrics attesa. Deve combaciare con
-# NODE_METRICS_SCHEMA_VERSION in node/backend_metrics.py: i payload con
-# versione diversa (deployment eterogeneo) restano esposti ma marcati
-# schema_mismatch, così il consumatore non li interpreta alla cieca.
-NODE_METRICS_SCHEMA_VERSION = 3
-# Quanti nodi candidati (per score decrescente) il control-plane prova in
-# sequenza prima di ricadere su federazione/ollama-direct, quando un nodo
-# risponde "occupato" (503 node_busy_timeout).
-ROUTING_MAX_CANDIDATES = int(os.getenv("ROUTING_MAX_CANDIDATES", "3"))
-
-# OmniRoute — gateway esterno verso 278+ provider AI (molti free-tier), usato
-# come ultimo livello di fallback quando NESSUN nodo della mesh (locale o
-# federato) puo' rispondere. Non sostituisce l'inferenza locale: entra in
-# gioco solo quando tutto il resto ha gia' fallito. Funziona gia' con
-# provider free-tier di default, senza chiave configurata; OMNIROUTE_API_KEY
-# e' opzionale, per quando si collegano provider propri dalla dashboard
-# (http://<host>:20128). OMNIROUTE_ENABLED=false lo disattiva del tutto.
-OMNIROUTE_URL      = os.getenv("OMNIROUTE_URL", "http://omniroute:20128").rstrip("/")
-OMNIROUTE_API_KEY  = os.getenv("OMNIROUTE_API_KEY", "").strip()
-OMNIROUTE_MODEL    = os.getenv("OMNIROUTE_MODEL", "auto")
-OMNIROUTE_ENABLED  = os.getenv("OMNIROUTE_ENABLED", "true").lower() == "true"
-
-# Prefissi puramente cosmetici per il menu modelli di Open WebUI — 🕸️ per i
-# modelli serviti dalla mesh locale, 🌐 per la voce che instrada esplicitamente
-# a OmniRoute (provider esterni). Vengono aggiunti solo in /v1/models e tolti
-# subito in /v1/chat/completions prima di usare il nome per il routing vero:
-# nessun nodo/Ollama/OmniRoute li riconoscerebbe come nomi di modello reali.
-MESH_MODEL_ICON    = "🕸️ "
-OMNIROUTE_MODEL_ID = "🌐 OmniRoute (auto)"
-
-# Compressione prompt (Caveman via OmniRoute) — opzionale, disattivata di
-# default perche' comprime aggressivamente il fraseggio e puo' confondere
-# modelli piccoli/quantizzati se non testata sul proprio caso d'uso. Quando
-# attiva: i prompt lunghi diretti a un nodo della mesh locale passano prima
-# da OmniRoute (POST /api/compression/preview, l'engine Caveman reale, non
-# una reimplementazione nostra) per essere accorciati senza perdere
-# sostanza; le chiamate che vanno gia' a OmniRoute (fallback o selezione
-# esplicita) ricevono lo stesso trattamento gratis via header, senza
-# round-trip aggiuntivo. Fail-open su qualunque errore: in caso di dubbio
-# si manda il prompt originale, mai un errore all'utente per questo.
-PROMPT_COMPRESSION_ENABLED   = os.getenv("PROMPT_COMPRESSION_ENABLED", "false").lower() == "true"
-PROMPT_COMPRESSION_MODE      = os.getenv("PROMPT_COMPRESSION_MODE", "standard")
-PROMPT_COMPRESSION_MIN_CHARS = int(os.getenv("PROMPT_COMPRESSION_MIN_CHARS", "200"))
-
-# Nightly Development Dream: opt-in, one review-gated proposal per local day.
-NIGHTLY_DEV_ENABLED      = os.getenv("NIGHTLY_DEV_ENABLED", "false").lower() == "true"
-NIGHTLY_DEV_START_HOUR   = int(os.getenv("NIGHTLY_DEV_START_HOUR", "1"))
-NIGHTLY_DEV_END_HOUR     = int(os.getenv("NIGHTLY_DEV_END_HOUR", "5"))
-NIGHTLY_DEV_IDLE_SECONDS = int(os.getenv("NIGHTLY_DEV_IDLE_SECONDS", "3600"))
-NIGHTLY_DEV_MODEL        = os.getenv("NIGHTLY_DEV_MODEL", "").strip() or DEFAULT_MODEL
-NIGHTLY_DEV_DATA_DIR     = os.getenv("NIGHTLY_DEV_DATA_DIR", "/app/data")
-
-# ── FEDERAZIONE CP-to-CP ───────────────────────────────────────────────────────
-# FEDERATION_ENABLED    : true (default) — disabilita per isolare completamente il CP
-# FEDERATION_PUBLIC_URL : l'URL pubblico del TUO federation-gateway (non del CP!),
-#                         quello che condividi con l'admin di un altro sito per il
-#                         pairing. Vuoto finché non hai un gateway pubblico attivo.
-FEDERATION_ENABLED    = os.getenv("FEDERATION_ENABLED", "true").lower() == "true"
-FEDERATION_PUBLIC_URL = os.getenv("FEDERATION_PUBLIC_URL", "").rstrip("/")
-# FEDERATION_VIEW_ENABLED : false (default) — condivisione in LETTURA della vista
-#   di questo CP verso i peer ACCOPPIATI (dashboard unica su piu' CP, vedi
-#   docs/control-plane-sync.md). Spento di default perche' e' una decisione sui
-#   DATI, non sull'esecuzione: /federate/execute presta a un peer il tuo calcolo,
-#   la vista gli mostra le tue informazioni (nodi, modelli, task, righe di log).
-#   Non e' mai anonima: risponde solo a un peer in allowlist con firma ECDSA
-#   valida, la stessa verifica di /federate/execute. Nessun modello di sicurezza
-#   nuovo: la scelta e' se condividere, non con chi.
-FEDERATION_VIEW_ENABLED = os.getenv("FEDERATION_VIEW_ENABLED", "false").lower() == "true"
-FEDERATION_VIEW_TTL_S   = int(os.getenv("FEDERATION_VIEW_TTL_S", "10"))
-
+# ── TELEMETRIA NODI e FEDERAZIONE ────────────────────────────────────────────────
+# Le costanti di telemetria (/metrics), di backoff e di federazione sono in
+# cp/config.py, insieme a tutte le altre. Qui ci resta il codice che le usa:
+# il collector in fondo al file, e il peering in sezione FEDERAZIONE.
 # ── NODO ROOT/HUB LOCALE ─────────────────────────────────────────────────────
 # LOCAL_NODE_ID       : ID stabile (default: identita persistente del control-plane)
 # LOCAL_NODE_ENDPOINT : endpoint raggiungibile dall'interno Docker
@@ -387,23 +323,7 @@ def _register_local_node():
 # del no, e il fallback nativo. Qui il collegamento al resto del CP.
 from cp.model_caps import (_NATIVE_CHAT_FALLBACK_OVERRIDE, _NATIVE_CHAT_FALLBACK_PATTERNS,
                           _TOOL_CAPABLE_OVERRIDE, _TOOL_CAPABLE_PATTERNS, _VISION_PATTERNS,
-                          _model_supports_tools, _tool_capability_reason)
-# Un modello a cui togliamo i tool deve dirlo: al cambio modello il sintomo
-# sarebbe altrimenti solo "web_search non parte piu'". Rate-limit per modello,
-# cosi' una chat lunga non riempie il DB di log.
-_TOOL_STRIPPED_WARN_AT: dict = {}
-_TOOL_STRIPPED_WARN_EVERY_S = 300
-
-def _warn_tools_stripped(model: str) -> None:
-    now = time.time()
-    if now - _TOOL_STRIPPED_WARN_AT.get(model, 0.0) < _TOOL_STRIPPED_WARN_EVERY_S:
-        return
-    _TOOL_STRIPPED_WARN_AT[model] = now
-    push_log('system', f'{model}: tool rimossi dalla richiesta',
-             f"motivo: {_tool_capability_reason(model)}. Se il modello supporta il "
-             f"function calling, aggiungilo a TOOL_CAPABLE_MODELS (env, tab Setup); "
-             f"elenco completo su GET /models/capabilities.",
-             status='warn')
+                          _model_supports_tools, _tool_capability_reason, _warn_tools_stripped)
 
 # ── TOOL INIETTATI: SI POSSONO SPEGNERE, ESPLICITAMENTE ──────────────────────
 # Un client MACCHINA (un grafo ComfyUI, uno script, un job) vuole UNA chiamata
@@ -414,26 +334,17 @@ def _warn_tools_stripped(model: str) -> None:
 #     X-Hyperspace-Tools: off
 #
 # Vale SOLO per i tool che aggiunge il control-plane: quelli passati dal client
-# restano suoi (chi li scrive sa cosa vuole).
-from cp.model_caps import TOOLS_OFF_VALUES, _tools_requested_off
+# restano suoi (chi li scrive sa cosa vuole). La logica e' in cp/model_caps.py.
+from cp.model_caps import _tools_requested_off
 
 # ── BUDGET DI TEMPO DI UNA RICHIESTA ─────────────────────────────────────────
-# Perche' esistono: in sessione di test reale `deepseek-r1:8b` con 600 token di
-# risposta NON concludeva entro i 180s fissi, ne' sul nodo Windows ne' su Ollama
-# locale (Read timed out, verificato lato server). Con i modelli reasoning il
-# thinking consuma decine di secondi prima che l'answer cominci, e con ds4 il
-# thinking e' acceso di default.
-#
-# Due meccanismi distinti:
-#   1. timeout per SINGOLO tentativo, scelto in base al modello;
-#   2. budget TOTALE della richiesta, che limita la catena di fallback invece di
-#      sommarsi a essa (prima: nodo 180s + OmniRoute + ollama-direct 180s =
-#      oltre tre minuti di attesa prima di ammettere il fallimento).
-from cp.budget import (FALLBACK_MIN_ATTEMPT_S, INFERENCE_TIMEOUT_REASONING_S,
-                        INFERENCE_TIMEOUT_S, REQUEST_DEADLINE_S,
-                        RequestDeadline, _REASONING_OVERRIDE, _REASONING_PATTERNS,
-                        _inference_timeout, _is_error_payload, _is_reasoning_model,
-                        _respond_result)
+# Timeout, deadline e classificazione dei modelli reasoning sono in
+# cp/budget.py, con il perche' di ciascuno. Qui resta solo cio' che scrive sul
+# DB e nei log: `_deadline_exceeded` chiama push_log e db.update_task, quindi
+# dipende dal runtime e non puo' stare in un modulo senza portarsi dietro
+# mezzo control-plane.
+from cp.budget import (RequestDeadline, _inference_timeout, _is_error_payload,
+                       _respond_result)
 
 def _deadline_exceeded(task, task_id, deadline):
     """Interrompe la catena di fallback dicendolo, invece di bruciare minuti.
@@ -790,49 +701,21 @@ def _tool_persona_note(args) -> str:
     return f"Annotato: {osservazione['text']}"
 
 
-# ── CANALI ESTERNI (shared/channel.py) ───────────────────────────────────────
-# Una superficie di conversazione che il CP NON può raggiungere da solo: la chat
-# di una stanza, i suoi messaggi privati, un bot altrove. Il driver del canale
-# tira le decisioni da qui e pubblica l'esito; la policy sui token è fail-closed
-# come quella di MCP — senza CHANNEL_CLIENTS non c'è nessun canale servito.
-#
-# Perché le soglie sono lette con un helper e non come costanti: la tab Setup le
-# salva, e un salvataggio deve valere SUBITO (stessa disciplina di persona e
-# connettori). Gli strike già contati non si azzerano: `reconfigure`, non un
-# guard nuovo.
-_CHANNEL_TOKEN_HEADER = "X-Hyperspace-Channel-Token"
+# ── CANALI ESTERNI ───────────────────────────────────────────────────────────
+# Policy, guard, pacing e runtime del canale: in cp/canali.py, che e'
+# autosufficiente (solo os e shared.channel). Qui il resto del canale — le
+# rotte, il reply, l'ingest — che usa persona_store, image_queue e push_log.
+from cp import canali as _canali
+from cp.canali import (_CHANNEL_TOKEN_HEADER, _channel_float, _channel_int,
+                      channel_guard, channel_pacing, channel_policy, channel_runtime)
 
-
-def _channel_int(nome: str, default: int) -> int:
-    try:
-        return int(os.getenv(nome, str(default)) or default)
-    except (TypeError, ValueError):
-        return default
-
-
-def _channel_float(nome: str, default: float) -> float:
-    try:
-        return float(os.getenv(nome, str(default)) or default)
-    except (TypeError, ValueError):
-        return default
-
-
-channel_policy = ChannelPolicy.from_env()
-channel_guard = ChannelGuard(flood_max=_channel_int("CHANNEL_FLOOD_MAX", 6),
-                             flood_window_s=_channel_float("CHANNEL_FLOOD_WINDOW_S", 15.0),
-                             strike_mute=_channel_int("CHANNEL_STRIKE_MUTE", 2),
-                             strike_ban=_channel_int("CHANNEL_STRIKE_BAN", 3))
-channel_pacing = ReplyPacing(
-    min_interval_s=_channel_float("CHANNEL_MIN_REPLY_INTERVAL_S", 25.0),
-    batch_max_age_s=_channel_float("CHANNEL_BATCH_MAX_AGE_S", 6.0),
-    batch_max_messages=_channel_int("CHANNEL_BATCH_MAX_MESSAGES", 6),
-    probability=_channel_float("CHANNEL_REPLY_PROBABILITY", 1.0),
-)
-# Stato vivo del driver e comandi dell'operatore: il driver li ritira al giro
-# successivo (nessuna porta aperta sulla macchina col browser).
-channel_runtime = ChannelRuntime()
-
-# ── JOB IMMAGINE (shared/image_jobs.py) ──────────────────────────────────────
+# ── STATO DEI SISTEMI: immagini, Instagram, canali, memoria ──────────────────
+# Chiamata "JOB IMMAGINE" dal 2026-06, ma non contiene i job: contiene la
+# COSTRUZIONE dello stato. Cioe' gli oggetti che vivono per tutta la vita del
+# processo — la coda immagini, i VIP, la memoria Instagram, la porta della chat,
+# il gate di memoria — e le funzioni che li consultano. Nessuna rotta qui sotto:
+# e' il primo pezzo di main.py che si puo' guardare senza chiedersi quale
+# endpoint stia guardando.
 # Perché una coda e non una chiamata diretta: ComfyUI ascolta su 127.0.0.1 sulla
 # macchina con la scheda, e il control-plane è in un container — **non può
 # chiamarlo**. Il ponte (integrations/comfyui/comfy_bridge.py) TIRA il lavoro,
@@ -966,19 +849,15 @@ def _reload_memory_sync() -> None:
 def _reload_channel_config() -> None:
     """Rilegge token e soglie dopo un salvataggio in Setup."""
     global channel_policy, channel_pacing, CHANNEL_OPERATOR, CHANNEL_VIP, CHANNEL_CERCHIA
-    channel_policy = ChannelPolicy.from_env()
+    # La ricostruzione sta in cp/canali.py: i due oggetti sono di quel modulo, e
+    # riassegnarli qui lascerebbe in cp/ una copia vecchia con lo stesso nome.
+    channel_policy, channel_pacing = _canali.ricarica()
     CHANNEL_OPERATOR = {n.strip().lower()
                         for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
     CHANNEL_VIP = {n.strip().lower()
                    for n in os.getenv("CHANNEL_VIP", "").split(",") if n.strip()}
     CHANNEL_CERCHIA = {n.strip().lower()
                        for n in os.getenv("CHANNEL_CERCHIA", "").split(",") if n.strip()}
-    channel_pacing = ReplyPacing(
-        min_interval_s=_channel_float("CHANNEL_MIN_REPLY_INTERVAL_S", 25.0),
-        batch_max_age_s=_channel_float("CHANNEL_BATCH_MAX_AGE_S", 6.0),
-        batch_max_messages=_channel_int("CHANNEL_BATCH_MAX_MESSAGES", 6),
-        probability=_channel_float("CHANNEL_REPLY_PROBABILITY", 1.0),
-    )
     channel_guard.reconfigure(strike_mute=_channel_int("CHANNEL_STRIKE_MUTE", 2),
                               strike_ban=_channel_int("CHANNEL_STRIKE_BAN", 3),
                               flood_max=_channel_int("CHANNEL_FLOOD_MAX", 6),
@@ -1630,56 +1509,10 @@ def _notify_bridge(event_type: str, payload: dict):
         pass
 
 # ── TESTO DEI MESSAGGI ASSISTANT ──────────────────────────────────────────────
-# I modelli reasoning (qwen3, deepseek-r1) possono consegnare il testo in
-# `reasoning`/`reasoning_content` invece che in `content`. Su Ollama 0.34.2 il
-# percorso OpenAI-compatibile popola SEMPRE `reasoning`, anche con think=false:
-# se il budget di token finisce mentre il modello sta ancora ragionando, il
-# `content` resta VUOTO e il client riceverebbe una risposta vuota senza capire
-# perche'. Verificato: max_tokens=150 -> content 0 char, reasoning 785 char;
-# max_tokens=900 -> content 352 char, reasoning 894 char.
-_REASONING_WARN_AT = 0.0
-_REASONING_WARN_EVERY_S = 60
-
-def _assistant_text(message) -> str:
-    """Il testo utile di un messaggio assistant, qualunque campo l'abbia scritto."""
-    if not isinstance(message, dict):
-        return ""
-    content = str(message.get("content") or "").strip()
-    if content:
-        return content
-    return str(message.get("reasoning") or message.get("reasoning_content") or "").strip()
-
-def _normalize_assistant_message(payload, where: str) -> dict:
-    """Sposta `reasoning` in `content` quando `content` e' vuoto (in place).
-
-    Un client OpenAI-compatibile (Open WebUI in testa) mostra `content`: senza
-    questo passaggio l'utente vedrebbe una risposta VUOTA pur avendo il modello
-    lavorato e consumato token. La mutazione e' in place perche' i chiamanti
-    fanno `jsonify(result_json)` subito dopo: cosi' client, memoria e log
-    vedono tutti la stessa cosa. Il fallback viene segnalato, con rate-limit,
-    perche' questa funzione gira su ogni richiesta.
-    """
-    global _REASONING_WARN_AT
-    try:
-        message = payload["choices"][0]["message"]
-    except (KeyError, IndexError, TypeError):
-        return payload
-    if not isinstance(message, dict) or str(message.get("content") or "").strip():
-        return payload
-    fallback = _assistant_text(message)
-    if not fallback:
-        return payload
-    message["content"] = fallback
-    message["content_from_reasoning"] = True
-    now = time.time()
-    if now - _REASONING_WARN_AT > _REASONING_WARN_EVERY_S:
-        _REASONING_WARN_AT = now
-        push_log('system', f'{where}: content vuoto, mostro il reasoning',
-                 'Il modello ha esaurito i token ragionando (max_tokens troppo basso) '
-                 'oppure il backend non ha soppresso il thinking: alza max_tokens o usa '
-                 'un modello non-reasoning.', status='warn')
-    return payload
-
+# In cp/assistant.py: dove sta il testo in un chunk e in un JSON OpenAI, e
+# il caso `think=false` che rimanda tutto in `reasoning` lasciando `content`
+# vuoto. Senza stato, con i due contatori di rate-limit dentro il modulo.
+from cp.assistant import _assistant_text, _normalize_assistant_message
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 def _load_memory() -> list:
     if MEMORY_BACKEND == "hermes":
@@ -2109,53 +1942,14 @@ def _aggregate_mesh_models(force: bool = False) -> dict:
     return result
 
 # ── SSE HEADERS ───────────────────────────────────────────────────────────────
-def _sse_headers():
-    """Header della risposta SSE.
-
-    NON impostare qui i header hop-by-hop (`Transfer-Encoding`, `Connection`):
-    appartengono al server WSGI, che li aggiunge gia' da solo. Impostarli a mano
-    produce header DUPLICATI nella risposta — `Transfer-Encoding: chunked` due
-    volte e `Connection: keep-alive` seguito da `Connection: close` — cioe' HTTP
-    malformato: lo stream viene troncato e il primo chunk puo' andare perso.
-    Osservato in sessione di test: SSE da 15 byte con il solo [DONE] su qwen3 e
-    connessione chiusa a meta' su qwen2.
-    """
-    return {
-        "Content-Type":      "text/event-stream",
-        "Cache-Control":     "no-cache, no-transform",
-        "X-Accel-Buffering": "no",   # evita il buffering di un nginx a monte
-    }
+# In cp/http.py: gli header dello stream e i guard delle rotte admin.
+from cp.http import _sse_headers
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
-# NB: push_log() riscrive a "system" qualunque tipo fuori da questo insieme. Un
-# tipo nuovo che non viene aggiunto qui non fa rumore: sparisce nel tipo
-# sbagliato e non e' piu' filtrabile da /logs?type=. tests/test_log_types.py
-# estrae i tipi usati dalle route e verifica che siano tutti elencati.
-LOG_TYPES = {"connection_test", "inter_node_message", "system", "mesh_event", "memory_sync",
-             "feed", "webui_interaction", "dream", "node_chat", "web_task", "mcp", "channel", "instagram",
-             "poem",
-             # Conversazione fra agenti che scrivono codice (docs/code-conversation.md).
-             # Il filo e' il trace_id CONDIVISO fra i messaggi: `push_log` ne genera
-             # uno nuovo solo quando non gliene passi uno, quindi basta passarlo.
-             # Il codice NON sta qui: sta come artefatto inerte nel Forge, e il log
-             # porta il riferimento. Motivo: la vista federata manda `summary`
-             # (troncato) e mai `detail` — cosi' il codice non esce verso il peer.
-             "code_proposal", "code_review", "code_verdict"}
-
-def push_log(type_, summary, detail="", source="control-plane", target="", status="info", trace_id=""):
-    entry = {
-        "id":         str(uuid.uuid4()),
-        "ts":         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "type":       type_ if type_ in LOG_TYPES else "system",
-        "sourceNode": source,
-        "targetNode": target,
-        "status":     status,
-        "traceId":    trace_id or str(uuid.uuid4())[:8],
-        "summary":    summary,
-        "detail":     detail,
-    }
-    db.insert_log(entry)
-    return entry
+# `push_log` e LOG_TYPES sono in cp/log.py: e' la funzione piu' chiamata del
+# control-plane (34 sezioni su 60), quindi lasciarla qui impediva a ogni
+# modulo di usarne senza dipendere dal monolite.
+from cp.log import push_log
 
 
 # La memoria locale-prima nasce qui e non con la configurazione: il suo logger è
@@ -2428,154 +2222,18 @@ def _tool_code_sandbox(args: dict) -> str:
         return f"Sandbox error: {error}"
 
 # ── TOOL DEFINITIONS ─────────────────────────────────────────────────────────
-# I tool NATIVI stanno in una lista a parte perché il catalogo è composto a
-# RUNTIME: i tool dei connettori cambiano quando l'operatore salva le
-# credenziali nella tab Setup. _sync_connector_tools() ricostruisce
-# BUILTIN_TOOLS *in place* (BUILTIN_TOOLS[:] = ...) così ogni call-site già
-# esistente — tool loop chat (non-stream e stream), _mcp_tools(),
-# CODE_SANDBOX_TOOL — resta valido senza riassegnazioni da inseguire.
-_NATIVE_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Cerca informazioni aggiornate sul web tramite SearXNG (motore self-hosted).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "max_results": {"type": "integer", "default": 5}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "omega_query",
-            "description": "Cerca nella memoria a lungo termine di HyperSpace AGI.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "default": 10},
-                    "event_type": {"type": "string"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "omega_store",
-            "description": "Salva informazioni importanti nella memoria a lungo termine.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {"type": "string"},
-                    "event_type": {"type": "string", "default": "vault_note"}
-                },
-                "required": ["content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_mesh_status",
-            "description": "Stato della rete HyperSpace: nodi attivi, modelli, heartbeat.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "code_sandbox",
-            "description": "Sviluppa e testa codice in un workspace offline e usa-e-getta. Non modifica il repository operativo. Usa catalog per i preset disponibili, create con backend docker, poi check con tool_id pytest/unittest/profile/bandit/ruff e path. verify esegue da una a sei check espliciti e passa solo se tutte completano e passano. Sono disponibili anche read/list/write/replace/run/diff. Restituisci il diff per revisione.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["status", "catalog", "check", "verify", "create", "list", "read", "write", "replace", "run", "diff", "discard"]},
-                    "backend": {"type": "string", "enum": ["auto", "docker", "sbx"], "description": "Backend per create; i preset check richiedono docker."},
-                    "tool_id": {"type": "string", "enum": ["pytest", "unittest", "profile", "bandit", "ruff"]},
-                    "checks": {"type": "array", "description": "Per verify: 1-6 oggetti {tool_id, path, timeout?}. Il risultato passa soltanto se ogni check passa."},
-                    "workspace_id": {"type": "string"},
-                    "label": {"type": "string"},
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                    "old": {"type": "string"},
-                    "new": {"type": "string"},
-                    "expected_occurrences": {"type": "integer", "default": 1},
-                    "argv": {"type": "array", "items": {"type": "string"}},
-                    "cwd": {"type": "string", "default": "."},
-                    "timeout": {"type": "integer", "default": 30},
-                    "pattern": {"type": "string", "default": "*"},
-                    "limit": {"type": "integer", "default": 200}
-                },
-                "required": ["action"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "persona_get",
-            "description": "Legge la propria identità dichiarata: nome, scopo, valori, confini, capacità e limiti reali. Usalo quando serve restare coerenti con chi sei, invece di improvvisare una risposta su di te.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "persona_note",
-            "description": "Annota un fatto su di sé: una preferenza appresa, un limite incontrato, una correzione ricevuta. Entra nel self-model persistente e nelle richieste successive. Solo fatti verificabili, non impressioni.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string", "description": "Il fatto da annotare, in una frase."},
-                    "kind": {"type": "string", "default": "self_observation",
-                             "description": "Categoria: self_observation, preference, limit, feedback."}
-                },
-                "required": ["note"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ask_aurora",
-            "description": "Chiedi consiglio alla sorella maggiore Aurora su una questione che non conosci o che è troppo profonda per te. Inoltri la domanda al suo control-plane e lei risponde con la sua saggezza. Usalo quando non sai, o quando diresti 'questo lo sa mia sorella'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string", "description": "La domanda da inoltrare ad Aurora, in una frase chiara."}
-                },
-                "required": ["question"]
-            }
-        }
-    }
-]
+# Il catalogo e' in cp/tools_defs.py: gli 8 tool nativi, BUILTIN_TOOLS e il
+# riallineamento in place quando i connettori cambiano. Il riallineamento
+# prende i tool come argomento perche' il catalogo non deve sapere chi gestisce
+# le credenziali.
+from cp.tools_defs import (BUILTIN_TOOLS, CODE_SANDBOX_TOOL, _NATIVE_TOOLS,
+                           _sync_connector_tools)
 
-# Catalogo completo: nativi + connettori (GitHub/Google/Office365 — i loro tool
-# compaiono solo se le credenziali sono presenti, vedi connectors/base.py).
-BUILTIN_TOOLS = _NATIVE_TOOLS + connector_manager.get_all_tools()
-CODE_SANDBOX_TOOL = next(tool for tool in BUILTIN_TOOLS
-                         if tool.get("function", {}).get("name") == "code_sandbox")
-
-
-def _sync_connector_tools() -> None:
-    """Riallinea i tool dei connettori dentro BUILTIN_TOOLS (in place).
-
-    Da chiamare dopo connector_manager.reload(): un connettore appena
-    configurato deve comparire SUBITO nel tool loop chat, nel catalogo MCP e in
-    /tools/execute, e uno spento (CONNECTOR_<NAME>_ENABLED=false) deve sparire
-    dall'esposizione, non solo dall'esecuzione.
-    """
-    BUILTIN_TOOLS[:] = _NATIVE_TOOLS + connector_manager.get_all_tools()
-
-
+# Il ConnectorManager nasce a riga ~544, PRIMA di questo import: il catalogo
+# quindi parte con i soli nativi e si riallinea qui, una volta sola. Lo metto
+# qui e non subito dopo il ConnectorManager perche' il modulo del catalogo si
+# importa qui; `CODE_SANDBOX_TOOL` e' gia' valido perche' code_sandbox e' nativo.
+_sync_connector_tools(connector_manager.get_all_tools())
 def _reload_connectors(changed_keys) -> None:
     """Ricostruisce i connettori dopo un cambio di credenziali (POST /config/env).
 
@@ -2585,7 +2243,7 @@ def _reload_connectors(changed_keys) -> None:
     """
     try:
         connector_manager.reload()
-        _sync_connector_tools()
+        _sync_connector_tools(connector_manager.get_all_tools())
         push_log('system', 'Connettori ricaricati',
                  detail="chiavi: " + ", ".join(changed_keys), status='success')
     except Exception as e:
@@ -2785,11 +2443,24 @@ def connectors_status():
 # ultimi eventi in memoria per il bridge/chatbot.
 from cp.instagram import (_instagram_seen_lock, _instagram_seen_messages,
                            _instagram_webhook_events)
+from cp.instagram import _chunks_con_nota, _nota_quadro
+
+# I due flag restano QUI e non in cp/instagram.py: sono dichiarati `global`
+# dentro `_ensure_instagram_reply_started` e `_ensure_instagram_poll_started`,
+# che stanno piu' sotto. Spostarli creerebbe una seconda variabile omonima e il
+# thread partirebbe una volta sola per sempre.
 _instagram_poll_started = False
 _instagram_reply_started = False
 
 
-from cp.instagram import _chunks_con_nota, _nota_quadro
+# ── INSTAGRAM: il canale ──────────────────────────────────────────────────────
+# Dentro la sezione "tool dispatcher" fin dal 2026-06, senza che lo dicesse:
+# sotto questo confine ci sono i DM, il VIP, le immagini e le sette rotte
+# Instagram, non la distribuzione dei tool.
+#
+# Cosa e' gia' in cp/instagram.py: le due code del webhook col lock e i quattro
+# helper puri. Il resto resta qui perche' usa persona_store, image_queue,
+# connector_manager, advanced_config e push_log.
 
 
 def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
@@ -3430,6 +3101,9 @@ def instagram_private_media(token, nome):
     return send_from_directory(DIARIO_IMMAGINI_DIR, nome)
 
 
+# ── PERSONA: identita' e sogni ────────────────────────────────────────────────
+# Era dentro "tool dispatcher" e poi dentro "instagram": tre domini diversi
+# sotto due intestazioni che ne nominavano uno solo.
 @app.route('/persona')
 def persona_status():
     """Identità dichiarata dell'agente: chi è, i confini, le regole di
@@ -3555,7 +3229,9 @@ def persona_dream_run():
                     "report": report})
 
 
-# ── JOB IMMAGINE: il lavoro che il ponte di ComfyUI tira ─────────────────────
+# ── PONTE IMMAGINI (ComfyUI) E CANALI ─────────────────────────────────────────
+# Le prime sei rotte sono il ponte che ComfyUI tira a palate; le cinque dopo
+# sono i canali esterni. Due domini nella stessa sezione dal 2026-06.
 # Stesse regole dei canali, stesso token: chi chiede un'immagine è una superficie
 # esterna come le altre. Chi CHIEDE non aspetta — mette in coda e va avanti; chi
 # ESEGUE (il ponte, sulla macchina con la scheda) tira il job e riferisce.
@@ -6566,33 +6242,12 @@ def _run_doctor_checks() -> list:
 # gira nativo sull'host ed espone questo stato via HTTP; lo raggiungiamo con
 # host.docker.internal. Disattivato finche' HOSTCTL_TOKEN non e' impostato —
 # nessun default silenzioso: se manca, il pannello dice esplicitamente che
-# l'host-agent non e' configurato invece di provare a indovinare un URL.
-HOSTCTL_URL   = os.getenv("HOSTCTL_URL", "http://host.docker.internal:8765").rstrip("/")
-HOSTCTL_TOKEN = os.getenv("HOSTCTL_TOKEN", "")
-NETWORK_ADMIN_TOKEN = os.getenv("NETWORK_ADMIN_TOKEN", "")
-_NETWORK_ADMIN_HEADER = "X-Hyperspace-Network-Token"
-
-
-def _hostctl_configured() -> bool:
-    return len(HOSTCTL_TOKEN) >= 32
-
-
-def _hostctl_headers() -> dict:
-    return {"Authorization": f"Bearer {HOSTCTL_TOKEN}"}
-
-
-def _network_admin_error():
-    """Restituisce una risposta Flask se la route admin non è autorizzata."""
-    if len(NETWORK_ADMIN_TOKEN) < 32:
-        return jsonify({"ok": False, "configured": False,
-                        "error": "NETWORK_ADMIN_TOKEN assente o troppo corto — azioni di rete disabilitate"}), 503
-    provided = request.headers.get(_NETWORK_ADMIN_HEADER, "")
-    if not token_authorized(provided, NETWORK_ADMIN_TOKEN):
-        return jsonify({"ok": False, "configured": True,
-                        "error": "token amministrativo di rete mancante o non valido"}), 401
-    return None
-
-
+# ── NETWORK PANEL ─────────────────────────────────────────────────────────────
+# Il guard delle rotte admin e il proxy verso l'host-agent sono in cp/http.py:
+# leggono i token dall'env a ogni chiamata, cosi' un cambio dalla tab Setup vale
+# subito.
+from cp.http import (HOSTCTL_URL, _hostctl_configured, _hostctl_headers,
+                     _network_admin_error)
 # ── shell_run: le mani dell'agente (Stage 1 di docs/host-access.md) ─────────
 # Un comando reale (git, npm, python, i propri script) senza una shell: la
 # policy vive nell'host-agent (argv, allowlist per nome, cwd, cap di output e
@@ -6741,7 +6396,7 @@ def _tool_shell_session(args: dict) -> str:
 
 if shell_run_available():
     _NATIVE_TOOLS.extend([SHELL_RUN_TOOL, SHELL_SESSION_TOOL])
-    _sync_connector_tools()
+    _sync_connector_tools(connector_manager.get_all_tools())
 
 
 # ── kali_scan: Security Lab (Kali Linux in Docker, rete host) ──────────────
@@ -6799,7 +6454,7 @@ def _tool_kali_scan(args: dict) -> str:
 
 if kali_available():
     _NATIVE_TOOLS.extend([KALI_SCAN_TOOL])
-    _sync_connector_tools()
+    _sync_connector_tools(connector_manager.get_all_tools())
 
 
 @app.route('/network/status')

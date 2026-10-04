@@ -14,10 +14,16 @@
 # 3. `_use_native_chat_fallback`, che sta nella sezione "budget" di main.py
 #    ma parla di modelli: e finita qui per stare con le altre due.
 #
-# Non c'e' `_warn_tools_stripped` (resta in main.py: scrive nei log), ne'
-# `_decide_thinking` (resta in main.py: chiama il loop dei tool).
+# Quarto blocco: `_warn_tools_stripped`, l'avviso che dice PERCHE' i tool sono
+# stati tolti. Sta qui perche' dipende da `_tool_capability_reason`, che e' gia'
+# qui: la ragione e l'avviso che la riporta non possono stare in due posti.
+#
+# e lancia la richiesta al modello.
 
 import os
+import time
+
+from cp.log import push_log
 
 # ── TOOL CAPABLE MODELS ────────────────────────────────────────────────────────
 _TOOL_CAPABLE_OVERRIDE = os.getenv("TOOL_CAPABLE_MODELS", "")
@@ -111,3 +117,26 @@ def _use_native_chat_fallback(model_name: str) -> bool:
     m = model_name.lower().split(":")[0]
     return any(p in m for p in patterns)
 
+
+# ── IL WARNING DEI TOOL TOltI ────────────────────────────────────────────────
+# Un modello a cui togliamo i tool deve dirlo: al cambio modello il sintomo
+# sarebbe altrimenti solo "web_search non parte piu'". Rate-limit per modello,
+# cosi' una chat lunga non riempie il DB di log.
+#
+# Sta qui e non in main.py perche' dipende da `_tool_capability_reason`, che e'
+# gia' in questo modulo: la ragione del "no" e l'avviso che la riporta non
+# possono stare in due posti, altrimenti un giorno ne accadono versioni diverse.
+_TOOL_STRIPPED_WARN_AT: dict = {}
+_TOOL_STRIPPED_WARN_EVERY_S = 300
+
+
+def _warn_tools_stripped(model: str) -> None:
+    now = time.time()
+    if now - _TOOL_STRIPPED_WARN_AT.get(model, 0.0) < _TOOL_STRIPPED_WARN_EVERY_S:
+        return
+    _TOOL_STRIPPED_WARN_AT[model] = now
+    push_log('system', f'{model}: tool rimossi dalla richiesta',
+             f"motivo: {_tool_capability_reason(model)}. Se il modello supporta il "
+             f"function calling, aggiungilo a TOOL_CAPABLE_MODELS (env, tab Setup); "
+             f"elenco completo su GET /models/capabilities.",
+             status='warn')
