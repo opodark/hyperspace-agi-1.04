@@ -35,9 +35,20 @@ def carica_gateway():
     return modulo
 
 
-GW = carica_gateway()
+# Il gateway importa uvicorn a livello di modulo. Sotto pytest un import che
+# fallisce qui e' un errore di RACCOLTA, e un errore di raccolta ferma l'intera
+# suite: si perde anche tutto il resto. Quindi si carica in un try e, se manca
+# una dipendenza, le classi che lo usano saltano invece di far cadere la run.
+# CablaggioTests non lo usa (legge solo il sorgente) e gira comunque.
+try:
+    GW = carica_gateway()
+    PERCHE_SALTATO = ""
+except ModuleNotFoundError as manca:
+    GW = None
+    PERCHE_SALTATO = f"dipendenza assente ({manca.name}): il gateway la importa a import"
 
 
+@unittest.skipIf(GW is None, PERCHE_SALTATO)
 class SchedaTests(unittest.TestCase):
     """Cosa si scarica, e quando."""
 
@@ -75,6 +86,7 @@ class SchedaTests(unittest.TestCase):
         self.assertEqual(GW.da_scaricare(ps, env={}), [])
 
 
+@unittest.skipIf(GW is None, PERCHE_SALTATO)
 class PercorsiTests(unittest.TestCase):
     """Il proxy inoltra quello che serve al motore `comfyui`, e nient'altro."""
 
@@ -97,6 +109,7 @@ class PercorsiTests(unittest.TestCase):
                          "http://127.0.0.1:8188/history/x?a=1")
 
 
+@unittest.skipIf(GW is None, PERCHE_SALTATO)
 class IntestazioniTests(unittest.TestCase):
     """Il primo tentativo vero è fallito qui: `Illegal header value b'Bearer '`."""
 

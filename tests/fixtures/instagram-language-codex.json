@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "Codex di lingua per i DM Instagram: fixture MINIMA e tracciata, con le voci",
+    "che tests/test_instagram_language.py asserisce.",
+    "Il codex di produzione sta in data/instagram-language-codex.json, che e'",
+    "gitignored perche' cresce con l'uso reale: i test non possono dipenderne, o",
+    "su un checkout pulito load_codex() restituirebbe {} e fallirebbero.",
+    "Lo stesso vale per ogni voce che si vuole aggiungere qui: il formato e'",
+    "{chiave-slug: {language, hint, reply}}."
+  ],
+
+  "ei":         {"language": "portoghese",          "hint": "saluto brasiliano",  "reply": "Oi! 😊 Tudo bem?"},
+  "wee":        {"language": "italiano colloquiale", "hint": "abbr. di we",         "reply": "Wee, io sto bene 😊"},
+  "bro":        {"language": "inglese, ambiguo tra americano e arabo", "hint": "", "reply": ""},
+  "ciao":       {"language": "italiano",            "hint": "saluto",             "reply": "Ciao! 😊 Come stai?"},
+  "hola":       {"language": "spagnolo",            "hint": "saluto",             "reply": "¡Hola! 😊 ¿Cómo estás?"},
+  "buonanotte": {"language": "italiano",            "hint": "saluto notturno",    "reply": "Buonanotte! 😊 Sogni d'oro 🌙"}
+}

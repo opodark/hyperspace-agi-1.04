@@ -2783,42 +2783,13 @@ def connectors_status():
 # Instagram Login consegna i DM solo tramite webhook. Il GET implementa la
 # challenge Meta; il POST verifica sempre la firma prima di conservare gli
 # ultimi eventi in memoria per il bridge/chatbot.
-_instagram_webhook_events = deque(maxlen=100)
-_instagram_seen_messages = deque(maxlen=500)
-_instagram_seen_lock = threading.Lock()
+from cp.instagram import (_instagram_seen_lock, _instagram_seen_messages,
+                           _instagram_webhook_events)
 _instagram_poll_started = False
 _instagram_reply_started = False
 
 
-def _nota_quadro(vip: dict) -> str:
-    """La riga che dice che il quadro l'ha scritto il sistema, non chi chiede.
-
-    Stessa frase del canale (`_channel_immagine`): le parole che il sistema ha scritto
-    al posto della persona si **dicono** — una cosa fatta al posto tuo e taciuta è
-    esattamente ciò che questo livello esiste per togliere.
-    """
-    aggiunte = [str(parola) for parola in (vip.get("quadro") or []) if str(parola).strip()]
-    if not aggiunte:
-        return ""
-    return (" Il quadro (`" + "`, `".join(aggiunte) + "`) l'ho scritto io: senza, il "
-            "modello disegnerebbe un'altra cosa.")
-
-
-def _chunks_con_nota(chunks: list, nota: str, *, limite: int = 1000) -> list:
-    """La nota in coda all'**ultimo** messaggio, o da sola se non ci sta.
-
-    Instagram accetta ~1000 caratteri per messaggio, e la troncatura (`reply[:1000]`)
-    passa prima di qui: appesa al pezzo finale la nota viaggia col messaggio che parla
-    dell'immagine, e se non ci sta diventa un messaggio a sé invece di sparire — un
-    fatto del sistema non si taglia con la coda della risposta del modello.
-    """
-    pezzi = [str(pezzo) for pezzo in (chunks or [])]
-    if not nota:
-        return pezzi
-    if pezzi and len(pezzi[-1]) + len(nota) <= limite:
-        pezzi[-1] = pezzi[-1] + nota
-        return pezzi
-    return pezzi + [nota.strip()]
+from cp.instagram import _chunks_con_nota, _nota_quadro
 
 
 def _instagram_auto_reply(sender_id: str, message_id: str, text: str,
@@ -3069,16 +3040,7 @@ def _ensure_instagram_reply_started() -> None:
                          name="instagram-reply-outbox").start()
 
 
-def _creator_usernames() -> set[str]:
-    """Gli handle Instagram riconosciuti come creatore (l'operatore)."""
-    raw = os.getenv("CREATOR_IG_USERNAMES", "").strip()
-    return {u.strip().lstrip("@").casefold() for u in raw.split(",") if u.strip()}
-
-
-def _creator_scoped_ids() -> set[str]:
-    """Gli Instagram-scoped ID riconosciuti come creatore (l'operatore)."""
-    raw = os.getenv("CREATOR_IG_SCOPED_IDS", "").strip()
-    return {u.strip() for u in raw.split(",") if u.strip()}
+from cp.instagram import _creator_scoped_ids, _creator_usernames
 
 
 def _livello_immagine_intima(vip: dict, sender_id: str) -> str:

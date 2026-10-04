@@ -43,6 +43,18 @@ def _gateway():
     return modulo
 
 
+# Come nell'altro test del gateway: il modulo importa uvicorn a livello di
+# import, quindi senza la dipendenza la classe salta invece di far fallire la
+# run. In CI uvicorn e' installato e questi test girano per davvero.
+try:
+    GW = _gateway()
+    PERCHE_SALTATO = ""
+except ModuleNotFoundError as manca:
+    GW = None
+    PERCHE_SALTATO = f"dipendenza assente ({manca.name}): il gateway la importa a import"
+
+
+@unittest.skipIf(GW is None, PERCHE_SALTATO)
 class PortaDelGatewayTests(unittest.TestCase):
     """Cosa si corregge, e cosa no."""
 

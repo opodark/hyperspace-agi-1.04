@@ -31,7 +31,10 @@ ENV = {"INSTAGRAM_PUBLIC_BASE_URL": "https://media.example.test/",
 
 
 def _functions(*names):
-    tree = cp_source.albero()
+    # fresco=True: qui sotto si azzerano i decorator, e la vista in cache di
+    # cp_source e' condivisa. Senza, la modifica resterebbe nel nodo in cache e
+    # i test che vengono dopo leggerebbero una rotta senza @app.route.
+    tree = cp_source.albero(fresco=True)
     trovati = {}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:

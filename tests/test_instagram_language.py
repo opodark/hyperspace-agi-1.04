@@ -7,7 +7,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.instagram_language import fast_reply, language_hint, load_codex, normalize_slang  # noqa: E402
 
 
-CODEX = Path(__file__).resolve().parents[1] / "data" / "instagram-language-codex.json"
+# Fixture tracciata, non il codex di produzione: quello sta in data/ (gitignored,
+# e cresce con l'uso reale), quindi su un checkout pulito load_codex() restituirebbe
+# {} e questi test fallirebbero senza che nessuno lo veda. La fixture contiene le
+# voci che il test asserisce, cosi' resta deterministica e verifica comunque il
+# load_codex vero.
+CODEX = Path(__file__).resolve().parent / "fixtures" / "instagram-language-codex.json"
 
 
 def test_normalizes_short_slang_with_punctuation_and_emoji():
