@@ -55,8 +55,9 @@ from urllib.parse import quote
 faulthandler.enable()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
-    BASE_DIR, "..", "data", "diario-immagini")
+# DIARIO_IMMAGINI_DIR vive in cp/config.py: qui era calcolato due righe sotto,
+# prima di sys.path.insert, e non poteva essere importato. Ora che la sys.path c'e'
+# si legge dal posto unico.
 TYPOGRAPHY_IMAGES_DIR = os.getenv("TYPOGRAPHY_IMAGES_DIR", "/app/data/typography-images")
 sys.path.insert(0, os.path.join(BASE_DIR, ".."))
 
@@ -116,8 +117,7 @@ from shared.dialogue_image import compose_dialogue
 from shared.conversation_log import ConversationLog, battuta
 from shared.social_dreams import social_dream_inspirations
 from shared.dream_schedule import choose_author, in_hour_window
-from shared.instagram_vip import (CREATOR_LEVEL, INTIMATE_LEVELS,
-                                  InstagramVipStore)
+from shared.instagram_vip import CREATOR_LEVEL, INTIMATE_LEVELS
 from shared.instagram_intimacy import (cerchia_entry_context, compagna_context,
                                        consent_answer, musa_context,
                                        split_messages, wants_continuous)
@@ -125,8 +125,6 @@ from shared.sister_status import sister_note
 from shared.instagram_language import fast_reply, language_hint, load_codex
 from shared.instagram_project_context import (PROJECT_CONTEXT, should_offer_creator,
                                                wants_project_info)
-from shared.instagram_memory import InstagramMemory
-from shared.instagram_outbox import InstagramReplyOutbox
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
@@ -142,6 +140,9 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 # BASE_DIR (dirname(dirname(__file__)) arriva allo stesso posto), quindi i
 # percorsi di fallback non cambiano.
 from cp.config import (CODE_SERVER_PORT,
+                        DIARIO_FILE,
+                        DIARIO_IMMAGINI_DIR,
+                        INSTAGRAM_LANGUAGE_CODEX,
                       DEFAULT_MODEL,
                       FEDERATION_ENABLED,
                       FEDERATION_PUBLIC_URL,
@@ -767,18 +768,12 @@ def _chat_memory_exit(response):
         else:
             image_memory_gate.leave_chat()
     return response
-INSTAGRAM_VIP_FILE = os.getenv("INSTAGRAM_VIP_FILE", "").strip() or os.path.join(
-    BASE_DIR, "data", "instagram_vips.json")
-instagram_vips = InstagramVipStore(INSTAGRAM_VIP_FILE)
-INSTAGRAM_MEMORY_FILE = os.getenv("INSTAGRAM_MEMORY_FILE", "").strip() or os.path.join(
-    BASE_DIR, "data", "instagram-memory.json")
-instagram_memory = InstagramMemory(
-    INSTAGRAM_MEMORY_FILE,
-    retention_days=_channel_int("INSTAGRAM_MEMORY_RETENTION_DAYS", 180))
-instagram_reply_outbox = InstagramReplyOutbox(os.getenv(
-    "INSTAGRAM_REPLY_OUTBOX_FILE", "/app/data/instagram-replies.json"))
-INSTAGRAM_LANGUAGE_CODEX = os.getenv("INSTAGRAM_LANGUAGE_CODEX", "").strip() or \
-    "/repo/data/instagram-language-codex.json"
+# I tre store di Instagram ora nascono in cp/instagram.py. Non si importano per
+# nome: quello congela il valore all'import (che e' None, perche' i store sono
+# creati dentro monta()), e le funzioni che ancora qui li usano avrebbero un None
+# perpetuo. Li si riceve dalla funzione che li costruisce — vedi la chiamata a
+# monta() piu' in basso, dopo che `diario` esiste.
+from cp.instagram import monta
 CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
 CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
 # Chi è "io" nel dialogo interno a due voci: nome autore dell'operatore
@@ -3033,74 +3028,6 @@ def instagram_webhook():
     return jsonify({"ok": True})
 
 
-@app.route('/instagram/webhook/events')
-def instagram_webhook_events():
-    auth_error = _network_admin_error()
-    if auth_error:
-        return auth_error
-    return jsonify({"ok": True, "events": list(_instagram_webhook_events)})
-
-
-@app.route('/instagram/vips')
-def instagram_vip_list():
-    auth_error = _network_admin_error()
-    if auth_error:
-        return auth_error
-    return jsonify({"ok": True, "vips": instagram_vips.list(),
-                    "tracked": len(instagram_vips.list(vip_only=False)),
-                    "memory": instagram_memory.stats()})
-
-
-@app.route('/instagram/vips/creator', methods=['POST'])
-def instagram_vip_set_creator():
-    """Promuove un contatto al livello creatore (l'operatore), sopra "musa"."""
-    auth_error = _network_admin_error()
-    if auth_error:
-        return auth_error
-    data = request.get_json(silent=True) or {}
-    scoped_id = str(data.get("scoped_id") or "").strip()
-    username = str(data.get("username") or "").strip()
-    if not scoped_id.isdigit():
-        return jsonify({"ok": False, "error": "scoped_id mancante o non valido"}), 400
-    try:
-        row = instagram_vips.set_creator(scoped_id, username)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "vip": row})
-
-
-@app.route('/instagram/memory/clear', methods=['POST'])
-def instagram_memory_clear():
-    """Azzera la memoria di conversazione di un contatto Instagram."""
-    auth_error = _network_admin_error()
-    if auth_error:
-        return auth_error
-    data = request.get_json(silent=True) or {}
-    scoped_id = str(data.get("scoped_id") or "").strip()
-    if not scoped_id.isdigit():
-        return jsonify({"ok": False, "error": "scoped_id mancante o non valido"}), 400
-    if not instagram_memory.clear(scoped_id):
-        return jsonify({"ok": False, "error": "contatto non trovato"}), 404
-    return jsonify({"ok": True, "cleared": scoped_id})
-
-
-@app.route('/instagram/replies/status')
-def instagram_replies_status():
-    """Redacted operational state: no DM body or full contact identifiers."""
-    return jsonify({"ok": True, **instagram_reply_outbox.status()})
-
-
-@app.route('/instagram/media/<token>/<path:nome>')
-def instagram_private_media(token, nome):
-    expected = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
-    if not expected or not token_authorized(token, expected):
-        return jsonify({"ok": False, "error": "media token non valido"}), 403
-    if str(nome).startswith("published/"):
-        media_dir = os.getenv("INSTAGRAM_MEDIA_DIR", "/app/data/instagram-media").strip()
-        return send_from_directory(media_dir, os.path.basename(nome))
-    return send_from_directory(DIARIO_IMMAGINI_DIR, nome)
-
-
 # ── PERSONA: identita' e sogni ────────────────────────────────────────────────
 # Era dentro "tool dispatcher" e poi dentro "instagram": tre domini diversi
 # sotto due intestazioni che ne nominavano uno solo.
@@ -3750,9 +3677,13 @@ feed = Feed()
 # Il diario delle illustrazioni: post e sogni delle influencer, con il file dello
 # sketch quando il Mac l'ha disegnato. Sta su disco (a differenza della coda, che
 # è memoria viva): la superficie di osservazione legge questo.
-DIARIO_FILE = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(
-    BASE_DIR, "data", "diario.json")
 diario = Diario.load(DIARIO_FILE)
+
+# Le route Instagram e i suoi tre store vivono in cp/instagram.py. Il montaggio
+# avviene qui e non subito dopo i tre store, perche' il modulo li crea da solo e
+# ora ha bisogno anche di `diario` (le immagini private ne servono il path) e dei
+# cinque oggetti di boot, che a questa riga sono gia' tutti in piedi.
+instagram_vips, instagram_memory, instagram_reply_outbox = monta(app)
 
 
 # ── LOOP AUTONOMO DELLE INFLUENCER ──────────────────────────────────────────

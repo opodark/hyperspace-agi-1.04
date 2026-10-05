@@ -27,6 +27,23 @@ from shared.hermes_memory import HermesMemoryClient
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
+# I path che derivano da BASE_DIR stanno qui e non in main.py perche' servono
+# anche a cp/instagram.py: main.py li calcolava alla riga 58, prima ancora
+# dell'inserimento di sys.path, e duplicarli avrebbe dato due posti in cui il
+# fallback di `/app/data` puo' divergere senza che nessuno se ne accorga.
+DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
+    BASE_DIR, "..", "data", "diario-immagini")
+DIARIO_FILE         = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(
+    BASE_DIR, "data", "diario.json")
+INSTAGRAM_VIP_FILE  = os.getenv("INSTAGRAM_VIP_FILE", "").strip() or os.path.join(
+    BASE_DIR, "data", "instagram_vips.json")
+INSTAGRAM_MEMORY_FILE = os.getenv("INSTAGRAM_MEMORY_FILE", "").strip() or os.path.join(
+    BASE_DIR, "data", "instagram-memory.json")
+INSTAGRAM_REPLY_OUTBOX_FILE = os.getenv(
+    "INSTAGRAM_REPLY_OUTBOX_FILE", "/app/data/instagram-replies.json")
+INSTAGRAM_LANGUAGE_CODEX = os.getenv("INSTAGRAM_LANGUAGE_CODEX", "").strip() or \
+    "/repo/data/instagram-language-codex.json"
+
 NODE_ENDPOINTS     = [e.strip() for e in os.getenv("NODE_ENDPOINTS", "node:8084").split(",") if e.strip()]
 OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 DEFAULT_MODEL      = os.getenv("OLLAMA_MODEL", "")

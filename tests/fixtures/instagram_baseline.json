@@ -1,0 +1,42 @@
+{
+  "memory_clear_inesistente": {
+    "body": "{\"error\":\"contatto non trovato\",\"ok\":false}\n",
+    "status": 404
+  },
+  "replies_status": {
+    "body": "{\"counts\":{\"generating\":0,\"needs_review\":0,\"queued\":1,\"retry\":0,\"sending\":0,\"sent\":0},\"items\":[{\"attempts\":0,\"contact\":\"DM-e7db1e03\",\"error\":\"\",\"status\":\"queued\",\"updated_at\":\"2026-10-05T07:26:50+00:00\"}],\"ok\":true}\n",
+    "status": 200
+  },
+  "vips": {
+    "body": "{\"memory\":{\"contacts\":1,\"retention_days\":180,\"summaries\":0,\"turns\":1},\"ok\":true,\"tracked\":1,\"vips\":[]}\n",
+    "status": 200
+  },
+  "vips_creator_scoped_id_malformato": {
+    "body": "{\"error\":\"scoped_id mancante o non valido\",\"ok\":false}\n",
+    "status": 400
+  },
+  "vips_senza_token": {
+    "body": "{\"configured\":true,\"error\":\"token amministrativo di rete mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "webhook_firma_sbagliata": {
+    "body": "{\"error\":\"firma webhook non valida\",\"ok\":false}\n",
+    "status": 401
+  },
+  "webhook_firma_valida": {
+    "body": "{\"ok\":true}\n",
+    "status": 200
+  },
+  "webhook_senza_firma": {
+    "body": "{\"error\":\"firma webhook non valida\",\"ok\":false}\n",
+    "status": 401
+  },
+  "webhook_verify_sbagliato": {
+    "body": "{\"error\":\"verifica webhook non valida\",\"ok\":false}\n",
+    "status": 403
+  },
+  "webhook_verify_valido": {
+    "body": "chalenge-di-prova",
+    "status": 200
+  }
+}
