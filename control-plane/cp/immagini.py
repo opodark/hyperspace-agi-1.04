@@ -157,8 +157,8 @@ def image_generate():
 
 @_bp.route('/image/jobs')
 def image_jobs():
-    _serve("image_queue", "image_memory_gate")
     """Il prossimo job per il ponte. Vuoto = 204, che non è un errore.
+    _serve("image_queue", "image_memory_gate")
 
     `?famiglia=` limita ai job di quel modello: un ponte SDXL-Turbo (il Mac)
     chiede `?famiglia=sdxl-turbo` e non prende i job Qwen-Image della win11.
@@ -187,9 +187,9 @@ def image_defer():
 
 @_bp.route('/image/result', methods=['POST'])
 def image_result():
-    _serve("image_queue", "image_memory_gate", "connector_manager",
-          "diario")
     """Il ponte riferisce com'è andata: è l'unico modo per saperlo."""
+    _serve("image_queue", "image_memory_gate", "connector_manager",
+           "diario")
     errore = _channel_error()
     if errore:
         return errore

@@ -406,7 +406,10 @@ class ChannelMemoryWiringTests(unittest.TestCase):
         body = ast.unparse(self.functions["channel_ingest"])
         self.assertIn("registra_tip", body)
         self.assertIn("kind", body)
-        self.assertIn("_channel_remember", body)
+        # `channel_remember`, non `_channel_remember`: la route arriva al suo
+        # cablaggio attraverso il contesto del dominio, e il test deve valere
+        # per come il cablaggio e' scritto oggi come per come lo era ieri.
+        self.assertIn("channel_remember", body)
 
     def test_la_risposta_usa_memoria_e_nota_tip(self):
         body = ast.unparse(self.functions["_channel_reply"])
@@ -415,7 +418,7 @@ class ChannelMemoryWiringTests(unittest.TestCase):
 
     def test_la_moderazione_riuscita_finisce_in_memoria(self):
         body = ast.unparse(self.functions["channel_result"])
-        self.assertIn("_channel_remember", body)
+        self.assertIn("channel_remember", body)
 
     def test_lo_scritto_in_memoria_ha_debounce(self):
         body = ast.unparse(self.functions["_channel_remember"])

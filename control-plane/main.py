@@ -93,7 +93,6 @@ from shared.persona import (PersonaStore, audit_reply, build_introduction,
                             identity_expected, identity_tools_hidden, should_disclose)
 from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
-from shared.channel import COMANDI_DRIVER, KNOWN_CHANNELS
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import (FAMIGLIA_SDXL, FAMIGLIE_CHECKPOINT, ImmagineQueue,
                                nuovo_job, richiesta_immagine)
@@ -506,7 +505,7 @@ def _dream_model() -> str:
     modelli è misurato, non teorico: sullo stesso contesto da 20 messaggi il 4B
     risponde in ~15s e il 9B in ~21s — in stanza il secondo verrebbe scartato.
     """
-    return (os.getenv("PERSONA_DREAM_MODEL", "").strip() or CHANNEL_MODEL
+    return (os.getenv("PERSONA_DREAM_MODEL", "").strip() or _canali.CHANNEL_MODEL
             or DEFAULT_MODEL)
 
 
@@ -696,9 +695,16 @@ def _tool_persona_note(args) -> str:
 # autosufficiente (solo os e shared.channel). Qui il resto del canale — le
 # rotte, il reply, l'ingest — che usa persona_store, image_queue e push_log.
 from cp import canali as _canali
-from cp.canali import (_channel_error, _channel_float,
-                      _channel_int, _channel_name,
-                      channel_guard, channel_pacing, channel_policy, channel_runtime)
+from cp.canali import (CHANNEL_MAX_TOKENS, _channel_error, _channel_float,
+                      _channel_int, _channel_name, channel_guard, channel_pacing)
+
+# Le tre liste di nomi dei canali sono possedute da cp/canali.py, che le ricarica
+# dopo un salvataggio in tab Setup. Qui ne teniamo un riferimento perche' le
+# funzioni rimaste indietro le leggono: e' un binding riassegnato da ricarica(),
+# non un `global` — un `global` aggiornerebbe solo questo namespace e lascerebbe
+# in cp/ la copia vecchia, cioe' il "salvato ma inerte" che la tab Setup esiste
+# per evitare.
+CHANNEL_OPERATOR, CHANNEL_VIP, CHANNEL_CERCHIA = set(), set(), set()
 
 # ── STATO DEI SISTEMI: immagini, Instagram, canali, memoria ──────────────────
 # Chiamata "JOB IMMAGINE" dal 2026-06, ma non contiene i job: contiene la
@@ -764,16 +770,12 @@ def _chat_memory_exit(response):
 # perpetuo. Li si riceve dalla funzione che li costruisce — vedi la chiamata a
 # monta() piu' in basso, dopo che `diario` esiste.
 from cp.instagram import monta
-CHANNEL_MODEL = os.getenv("CHANNEL_MODEL", "").strip()
-CHANNEL_MAX_TOKENS = _channel_int("CHANNEL_MAX_TOKENS", 160)
 # Chi è "io" nel dialogo interno a due voci: nome autore dell'operatore
 # (separato da virgola se più alias, senza @: il driver manda from.username).
 # Vuoto = nessun creatore: il livello esplicito non si accende per nessuno
 # (docs/comfyui.md), mentre le immagini normali restano aperte a chi è in chat.
-CHANNEL_OPERATOR = {n.strip().lower() for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
 # Banda VIP del canale: può chiedere ritratti glamour/lingerie di Anna, ma non
 # nudità o scene esplicite. Su Instagram la stessa banda nasce dalla soglia `vip`.
-CHANNEL_VIP = {n.strip().lower() for n in os.getenv("CHANNEL_VIP", "").split(",") if n.strip()}
 # La banda intima del creatore (2026-10-01): le stesse aperture dell'operatore sulla
 # vetrina — nudità ed esplicito fuori dal negativo, quando il documento li dichiara —
 # più il diritto di chiedere un'immagine. È la banda `musa` del percorso Instagram
@@ -781,7 +783,6 @@ CHANNEL_VIP = {n.strip().lower() for n in os.getenv("CHANNEL_VIP", "").split(","
 # e non c'è un conteggio che la guadagni: `CHANNEL_OPERATOR` da solo lascia il livello al
 # creatore, la banda intima vive di questa riga. Il nome della variabile resta quello di
 # sempre — è il nome di una lista di handle, non di un livello.
-CHANNEL_CERCHIA = {n.strip().lower() for n in os.getenv("CHANNEL_CERCHIA", "").split(",") if n.strip()}
 # Effetto Tamagotchi: poca mesh → modelli piccoli e risposte essenziali; mesh
 # ricca → (se configurato) il modello grande. Soglia e modello sono configurabili.
 VITALITY_BIG_LEVEL = max(0, int(os.getenv("VITALITY_BIG_LEVEL", "3")))
@@ -792,7 +793,7 @@ def _channel_model(vitalita: dict) -> str:
     """Modello del canale in base alla vitalità della mesh."""
     if VITALITY_BIG_MODEL and int(vitalita.get("level", 0)) >= VITALITY_BIG_LEVEL:
         return VITALITY_BIG_MODEL
-    return CHANNEL_MODEL or DEFAULT_MODEL
+    return _canali.CHANNEL_MODEL or DEFAULT_MODEL
 
 
 def _channel_context_messages() -> int:
@@ -833,22 +834,19 @@ def _reload_memory_sync() -> None:
 
 def _reload_channel_config() -> None:
     """Rilegge token e soglie dopo un salvataggio in Setup."""
-    global channel_policy, channel_pacing, CHANNEL_OPERATOR, CHANNEL_VIP, CHANNEL_CERCHIA
-    # La ricostruzione sta in cp/canali.py: i due oggetti sono di quel modulo, e
-    # riassegnarli qui lascerebbe in cp/ una copia vecchia con lo stesso nome.
-    channel_policy, channel_pacing = _canali.ricarica()
-    CHANNEL_OPERATOR = {n.strip().lower()
-                        for n in os.getenv("CHANNEL_OPERATOR", "").split(",") if n.strip()}
-    CHANNEL_VIP = {n.strip().lower()
-                   for n in os.getenv("CHANNEL_VIP", "").split(",") if n.strip()}
-    CHANNEL_CERCHIA = {n.strip().lower()
-                       for n in os.getenv("CHANNEL_CERCHIA", "").split(",") if n.strip()}
+    # Tutta la ricostruzione sta in cp/canali.py, che possiede questi sei valori.
+    # Nessun `global` qui: il chiamante si rilega i valori dalla funzione, perché un
+    # `global` aggiornerebbe solo il namespace di main.py e lascerebbe in cp/ una
+    # copia vecchia — con lo stesso nome. Le tre liste di nomi erano il caso più
+    # subdolo, perché sono `set`: riassegnarle in-place sembrerebbe funzionare.
+    (_, channel_pacing, CHANNEL_OPERATOR, CHANNEL_VIP,
+     CHANNEL_CERCHIA, _CHANNEL_MODEL) = _canali.ricarica()
     channel_guard.reconfigure(strike_mute=_channel_int("CHANNEL_STRIKE_MUTE", 2),
                               strike_ban=_channel_int("CHANNEL_STRIKE_BAN", 3),
                               flood_max=_channel_int("CHANNEL_FLOOD_MAX", 6),
                               flood_window_s=_channel_float("CHANNEL_FLOOD_WINDOW_S", 15.0))
     push_log('channel', 'Configurazione canali ricaricata',
-             detail=f"canali={sorted(channel_policy.clients)}", status='success')
+             detail=f"canali={sorted(_canali.channel_policy.clients)}", status='success')
 
 
 # Perché il bot NON ha risposto: nei log, ma non a ogni giro.
@@ -923,7 +921,6 @@ def _channel_memories(channel: str, limit: int = 5) -> list:
 
 
 # Tetto sugli eventi per chiamata: un batch enorme è un abuso, non un caso d'uso.
-CHANNEL_INGEST_MAX_EVENTS = _channel_int("CHANNEL_INGEST_MAX_EVENTS", 100)
 
 # Comandi con cui si chiede un'immagine. Perché un COMANDO e non un tool del
 # modello: il percorso del canale non ha tool (per scelta: in una stanza non si
@@ -2410,6 +2407,7 @@ def connectors_status():
 # thread che pubblica la voce, e il `__main__` chiama `avvia()`. Tutto il resto
 # di Instagram e' dentro il modulo, e i due flag dei thread sono attributi del
 # suo contesto — vedi `_ensure_instagram_*` li', che li alzano una volta sola.
+from cp.canali import monta as monta_canali
 from cp.immagini import monta as monta_immagini
 from cp.instagram import avvia as _instagram_avvia
 
@@ -2422,13 +2420,6 @@ from cp.instagram import avvia as _instagram_avvia
 # Cosa e' gia' in cp/instagram.py: le due code del webhook col lock e i quattro
 # helper puri. Il resto resta qui perche' usa persona_store, image_queue,
 # connector_manager, advanced_config e push_log.
-
-
-
-
-
-
-
 
 
 
@@ -2612,175 +2603,6 @@ def persona_dream_run():
 
 
 
-@app.route('/channel/outbox')
-def channel_outbox():
-    """Le immagini pronte da consegnare a QUESTO canale (il driver le tira).
-
-    Perché esiste: il control-plane non ha il file e non sa parlare con la
-    piattaforma; il driver ha entrambi. Quindi anche la consegna è una cosa che il
-    driver *tira* — come le decisioni — invece di una porta che si apre.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    return jsonify({"ok": True, "channel": _channel_name(),
-                    "messages": image_queue.da_consegnare(_channel_name())})
-
-
-@app.route('/channel/outbox/ack', methods=['POST'])
-def channel_outbox_ack():
-    """Il driver dichiara consegnata un'immagine: senza l'ack si ripeterebbe."""
-    errore = _channel_error()
-    if errore:
-        return errore
-    dati = request.get_json(silent=True) or {}
-    ok = image_queue.consegnato(str(dati.get("id", "")))
-    if ok:
-        push_log('channel', f"{_channel_name()}: immagine consegnata",
-                 detail=f"id={dati.get('id')}", source=f"channel:{_channel_name()}",
-                 status='success')
-    return jsonify({"ok": ok}), (200 if ok else 404)
-
-
-@app.route('/channel/status')
-def channel_status():
-    """Stato dei canali: quali token esistono, quanto spam, quali azioni.
-
-    Nessun segreto (nomi, contatori, motivi) e in sola lettura, come /connectors
-    e /mcp/status: serve all'operatore per rispondere a "perché il bot non ha
-    risposto a quella persona?" senza aprire i log.
-    """
-    return jsonify({
-        "ok": True,
-        "policy": channel_policy.describe(),
-        "guard": channel_guard.snapshot(),
-        # Ondata in corso per canale: l'operatore la vuole vedere qui, non solo
-        # dentro la risposta all'ingest.
-        "waves": {nome: channel_guard.spam_wave(nome)
-                  for nome in sorted(channel_policy.clients)},
-        "pacing": {"min_interval_s": channel_pacing.min_interval_s,
-                   "batch_max_age_s": channel_pacing.batch_max_age_s,
-                   "batch_max_messages": channel_pacing.batch_max_messages,
-                   "probability": channel_pacing.probability},
-        # Stato riportato dai driver e comandi in attesa: è quello che rende
-        # possibile rispondere dal terminale a "che modo ha?" e "perché tace?".
-        "runtime": channel_runtime.describe(),
-        "commands_available": sorted(COMANDI_DRIVER),
-        "model": CHANNEL_MODEL or DEFAULT_MODEL,
-        "max_tokens": CHANNEL_MAX_TOKENS,
-        "context": {"messages": _channel_context_messages(),
-                    "chars": _channel_context_chars(),
-                    "num_ctx": _channel_num_ctx()},
-    })
-
-
-@app.route('/channels')
-def channels_overview():
-    """Stato per piattaforma per la scheda Social: catalogo + token + driver.
-
-    Nessun segreto: i token non escono mai. Solo configurato sì/no, superfici
-    supportate e l'ultima fotografia riportata dal driver.
-    """
-    runtime = channel_runtime.describe()
-    configured = set(channel_policy.clients)
-    voci = []
-    for voce in KNOWN_CHANNELS:
-        chiave = voce["key"]
-        stato = runtime.get(chiave, {})
-        voci.append({
-            "key": chiave,
-            "label": voce["label"],
-            "icon": voce["icon"],
-            "auth": voce["auth"],
-            "surfaces": list(voce["surfaces"]),
-            "hint": voce["hint"],
-            "first_class": bool(voce.get("first_class")),
-            "configured": chiave in configured,
-            "driver": stato.get("state") or None,
-            "pending_commands": stato.get("pending_commands", 0),
-        })
-    return jsonify({"ok": True, "enabled": channel_policy.enabled,
-                    "operator_configured": bool(CHANNEL_OPERATOR),
-                    "vip_configured": bool(CHANNEL_VIP),
-                    "cerchia_configured": bool(CHANNEL_CERCHIA),
-                    "vitality": mesh_vitality(_node_list()),
-                    "contributors": mesh_contributors(_node_list()),
-                    "channels": voci})
-
-
-@app.route('/channel/ingest', methods=['POST'])
-def channel_ingest():
-    """Eventi dalla superficie di un canale: messaggi, privati, tip, ingressi.
-
-    Il verdetto (ok/spam) e l'eventuale azione di moderazione li decide il CP; il
-    driver esegue e riferisce con /channel/result. Un log per BATCH e non per
-    messaggio: una stanza attiva scriverebbe centinaia di righe al minuto, e i
-    log diventerebbero inutili proprio nel momento in cui servono.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    canale = _channel_name()
-    data = request.get_json(force=True, silent=True) or {}
-    superficie = str(data.get("surface", "chat")).strip().lower() or "chat"
-    eventi = data.get("events")
-    if not isinstance(eventi, list) or not eventi:
-        return jsonify({"ok": False, "error": "events mancante o vuoto"}), 400
-
-    risultati, azioni, spam = [], [], 0
-    for evento in eventi[:CHANNEL_INGEST_MAX_EVENTS]:
-        if not isinstance(evento, dict):
-            continue
-        autore = str(evento.get("author", ""))[:64]
-        tipo_evento = str(evento.get("kind", "message")).strip().lower() or "message"
-        if tipo_evento == "tip":
-            # Un tip non è un messaggio da classificare: si registra (serve alla
-            # nota di ringraziamento dentro la prossima risposta) e si ricorda.
-            # Non entra nella coda delle risposte e non conta come traffico.
-            importo = evento.get("amount")
-            channel_guard.registra_tip(channel=canale, author=autore, importo=importo)
-            _channel_remember(canale, f"tip:{autore}", "tip",
-                              f"{autore} ha donato {importo if importo else 'un tip'}",
-                              surface=superficie)
-            risultati.append({"author": autore, "kind": "tip", "verdict": "ok",
-                              "reasons": [], "strikes": 0, "action": None,
-                              "key": str(evento.get("key", ""))[:64]})
-            continue
-        esito = channel_guard.observe(channel=canale, surface=superficie,
-                                      author=autore,
-                                      text=str(evento.get("text", ""))[:1000])
-        esito["key"] = str(evento.get("key", ""))[:64]
-        esito["kind"] = tipo_evento
-        if esito["verdict"] == "spam":
-            spam += 1
-        if esito["action"]:
-            azioni.append(esito["action"])
-        risultati.append(esito)
-
-    # Un'ondata è un fatto della stanza degno di memoria — UNA riga (debounce),
-    # non una per messaggio: la condizione resta vera per minuti.
-    ondata = channel_guard.spam_wave(canale)
-    if ondata and _channel_remember(canale, "spam_wave", "spam_wave",
-                                    f"ondata di spam: {ondata['count']} messaggi sospetti "
-                                    f"in {int(ondata['window_s'] / 60)} minuti",
-                                    surface=superficie):
-        push_log('channel', f"{canale}: ondata di spam registrata in memoria",
-                 detail=f"count={ondata['count']}", source=f"channel:{canale}",
-                 status='warn')
-
-    motivi = sorted({m for r in risultati for m in r["reasons"]})
-    push_log('channel', f"{canale}/{superficie}: {len(risultati)} eventi",
-             detail=f"spam={spam} motivi={','.join(motivi) or '-'} azioni={len(azioni)}",
-             source=f"channel:{canale}", status='warn' if spam else 'info')
-    for azione in azioni:
-        push_log('channel', f"{canale}: {azione['action']} su {azione['user']}",
-                 detail=f"motivo={azione['reason']}", source=f"channel:{canale}",
-                 status='warn')
-    return jsonify({"ok": True, "channel": canale, "surface": superficie,
-                    "accepted": len(risultati) - spam, "spam": spam,
-                    "results": risultati, "actions": azioni,
-                    "wave": channel_guard.spam_wave(canale),
-                    "guard": channel_guard.snapshot(canale)})
 
 
 # ── DIARIO CONVERSAZIONI (diagnostica) ──────────────────────────────────────
@@ -2802,7 +2624,6 @@ feed = Feed()
 # sketch quando il Mac l'ha disegnato. Sta su disco (a differenza della coda, che
 # è memoria viva): la superficie di osservazione legge questo.
 diario = Diario.load(DIARIO_FILE)
-
 
 
 # ── LOOP AUTONOMO DELLE INFLUENCER ──────────────────────────────────────────
@@ -3296,86 +3117,8 @@ def channel_reply():
     return jsonify({"ok": esito["action"] != "error", "channel": canale, **esito})
 
 
-@app.route('/channel/result', methods=['POST'])
-def channel_result():
-    """Esito dell'azione eseguita dal driver: chiude il ciclo e alimenta i log.
-
-    Un selettore non trovato è un guasto del DRIVER, non del modello: tenerli
-    distinti è ciò che permette di capire se si è rotto il DOM della piattaforma
-    o il ragionamento dell'agente.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    canale = _channel_name()
-    data = request.get_json(force=True, silent=True) or {}
-    tipo = str(data.get("kind", "reply")).strip().lower() or "reply"
-    ok = bool(data.get("ok"))
-    target = str(data.get("target", ""))[:64]
-    if tipo == "reply" and ok:
-        channel_pacing.note_reply(canale)
-    if tipo == "moderate" and ok and target:
-        # Una moderazione riuscita è un fatto della stanza: in memoria, così
-        # domani l'agente sa che quella persona era già stata espulsa.
-        _channel_remember(canale, f"mod:{target}", "moderation",
-                          f"moderazione su {target} dopo ripetute violazioni")
-    push_log('channel', f"{canale}: {tipo} {'eseguita' if ok else 'FALLITA'}",
-             detail=f"target={target} "
-                    f"err={str(data.get('error', ''))[:80]} "
-                    f"ms={data.get('duration_ms')}",
-             source=f"channel:{canale}", status='success' if ok else 'warn')
-    return jsonify({"ok": True, "channel": canale})
 
 
-@app.route('/channel/state', methods=['POST'])
-def channel_state():
-    """La fotografia del driver: che modo ha, se è attivo, a che ritmo va.
-
-    Esiste per rispondere dal terminale a "perché non risponde?" senza aprire i
-    log né il browser. Il driver la manda quando qualcosa cambia (o ogni tanto),
-    non a ogni giro: un report al secondo sarebbe rumore.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    canale = _channel_name()
-    data = request.get_json(force=True, silent=True) or {}
-    stato = channel_runtime.report(canale, data if isinstance(data, dict) else {})
-    push_log('channel', f"{canale}: stato del driver",
-             detail=json.dumps({k: v for k, v in stato.items() if k != "ts"},
-                               ensure_ascii=False)[:200],
-             source=f"channel:{canale}", status='info')
-    return jsonify({"ok": True, "channel": canale, "state": stato})
-
-
-@app.route('/channel/commands', methods=['GET', 'POST'])
-def channel_commands():
-    """I comandi dell'operatore (POST) e la loro consegna al driver (GET).
-
-    La direzione è quella di tutto il resto: il driver tira, l'operatore deposita.
-    Un comando deposto e mai ritirato scade da solo (TTL): eseguire "metti in
-    pausa" tre ore dopo sarebbe peggio che non eseguirlo.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    canale = _channel_name()
-    if request.method == 'GET':
-        comandi = channel_runtime.pending(canale, drain=True)
-        return jsonify({"ok": True, "channel": canale, "commands": comandi,
-                        "available": sorted(COMANDI_DRIVER)})
-    data = request.get_json(force=True, silent=True) or {}
-    try:
-        comando = channel_runtime.queue(canale, str(data.get("command", "")),
-                                        note=str(data.get("note", "")),
-                                        source=str(data.get("source", "cli"))[:64])
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)[:200],
-                        "available": sorted(COMANDI_DRIVER)}), 400
-    push_log('channel', f"{canale}: comando in coda -> {comando['command']}",
-             detail=str(data.get("note", ""))[:120], source=f"channel:{canale}",
-             status='info')
-    return jsonify({"ok": True, "channel": canale, "queued": comando})
 
 
 @app.route('/sandbox/status')
@@ -5931,12 +5674,14 @@ def _apply_env_runtime(meta: dict, cv) -> None:
     """Applica la modifica SUBITO al runtime (globals del processo) e ad
     os.environ. Il file .env viene scritto separatamente da _persist_env."""
     global OLLAMA_URL, DEFAULT_MODEL, INFERENCE_BACKEND
-    # Il modello della stanza vive in un globale letto da `_channel_model()`:
-    # senza questa riga un salvataggio dalla tab Setup finiva nel .env e in
-    # os.environ ma la stanza continuava a usare il modello vecchio fino al
-    # riavvio — l'esatto "salvato ma inerte" che questa funzione esiste per
-    # evitare (trovato il 2026-09-22 proprio cambiando CHANNEL_MODEL).
-    global CHANNEL_MODEL
+    # Il modello della stanza vive in cp/canali.py, non qui: `_channel_model()` e
+    # `_channel_status()` lo leggono da li'. Senza questa riga un salvataggio dalla
+    # tab Setup finiva nel .env e in os.environ ma la stanza continuava a usare il
+    # modello vecchio fino al riavvio — l'esatto "salvato ma inerte" che questa
+    # funzione esiste per evitare (trovato il 2026-09-22 proprio cambiando
+    # CHANNEL_MODEL). Prima stava qui come `global`, e funzionava perche' anche chi
+    # leggeva stava qui: ora che il lettore e' in cp/canali.py, la scrittura deve
+    # andare nello stesso posto del lettore.
     global MEMORY_TTL_DAYS, MEMORY_MAX_ENTRIES, SEARXNG_URL
     global ROUTING_MAX_CANDIDATES
     global METRICS_POLL_INTERVAL_S, METRICS_POLL_TIMEOUT_S, METRICS_WINDOW
@@ -5959,7 +5704,7 @@ def _apply_env_runtime(meta: dict, cv) -> None:
         advanced_config["ollama"]["defaultModel"] = DEFAULT_MODEL
     elif key == "CHANNEL_MODEL":
         # Vuoto = modello di default del control-plane (vedi `_channel_model`).
-        CHANNEL_MODEL = str(cv).strip()
+        _canali.imposta_modello(str(cv))
     elif key == "INFERENCE_BACKEND":
         INFERENCE_BACKEND = str(cv)
     elif key == "MEMORY_TTL_DAYS":
@@ -7573,6 +7318,16 @@ instagram_vips, instagram_memory, instagram_reply_outbox = monta(
 # immagine` e gli sketch dei loop, che li usano tutti.
 monta_immagini(app, image_queue=image_queue, image_memory_gate=image_memory_gate,
                 connector_manager=connector_manager, diario=diario)
+
+# ── MONTAGGIO DEI CANALI ──────────────────────────────────────────────────────
+# Otto route di stato e ingestion. Le tre che parlano col modello
+# (`channel_reply`, `channel_vision` e i loro helper) restano qui: tirarle fuori
+# avrebbe voluto dire iniettare l'inferenza nel dominio canali, cioe' il dominio
+# chat dentro quello dei canali. Quando si sposta l'inferenza, si spostano anche.
+monta_canali(app, image_queue=image_queue,
+             context_messages=_channel_context_messages,
+             context_chars=_channel_context_chars, num_ctx=_channel_num_ctx,
+             channel_remember=_channel_remember, node_list=_node_list)
 
 
 if __name__ == '__main__':

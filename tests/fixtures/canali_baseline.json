@@ -1,0 +1,54 @@
+{
+  "channel_status": {
+    "body": "{\"commands_available\":[\"auto\",\"off\",\"on\",\"status\"],\"context\":{\"chars\":400,\"messages\":20,\"num_ctx\":8192},\"guard\":{\"authors_tracked\":0,\"max_authors\":500,\"recent_actions\":[],\"spam_authors_active\":0,\"spam_events_recenti\":0,\"strike_ban\":3,\"strike_decay_s\":1800.0,\"strike_mute\":2,\"tip_recenti\":0},\"max_tokens\":160,\"model\":\"\",\"ok\":true,\"pacing\":{\"batch_max_age_s\":6.0,\"batch_max_messages\":6,\"min_interval_s\":25.0,\"probability\":1.0},\"policy\":{\"channels\":[\"com4\"],\"configured\":true,\"enabled\":true,\"min_token_length\":32,\"problems\":[]},\"runtime\":{},\"waves\":{\"com4\":null}}\n",
+    "status": 200
+  },
+  "channels_overview": {
+    "body": "{\"cerchia_configured\":false,\"channels\":[{\"auth\":\"bot_token\",\"configured\":false,\"driver\":null,\"first_class\":true,\"hint\":\"Bot token da @BotFather; long-polling getUpdates, nessun intent privilegiato.\",\"icon\":\"\\u2708\\ufe0f\",\"key\":\"telegram\",\"label\":\"Telegram\",\"pending_commands\":0,\"surfaces\":[\"chat\",\"pm\",\"thread\"]},{\"auth\":\"bot_token\",\"configured\":false,\"driver\":null,\"first_class\":true,\"hint\":\"Bot applicazione + intent Message Content; gateway WebSocket.\",\"icon\":\"\\ud83c\\udfae\",\"key\":\"discord\",\"label\":\"Discord\",\"pending_commands\":0,\"surfaces\":[\"chat\",\"pm\",\"thread\"]},{\"auth\":\"account_browser\",\"configured\":false,\"driver\":null,\"first_class\":true,\"hint\":\"Account + driver browser (DOM), come cam4_chatbot.py.\",\"icon\":\"\\ud83d\\udcf9\",\"key\":\"cam4\",\"label\":\"CAM4\",\"pending_commands\":0,\"surfaces\":[\"chat\",\"pm\"]},{\"auth\":\"account_browser\",\"configured\":false,\"driver\":null,\"first_class\":true,\"hint\":\"Account + driver browser (DOM).\",\"icon\":\"\\ud83c\\udfa5\",\"key\":\"cb\",\"label\":\"Chaturbate\",\"pending_commands\":0,\"surfaces\":[\"chat\",\"pm\"]},{\"auth\":\"account_browser\",\"configured\":false,\"driver\":null,\"first_class\":false,\"hint\":\"Placeholder: DM via account/browser.\",\"icon\":\"\\ud83d\\udcf8\",\"key\":\"instagram\",\"label\":\"Instagram\",\"pending_commands\":0,\"surfaces\":[\"dm\"]},{\"auth\":\"api_token\",\"configured\":false,\"driver\":null,\"first_class\":false,\"hint\":\"Placeholder: API token.\",\"icon\":\"\\ud83d\\udc26\",\"key\":\"x\",\"label\":\"X (Twitter)\",\"pending_commands\":0,\"surfaces\":[\"dm\"]},{\"auth\":\"nick_password\",\"configured\":false,\"driver\":null,\"first_class\":false,\"hint\":\"Nick + password (SASL/NickServ). Socket TCP; rete e canali dal driver scripts/irc_bot.py.\",\"icon\":\"\\ud83d\\udcac\",\"key\":\"irc\",\"label\":\"IRC\",\"pending_commands\":0,\"surfaces\":[\"chat\",\"pm\"]}],\"contributors\":[],\"enabled\":true,\"ok\":true,\"operator_configured\":false,\"vip_configured\":false,\"vitality\":{\"active_nodes\":1,\"label\":\"assonnata\",\"level\":1,\"total_vram_gb\":16.0}}\n",
+    "status": 200
+  },
+  "commands_senza_token": {
+    "body": "{\"error\":\"token di canale mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "commands_vuoto": {
+    "body": "{\"available\":[\"auto\",\"off\",\"on\",\"status\"],\"channel\":\"com4\",\"commands\":[],\"ok\":true}\n",
+    "status": 200
+  },
+  "ingest_corpo_vuoto": {
+    "body": "{\"error\":\"events mancante o vuoto\",\"ok\":false}\n",
+    "status": 400
+  },
+  "ingest_senza_token": {
+    "body": "{\"error\":\"token di canale mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "outbox_ack_inesistente": {
+    "body": "{\"ok\":false}\n",
+    "status": 404
+  },
+  "outbox_senza_token": {
+    "body": "{\"error\":\"token di canale mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "outbox_vuoto": {
+    "body": "{\"channel\":\"com4\",\"messages\":[],\"ok\":true}\n",
+    "status": 200
+  },
+  "reply_senza_token": {
+    "body": "{\"error\":\"token di canale mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "result_inesistente": {
+    "body": "{\"channel\":\"com4\",\"ok\":true}\n",
+    "status": 200
+  },
+  "state_inesistente": {
+    "body": "{\"channel\":\"com4\",\"ok\":true,\"state\":{\"at\":\"2026-10-05T11:39:05Z\",\"reports\":1,\"ts\":1791200345.511328}}\n",
+    "status": 200
+  },
+  "vision_corpo_vuoto": {
+    "body": "{\"error\":\"foto assente o troppo grande\",\"ok\":false}\n",
+    "status": 413
+  }
+}
