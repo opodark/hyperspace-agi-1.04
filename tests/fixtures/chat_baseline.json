@@ -1,0 +1,72 @@
+{
+  "con_stream": {
+    "body": "data: {\"id\": \"chatcmpl-finto\", \"object\": \"chat.completion.chunk\", \"created\": 1791224312, \"model\": \"modello-finto\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\"}}]}\n\ndata: {\"id\": \"chatcmpl-finto\", \"object\": \"chat.completion.chunk\", \"created\": 1791224312, \"model\": \"modello-finto\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"risposta \"}}]}\n\ndata: {\"id\": \"chatcmpl-finto\", \"object\": \"chat.completion.chunk\", \"created\": 1791224312, \"model\": \"modello-finto\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"dal \"}}]}\n\ndata: {\"id\": \"chatcmpl-finto\", \"object\": \"chat.completion.chunk\", \"created\": 1791224312, \"model\": \"modello-finto\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"modello \"}}]}\n\ndata: {\"id\": \"chatcmpl-finto\", \"object\": \"chat.completion.chunk\", \"created\": 1791224312, \"model\": \"modello-finto\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"finto \"}}]}\n\ndata: {\"id\": \"chatcmpl-finto\", \"object\": \"chat.completion.chunk\", \"created\": 1791224312, \"model\": \"modello-finto\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\n\ndata: [DONE]\n\n",
+    "content_type": "text/event-stream",
+    "status": 200
+  },
+  "con_tools": {
+    "body": "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"query\\\": \\\"prova\\\"}\",\"name\":\"tool_di_prova_client\"},\"id\":\"call_finto\",\"index\":0,\"type\":\"function\"}]}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "corpo_malformato": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "max_tokens_zero": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "messages_assenti": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "modello_inesistente": {
+    "body": "{\"error\":{\"message\":\"model 'nessun-modello' not found\",\"type\":\"model_not_found\"}}\n",
+    "content_type": "application/json",
+    "status": 502
+  },
+  "nodo_pinnato_inesistente": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "options": {
+    "body": "",
+    "content_type": "text/html; charset=utf-8",
+    "status": 204
+  },
+  "senza_stream": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "system_prompt": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "temperature_estrema": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "think_non_richiesto": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "think_richiesto": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"reasoning\":\"ragionamento del modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  },
+  "tool_choice_none": {
+    "body": "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"risposta dal modello finto\",\"role\":\"assistant\"}}],\"created\":1791224312,\"id\":\"chatcmpl-finto\",\"model\":\"modello-finto\",\"object\":\"chat.completion\"}\n",
+    "content_type": "application/json",
+    "status": 200
+  }
+}
