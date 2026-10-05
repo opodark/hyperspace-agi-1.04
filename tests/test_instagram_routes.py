@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Confini delle route Instagram: i punti in cui il dominio parla con l'esterno,
 e dove un errore non si vede finche' Meta non rimbalza la chiamata.
 

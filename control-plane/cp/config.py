@@ -35,6 +35,7 @@ DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.jo
     BASE_DIR, "..", "data", "diario-immagini")
 DIARIO_FILE         = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(
     BASE_DIR, "data", "diario.json")
+TYPOGRAPHY_IMAGES_DIR = os.getenv("TYPOGRAPHY_IMAGES_DIR", "/app/data/typography-images")
 INSTAGRAM_VIP_FILE  = os.getenv("INSTAGRAM_VIP_FILE", "").strip() or os.path.join(
     BASE_DIR, "data", "instagram_vips.json")
 INSTAGRAM_MEMORY_FILE = os.getenv("INSTAGRAM_MEMORY_FILE", "").strip() or os.path.join(

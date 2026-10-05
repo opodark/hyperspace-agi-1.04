@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Registra le risposte reali dei confini Instagram, per confrontarle dopo un'estrazione.
 
 Non e' un test: e' lo strumento che ha prodotto `tests/fixtures/instagram_baseline.json`.

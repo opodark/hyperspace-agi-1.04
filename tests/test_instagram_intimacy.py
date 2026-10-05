@@ -10,6 +10,8 @@ from shared.instagram_intimacy import (  # noqa: E402
 )
 from shared.instagram_vip import INTIMATE_LEVELS  # noqa: E402
 
+from tests import cp_source  # noqa: E402
+
 
 def test_consenso_esplicito_si():
     assert consent_answer("Sì") == CONSENT_GRANTED
@@ -94,8 +96,10 @@ def test_il_ramo_della_banda_intima_viene_prima_del_ramo_generico_del_consenso()
     prompt. Il livello lo dice la scala (`INTIMATE_LEVELS`), non una stringa scritta
     qui: se la banda cambia nome, questo test la segue.
     """
-    sorgente = (Path(__file__).parents[1] / "control-plane" / "main.py").read_text(
-        encoding="utf-8")
+    # Legge il sorgente di tutto il control-plane, non solo main.py: l'auto-reply
+    # e' in cp/instagram.py, e questo test continua a valere perche' guarda dove
+    # sta la regola e non quale file la contiene.
+    sorgente = cp_source.SORGENTE()
     intima = sorgente.index('consent == "granted" and vip.get("level") in INTIMATE_LEVELS')
     generico = sorgente.index('elif consent == "granted":')
     assert intima < generico

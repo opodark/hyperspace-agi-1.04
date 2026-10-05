@@ -89,11 +89,20 @@ def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
         "INTIMATE_LEVELS": INTIMATE_LEVELS,
         "instagram_vips": Consensi(consenso),
         "richiesta_immagine_smart": prompt_reader or richiesta_immagine_smart,
-        "persona_store": SimpleNamespace(
-            system_block=lambda: "Sono Anna",
-            persona=SimpleNamespace(name="Anna"),
-            sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}}),
-        "image_queue": queue,
+        # La coda immagini e il negozio delle persone arrivano dal boot di
+        # main.py, e da quando il dominio vive in cp/instagram.py passano
+        # attraverso il suo contesto invece che come nomi di modulo. Il finto
+        # e' lo stesso di prima, ma addrizzato.
+        "_contesto": SimpleNamespace(
+            image_queue=queue,
+            # `_nome_persona` e' una funzione di main.py, iniettata come callable:
+            # il dominio non la puo' creare, e questa e' la stessa risposta che
+            # le darebbe `monta()`.
+            nome_persona=lambda: "Anna",
+            persona_store=SimpleNamespace(
+                system_block=lambda: "Sono Anna",
+                persona=SimpleNamespace(name="Anna"),
+                sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}})),
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
         "prepara_prompt_canale": prepara_prompt_canale,
@@ -512,16 +521,21 @@ class RispostaTests(unittest.TestCase):
             "wants_project_info": lambda *a: False,
             "should_offer_creator": lambda *a: False,
             "sister_note": lambda *a: "",
-            "_sister_peer": lambda: "",
             "PROJECT_CONTEXT": "",
             "CREATOR_LEVEL": CREATOR_LEVEL,
             "instagram_vips": Consensi("granted"),
             "compagna_context": lambda *a: "COMPAGNA",
             "cerchia_entry_context": lambda *a: "INGRESSO",
             "musa_context": lambda *a: "MUSA",
-            "advanced_config": {"ollama": {"defaultModel": "finto"}},
             "requests": modello,
-            "connector_manager": SimpleNamespace(execute=_execute),
+            # Le tre dipendenze che l'auto-reply prende dal boot: il config
+            # avanzato (per il modello di default), il gestore dei connettori (che
+            # invia davvero) e la sorella, che e' una funzione di main.py e quindi
+            # entra come callable. Prima erano tre nomi piatti nello scope.
+            "_contesto": SimpleNamespace(
+                advanced_config={"ollama": {"defaultModel": "finto"}},
+                connector_manager=SimpleNamespace(execute=_execute),
+                sister_peer=lambda: ""),
             "instagram_reply_outbox": SimpleNamespace(
                 sending=lambda *a: True, sent=lambda *a: None,
                 fail=lambda *a, **k: None),
