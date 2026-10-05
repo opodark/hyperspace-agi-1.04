@@ -4033,6 +4033,19 @@ def _finalize_task(task, task_id, node_id, model, prompt, result_json):
         reply_text = result_json["choices"][0]["message"]["content"]
     except Exception:
         reply_text = json.dumps(result_json)[:300]
+    # Quando il modello chiede un tool, `content` è `null` — è lo standard OpenAI,
+    # non un modello rotto. Il `try` qui sopra non lo intercetta, perché
+    # `["content"]` su una chiave presente che vale None non solleva nulla: il
+    # None arriva fino a `reply_text[:500]` e fa TypeError, cioè un 500 su
+    # /v1/chat/completions ogni volta che il modello usa un tool. Il testo in quel
+    # caso è il nome del tool: è quello che finisce in memoria e nei log, e
+    # vuotolo lascerebbe "webui_response" senza contenuto.
+    if reply_text is None:
+        chiamate = result_json.get("choices", [{}])[0].get("message", {}).get(
+            "tool_calls") or []
+        reply_text = ", ".join(
+            str((c.get("function") or {}).get("name") or c.get("name") or "?")
+            for c in chiamate) or "(nessun testo: il modello ha chiesto un tool)"
     task["status"]       = "done"
     task["result"]       = result_json
     task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

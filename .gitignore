@@ -53,3 +53,10 @@ node_modules/
 
 # Report generati — artefatti, non sorgenti (scripts/generate_test_report.py)
 reports/
+
+# Stato che i test e le baseline scrivono dove capita. Sono artefatti: se finiscono
+# in un commit, il repo cresce a ogni esecuzione e `git status` diventa illeggibile.
+control-plane/memory.json.gz
+control-plane/memory-outbox.jsonl
+control-plane/data/
+control-plane/.venv/
