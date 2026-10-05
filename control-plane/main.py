@@ -580,23 +580,6 @@ def _with_persona(messages, user_text: str = "", surface: str | None = None) -> 
     return [{"role": "system", "content": blocco}] + out
 
 
-def _audit_persona_reply(response: dict) -> None:
-    """Registra se la RISPOSTA rivendica di essere umano.
-
-    Non blocca e non riscrive nulla: il vincolo sta nel prompt, questo è il
-    controllo che lo rende verificabile. Copre il percorso non-stream, da cui
-    passa ogni risposta completa; in streaming il CP inoltra i chunk senza
-    comporli, quindi lì il controllo non si applica — ed è scritto, non
-    sottinteso (vedi docs/persona.md).
-    """
-    try:
-        content = response["choices"][0]["message"].get("content") or ""
-    except Exception:
-        return
-    offese = audit_reply(content)
-    if offese:
-        push_log('system', 'Persona: la risposta rivendica di essere umano',
-                 detail="; ".join(offese)[:160], status='warn')
 
 
 def _tool_persona_get(args) -> str:
@@ -672,14 +655,6 @@ for _restored_image_job in image_queue.running_ids(FAMIGLIE_CHECKPOINT):
     image_memory_gate.reserve_image(_restored_image_job, timeout=0)
 
 
-def _local_model_post(url: str, **kwargs):
-    """Count background Ollama calls too, including dream and post loops."""
-    if not image_memory_gate.enter_chat():
-        raise RuntimeError("Il Mac sta completando un'immagine")
-    try:
-        return requests.post(url, **kwargs)
-    finally:
-        image_memory_gate.leave_chat()
 
 
 @app.before_request
@@ -1410,13 +1385,6 @@ from cp.assistant import _assistant_text, _normalize_assistant_message
 
 
 # ── SMART TASK ROUTING ────────────────────────────────────────────────────────
-class NodeBusyError(Exception):
-    """Il nodo ha risposto 503 node_busy_timeout: la sua coda interna è
-    rimasta satura oltre il timeout configurato lato nodo. Il chiamante
-    prova il prossimo nodo migliore invece di aspettare o fallire subito."""
-    def __init__(self, node_id: str, message: str = ""):
-        self.node_id = node_id
-        super().__init__(message or f"nodo {node_id} occupato (coda satura)")
 
 def _latest_metrics(nid: str) -> dict:
     """Ultimo campione /metrics del nodo, senza mutare la cache. None se
@@ -2210,6 +2178,12 @@ from cp import memoria as _memoria
 # questo namespace e lascerebbe il modulo con l'oggetto vecchio.
 memory_sync = _memoria.memory_sync
 from cp.memoria import (_ts_to_iso, _notify_bridge, _load_memory, _save_memory, _memory_append)
+# Le chiamate all'inferenza stanno in cp/inferenza.py: il tentativo sui candidati,
+# la chiamata firmata verso i nodi, e il post locale che tiene conto delle
+# chiamate dei loop. `NodeBusyError` sta li' perche' e' un segnale del protocollo
+# fra CP e nodi, e chi lo cattura lo importa da qui.
+from cp import inferenza as _inferenza
+from cp.inferenza import (NodeBusyError, _call_ollama, _call_ollama_one, _local_model_post, _audit_persona_reply)
 from cp.immagini import monta as monta_immagini
 from cp.instagram import avvia as _instagram_avvia
 
@@ -2943,70 +2917,8 @@ def sandbox_status():
     return jsonify(status), response_code
 
 # ── TOOL CALLING LOOP ─────────────────────────────────────────────────────────
-def _call_ollama(ollama_base, payload: dict, sign: bool = False, node_id: str = "") -> dict:
-    """Inoltra a /v1/chat/completions con FALLBACK sugli endpoint diretti.
-
-    `ollama_base` può essere una stringa (un solo endpoint, es. un nodo) o una
-    LISTA (endpoint diretti da provare in ordine). Il fallback scatta SOLO su
-    errore di rete (connessione/timeout): se un endpoint risponde (anche con un
-    HTTP di errore o un body non-JSON) l'errore si propaga e non si prova un
-    altro endpoint. Con una lista il fallback è per il caso diretto (sign=False):
-    un nodo specifico non va confuso con un altro.
-    """
-    bases = [ollama_base] if isinstance(ollama_base, str) else list(ollama_base or [])
-    last_network_error = None
-    for base in bases:
-        try:
-            return _call_ollama_one(base, payload, sign=sign, node_id=node_id)
-        except requests.RequestException as e:
-            last_network_error = e
-            continue
-    if last_network_error is not None:
-        raise last_network_error
-    return {"error": {"message": "nessun endpoint di inferenza diretto disponibile",
-                      "type": "server_error"}}
 
 
-def _call_ollama_one(ollama_base: str, payload: dict, sign: bool = False, node_id: str = "") -> dict:
-    """Chiama /v1/chat/completions. Se sign=True (target = un nodo della
-    mesh), firma la richiesta con l'identita' ECDSA del CP — il nodo ora
-    richiede questa firma su questo path (vedi node/main.py SIGNED_PATHS).
-    Se sign=False (target = Ollama diretto, fallback), nessuna firma:
-    Ollama non la capirebbe comunque.
-
-    Se il nodo risponde 503 node_busy_timeout (la sua coda interna è rimasta
-    satura oltre il timeout), solleva NodeBusyError invece di trattarlo come
-    un errore generico: il chiamante (_run_tool_loop / route) può così
-    provare il prossimo nodo candidato senza far fallire subito il task."""
-    if sign:
-        body = json.dumps(payload, sort_keys=True).encode()
-        headers = make_request_headers(CP_ID, CP_PUBKEY, _cp_private_key, body)
-        headers["Content-Type"] = "application/json"
-        r = requests.post(f"{ollama_base}/v1/chat/completions", data=body, headers=headers,
-                          timeout=_inference_timeout(payload.get("model", "")))
-    else:
-        r = _local_model_post(f"{ollama_base}/v1/chat/completions", json=payload,
-                          timeout=_inference_timeout(payload.get("model", "")))
-
-    if r.status_code == 503:
-        try:
-            err = r.json().get("error", {})
-        except Exception:
-            err = {}
-        if err.get("type") == "node_busy_timeout":
-            raise NodeBusyError(node_id, err.get("message", ""))
-
-    raw = r.text.strip()
-    if not raw:
-        raise ValueError(f"Ollama body vuoto (HTTP {r.status_code})")
-    try:
-        parsed = r.json()
-    except Exception:
-        raise ValueError(f"Risposta non-JSON da Ollama (HTTP {r.status_code}): {raw[:200]}")
-    # Unico punto da cui passa ogni risposta NON-stream (nodo, ollama-direct,
-    # fallback): è qui che l'audit di disclosure vede il testo dell'agente.
-    _audit_persona_reply(parsed)
-    return parsed
 
 
 
@@ -7122,6 +7034,13 @@ instagram_vips, instagram_memory, instagram_reply_outbox = monta(
 # vengono solo passati: sono infrastruttura condivisa, e questa riga non è il posto
 # giusto per spostare la loro creazione — ci stanno ancora i canali, `_channel_
 # immagine` e gli sketch dei loop, che li usano tutti.
+# L'inferenza riceve la chiave di firma, il gate delle chiamate locali, l'id e la
+# chiave pubblica del nodo, e il controllo di persona. Sono tutti stabili dopo
+# l'avvio — nessuno viene riassegnato — quindi iniettarli qui non puo' congelare un
+# valore, e non serve nessun `global` per ricaricarli.
+_inferenza.collega(_cp_private_key, image_memory_gate, CP_ID, CP_PUBKEY,
+                   _audit_persona_reply)
+
 monta_immagini(app, image_queue=image_queue, image_memory_gate=image_memory_gate,
                 connector_manager=connector_manager, diario=diario)
 
