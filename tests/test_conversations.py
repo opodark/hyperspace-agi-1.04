@@ -23,9 +23,12 @@ class ConversationDiaryTests(unittest.TestCase):
         tree = cp_source.albero()
         corpo = next(ast.unparse(n) for n in tree.body
                      if isinstance(n, ast.FunctionDef) and n.name == "channel_reply")
-        self.assertIn("_record_conversation", corpo)
+        # La registrazione arriva dal contesto del dominio invece che da un nome
+        # piatto: il cablaggio e' lo stesso, e il test deve valere per come e'
+        # scritto adesso come per come era scritto prima.
+        self.assertIn("record_conversation", corpo)
         # Quattro uscite registrano: reply, wait, presentazione, immagine.
-        self.assertGreaterEqual(corpo.count("_record_conversation"), 4)
+        self.assertGreaterEqual(corpo.count("record_conversation"), 4)
 
     def test_la_pagina_html_e_copiata_nel_container(self):
         dockerfile = (ROOT / "control-plane" / "Dockerfile").read_text(encoding="utf-8")

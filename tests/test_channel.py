@@ -448,11 +448,11 @@ class ContestoWiringTests(unittest.TestCase):
         for nome in ("_channel_context_messages", "_channel_context_chars", "_channel_num_ctx"):
             with self.subTest(nome=nome):
                 self.assertIn(nome, self.functions)
-        self.assertIn("_channel_context_messages()", ast.unparse(self.functions["_trascrizione"]))
+        self.assertIn("channel_context_messages()", ast.unparse(self.functions["_trascrizione"]))
 
     def test_la_finestra_di_contesto_e_esplicita_nel_payload(self):
         body = ast.unparse(self.functions["_channel_reply"])
-        self.assertIn("_channel_num_ctx()", body)
+        self.assertIn("channel_num_ctx()", body)
         self.assertIn("options", body)
 
     def test_il_sogno_ha_un_modello_suo(self):

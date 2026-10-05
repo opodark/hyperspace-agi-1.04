@@ -26,6 +26,7 @@ in un test senza effetti collaterali.
 """
 import os
 import sys
+import ast
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -36,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "control-plane"))
 
 from cp import canali as cp_canali  # noqa: E402
+from tests import cp_source  # noqa: E402
 from shared.channel import ChannelGuard, ChannelPolicy, ChannelRuntime  # noqa: E402
 
 TOKEN = "t" * 40
@@ -347,3 +349,168 @@ class DocstringDelleRouteTests(unittest.TestCase):
                 self.assertTrue(testo and len(testo.strip()) > 20,
                                 f"{nome} ha un docstring troppo corto per "
                                 "spiegare il contratto")
+
+
+class ReplyEInferenceTests(MontaggioCanaliMixin, unittest.TestCase):
+    """`/channel/reply` è la rotta più complicata del dominio.
+
+    Il driver la chiama ogni secondo durante una conversazione, e la rotta
+    risponde con una di quattro cose: il testo, un'immagine, "non inviare", o un
+    errore. Ognuna ha un modo diverso di registrare la battuta nel diario, e
+    sbagliare lì non fa fallire la richiesta: fa registrare al bot cose che non ha
+    detto.
+
+    Questi test non provano la risposta — per quello ci sono le baseline, che
+    fotografano il server vero — ma il **cablaggio**: che ogni uscita registri, e
+    che registri una sola volta.
+    """
+
+    def setUp(self):
+        self.client = self.monta()
+
+    def test_ogni_uscita_registra_la_battuta(self):
+        """Cinque uscite: presentazione, immagine, "non inviare", risposta,
+        errore. Se una non registrasse, il diario avrebbe un buco e nessuno se
+        ne accorgerebbe — il diario si legge a mano, e un buco sembra una
+        conversazione piu' corta."""
+        corpo = ast.unparse(cp_source.funzioni()["channel_reply"])
+        self.assertGreaterEqual(corpo.count("record_conversation"), 4,
+                                "una delle uscite non registra nel diario")
+
+    def test_la_presentazione_ha_precedenza_su_tutto(self):
+        """Se ci si presenta, non si risponde: due azioni nella stessa risposta
+        farebbero scrivere al canale due messaggi per un solo giro."""
+        corpo = ast.unparse(cp_source.funzioni()["channel_reply"])
+        presentazione = corpo.index("_channel_presentazione")
+        modello = corpo.index("_channel_reply(")
+        self.assertLess(presentazione, modello,
+                        "la presentazione viene dopo il modello: il bot si "
+                        "presenterebbe DOPO aver risposto")
+
+    def test_limmagine_viene_prima_del_modello(self):
+        corpo = ast.unparse(cp_source.funzioni()["channel_reply"])
+        self.assertLess(corpo.index("_channel_immagine"), corpo.index("_channel_reply("),
+                        "un comando !immagine deve produrre un'immagine, non "
+                        "una risposta testuale")
+
+    def test_il_risultato_del_ritmo_registra_il_motivo(self):
+        """Quando la politica sul ritmo dice "non inviare", il perché va nel
+        diario: senza, l'operatore che chiede "perché non ha risposto" non trova
+        niente, e la domanda resta senza risposta.
+
+        Il ramo è quello fra la decisione e la chiamata al modello: se il bot non
+        ha parlato, è lì che il motivo deve finire.
+        """
+        corpo = ast.unparse(cp_source.funzioni()["channel_reply"])
+        # il ramo del ritmo: dalla decisione alla chiamata al modello, che non
+        # avviene perché si è deciso di non rispondere
+        inizio = corpo.index("decisione")
+        fine = corpo.index("_channel_reply(")
+        ramo = corpo[inizio:fine]
+        # la registrazione vera, non la parola "reason" che compare anche nella
+        # chiamata a _log_pacing_reason: cerchiamo l'argomento `reason=` DENTRO la
+        # chiamata a record_conversation
+        registrazione = ramo[ramo.index("record_conversation("):]
+        registrazione = registrazione[:registrazione.index(")") + 1] \
+            if ")" in registrazione else registrazione
+        self.assertIn("record_conversation", ramo)
+        self.assertIn("reason", registrazione,
+                      "la registrazione del ramo ritmo deve portare il motivo "
+                      "della decisione, non solo l'azione")
+
+    def test_la_rotta_chiede_il_token(self):
+        risposta = self.client.post("/channel/reply", json={"context": []})
+        self.assertEqual(risposta.status_code, 401)
+
+    def test_vision_chiede_il_token(self):
+        risposta = self.client.post("/channel/vision", json={})
+        self.assertEqual(risposta.status_code, 401)
+
+
+class ModelloDelCanaleTests(MontaggioCanaliMixin, unittest.TestCase):
+    """`_channel_model` sceglie il modello in base alla vitalità della mesh.
+
+    La firma è un dizionario con dentro `level`, non un numero: la vitalità ha più
+    campi, e qui si guarda solo il livello. La regola che conta è che il vuoto
+    equivale all'assenza: nessuna vitalità, nessun modello dedicato, e si usa quello
+    di default del control-plane. Senza un test che lo fissi, un refactor potrebbe
+    trasformarlo in un errore che si vede solo su un canale senza modello proprio.
+    """
+
+    def setUp(self):
+        self.client = self.monta()
+
+    def test_senza_vitalita_uso_il_default(self):
+        for vuoto in ({}, {"level": 0}, {"level": None}, {"altro": 9}):
+            with self.subTest(vitalita=vuoto):
+                self.assertEqual(cp_canali._channel_model(vuoto),
+                                 cp_canali.CHANNEL_MODEL or cp_canali.DEFAULT_MODEL)
+
+    def test_un_vitalita_senza_modello_dedicato_usa_il_modello_del_canale(self):
+        """Il modello grande si usa solo SE è configurato e il livello lo
+        raggiunge: con `VITALITY_BIG_MODEL` vuoto, un canale in coalescenza non
+        cambia modello da solo."""
+        with mock.patch.object(cp_canali, "VITALITY_BIG_MODEL", ""):
+            self.assertEqual(cp_canali._channel_model({"level": 99}),
+                             cp_canali.CHANNEL_MODEL or cp_canali.DEFAULT_MODEL)
+
+    def test_vitalita_alta_e_modello_grande_uso_il_modello_grande(self):
+        """Ecco l'unico caso in cui il modello dedicato entra: il livello lo
+        raggiunge E il modello è configurato."""
+        grande = "modello-della-coalescenza"
+        with mock.patch.object(cp_canali, "VITALITY_BIG_MODEL", grande):
+            self.assertEqual(cp_canali._channel_model({"level": 99}), grande)
+
+    def test_vitalita_bassa_ignora_il_modello_grande(self):
+        grande = "modello-della-coalescenza"
+        with mock.patch.object(cp_canali, "VITALITY_BIG_MODEL", grande):
+            self.assertNotEqual(cp_canali._channel_model({"level": 1}), grande)
+
+
+class PacingLogTests(unittest.TestCase):
+    """Il motivo di un silenzio va scritto al massimo una volta al minuto.
+
+    Non è una questione di eleganza: il driver chiede una risposta ogni secondo,
+    quindi senza questo tetto una stanza muta da mezz'ora produrrebbe milletrecento
+    righe identiche — e i log diventerebbero inutili proprio quando servono.
+    """
+
+    def setUp(self):
+        cp_canali._PACING_LOG_AT.clear()
+        self.addCleanup(cp_canali._PACING_LOG_AT.clear)
+
+    def test_il_primo_motivo_si_scrive(self):
+        with mock.patch.object(cp_canali, "push_log"):
+            self.assertTrue(cp_canali._log_pacing_reason(
+                "cam4", {"action": "wait", "reason": "troppi messaggi in coda"}))
+
+    def test_il_secondo_subito_non_si_riscrive(self):
+        with mock.patch.object(cp_canali, "push_log") as log:
+            cp_canali._log_pacing_reason("cam4", {"action": "wait", "reason": "a"})
+            cp_canali._log_pacing_reason("cam4", {"action": "wait", "reason": "a"})
+        self.assertEqual(log.call_count, 1, "la stessa ragione due volte in un "
+                         "minuto: e' flood")
+
+    def test_un_canale_diverso_ha_il_suo_tetto(self):
+        """Il tetto è per (canale, motivo): due canali che taccono per motivi
+        diversi devono poter dire entrambi perché."""
+        with mock.patch.object(cp_canali, "push_log") as log:
+            cp_canali._log_pacing_reason("cam4", {"action": "wait", "reason": "a"})
+            cp_canali._log_pacing_reason("cb", {"action": "wait", "reason": "a"})
+        self.assertEqual(log.call_count, 2)
+
+    def test_un_motivo_diverso_ha_il_suo_tetto(self):
+        with mock.patch.object(cp_canali, "push_log") as log:
+            cp_canali._log_pacing_reason("cam4", {"action": "wait", "reason": "a"})
+            cp_canali._log_pacing_reason("cam4", {"action": "drop", "reason": "b"})
+        self.assertEqual(log.call_count, 2)
+
+    def test_il_motivo_va_nel_messaggio_e_nel_detail(self):
+        """`hs.py logs` mostra il messaggio: "risposta non inviata (wait)" senza il
+        perché lascerebbe la domanda dov'era."""
+        with mock.patch.object(cp_canali, "push_log") as log:
+            cp_canali._log_pacing_reason(
+                "cam4", {"action": "wait", "reason": "coda satura"})
+        args, kwargs = log.call_args
+        self.assertIn("coda satura", args[1])
+        self.assertIn("coda satura", kwargs.get("detail", ""))

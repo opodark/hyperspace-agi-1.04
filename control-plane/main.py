@@ -43,7 +43,7 @@
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import os, threading, time, requests, json, uuid, hashlib, re, ast, base64, io, binascii
+import os, threading, time, requests, json, uuid, hashlib, re, ast
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -89,32 +89,21 @@ from shared.web_node import (
 from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
 from shared.node_compat import ProtocolWatch
 from shared.mcp_auth import McpAuthPolicy
-from shared.persona import (PersonaStore, audit_reply, build_introduction,
-                            identity_expected, identity_tools_hidden, should_disclose)
+from shared.persona import (PersonaStore, identity_expected, identity_tools_hidden, should_disclose)
 from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
-from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
-from shared.image_jobs import (FAMIGLIA_SDXL, FAMIGLIE_CHECKPOINT, ImmagineQueue,
-                               nuovo_job, richiesta_immagine)
+from shared.image_jobs import (FAMIGLIE_CHECKPOINT, ImmagineQueue)
 from shared.image_memory_gate import ImageMemoryGate
-from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,
-                            prompt_ritratto, richiesta_di_se, verifica_vetrina,
-                            vetrina_con_quadro_erotismo, vetrina_dal_documento)
-from shared.prompt_immagine import (chiama_ollama, configura_modello,
-                                   prepara_prompt_canale, richiesta_immagine_smart)
-from shared.image_translation import traduci_scena_immagine
+from shared.prompt_immagine import (chiama_ollama, configura_modello)
 from shared.feed import Feed, nuovo_post
 from shared.post_gen import (MOTIVO_ECO, build_poem_prompt, build_post_prompt, filtra_post,
                              parse_post, prossima_mossa)
-from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, negativo_sketch, puo_generare
+from shared.sketch import job_sketch, puo_generare
 from shared.diario import (Diario, voce)
 from shared.dialogue_image import compose_dialogue
 from shared.conversation_log import ConversationLog, battuta
 from shared.social_dreams import social_dream_inspirations
 from shared.dream_schedule import choose_author, in_hour_window
-from shared.instagram_intimacy import (compagna_context,
-                                       musa_context)
-from shared.sister_status import sister_note
 from shared.dream_visual import build_dream_prompt, filtra_dream, parse_dream
 from shared import ollama_native
 from shared.shell_policy import ShellPolicy
@@ -615,8 +604,8 @@ def _tool_persona_note(args) -> str:
 # autosufficiente (solo os e shared.channel). Qui il resto del canale — le
 # rotte, il reply, l'ingest — che usa persona_store, image_queue e push_log.
 from cp import canali as _canali
-from cp.canali import (CHANNEL_MAX_TOKENS, _channel_error, _channel_float,
-                      _channel_int, _channel_name, channel_guard, channel_pacing)
+from cp.canali import (_channel_float,
+                      _channel_int, channel_guard)
 
 # Le tre liste di nomi dei canali sono possedute da cp/canali.py, che le ricarica
 # dopo un salvataggio in tab Setup. Qui ne teniamo un riferimento perche' le
@@ -701,12 +690,6 @@ VITALITY_BIG_LEVEL = max(0, int(os.getenv("VITALITY_BIG_LEVEL", "3")))
 VITALITY_BIG_MODEL = os.getenv("VITALITY_BIG_MODEL", "").strip()
 
 
-def _channel_model(vitalita: dict) -> str:
-    """Modello del canale in base alla vitalità della mesh."""
-    if VITALITY_BIG_MODEL and int(vitalita.get("level", 0)) >= VITALITY_BIG_LEVEL:
-        return VITALITY_BIG_MODEL
-    return _canali.CHANNEL_MODEL or DEFAULT_MODEL
-
 
 def _channel_context_messages() -> int:
     """Quanti messaggi entrano nel contesto: letto a CHIAMATA, non all'import.
@@ -779,70 +762,9 @@ def _reload_channel_config() -> None:
 # riga per richiesta sarebbe flood, zero righe rendono impossibile rispondere a
 # "perché tace?" — che è la prima domanda quando sembra sorda. Una per minuto, per
 # (canale, motivo), tiene le due cose insieme.
-_PACING_LOG_AT: dict = {}
-PACING_LOG_EVERY_S = 60.0
 
 
-def _log_pacing_reason(channel: str, decisione: dict) -> bool:
-    """Scrive il motivo di un silenzio, al massimo una volta al minuto.
 
-    Il motivo sta nel **messaggio**, non solo nel campo detail: `hs.py logs` mostra
-    il messaggio, e "risposta non inviata (wait)" senza il perché lascerebbe la
-    domanda dov'era. Il detail resta per la ricerca.
-    """
-    chiave = f"{channel}:{decisione.get('action', '')}"
-    adesso = time.time()
-    if adesso - _PACING_LOG_AT.get(chiave, 0.0) < PACING_LOG_EVERY_S:
-        return False
-    _PACING_LOG_AT[chiave] = adesso
-    motivo = str(decisione.get("reason", "")).strip()
-    testo = f"{channel}: risposta non inviata ({decisione.get('action')})"
-    if motivo:
-        testo = f"{testo} — {motivo[:120]}"
-    push_log('channel', testo, detail=motivo[:200],
-             source=f"channel:{channel}", status='info')
-    return True
-
-
-def _channel_remember(channel: str, key: str, kind: str, text: str, *,
-                      surface: str = "", **extra) -> bool:
-    """Scrive UN fatto della stanza nella memoria condivisa, con debounce.
-
-    In memoria NON va ogni messaggio: ci vanno le cose che ha senso ricordare
-    domani — un'ondata di spam, un'azione di moderazione, un tip. Il debounce
-    per chiave evita che lo stesso fatto venga riscritto in loop mentre la
-    condizione resta vera (un'ondata dura dieci minuti: una riga, non cento).
-    """
-    if not channel_guard.should_remember(key=f"{channel}:{key}"):
-        return False
-    entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-             "type": "channel", "channel": channel, "kind": kind,
-             "content": f"[{channel}] {text}", "source": f"channel:{channel}",
-             "surface": f"channel:{channel}" + (f":{surface}" if surface else "")}
-    entry.update(extra)
-    try:
-        _memory_append(entry)
-    except Exception as e:
-        push_log('channel', 'Memoria non aggiornata', str(e)[:120],
-                 source=f"channel:{channel}", status='warn')
-        return False
-    return True
-
-
-def _channel_memories(channel: str, limit: int = 5) -> list:
-    """Ultimi ricordi di questo canale (i più recenti in coda).
-
-    Usa `_load_memory()`, lo stesso percorso di /memory: si filtra solo per
-    canale, senza ricerca full-text, perché il prompt di una battuta non deve
-    dipendere dalla disponibilità di un backend di ricerca.
-    """
-    try:
-        voci = [e for e in _load_memory()
-                if isinstance(e, dict) and str(e.get("channel", "")) == channel]
-    except Exception:
-        return []
-    return [str(e.get("content", ""))[:160] for e in voci[-max(0, int(limit)):]
-            if e.get("content")]
 
 
 # Tetto sugli eventi per chiamata: un batch enorme è un abuso, non un caso d'uso.
@@ -866,367 +788,11 @@ def _nome_persona() -> str:
     return str(getattr(getattr(persona_store, "persona", None), "name", "")).strip()
 
 
-def _channel_immagine(context, *, channel: str, destinazione: str = "",
-                      surface: str = "") -> str | None:
-    """Un'immagine chiesta dalla stanza: `!immagine <idea>` oppure **a parole**.
-
-    Comandi espliciti e richieste naturali condividono la stessa guardia:
-
-    - `!immagine` è sintassi esplicita: chi sbaglia il comando se ne accorge. Con
-      `CHANNEL_OPERATOR` o `CHANNEL_CERCHIA` configurate filtra chi chiede; senza
-      quelle variabili resta aperto a chiunque sia in chat (scelta dichiarata in
-      docs/comfyui.md).
-    - la richiesta **a parole** usa regex e modello per conservare soggetto e
-      stile, con identità e cronologia recente. Con una delle due liste impostata
-      si accettano solo gli autori configurati; altrimenti resta aperta.
-
-    La risposta non promette mai un'immagine già mandata: dice che è in coda e che
-    arriva. L'immagine la consegna il driver, e solo dopo è vera.
-
-    Da qui passa anche il **livello esplicito** (2026-10-01): una richiesta di nudità
-    o di esplicito, se l'autore è il creatore (`CHANNEL_OPERATOR`) o uno delle muse
-    che lui dichiara (`CHANNEL_CERCHIA`) e il documento dichiara
-    `consenti_erotismo_esplicito_creatore`, non viene neutralizzata dal negativo. Il
-    quadro (`adult`, `virtual`) che `shared/showcase.py` pretende per accendere il
-    livello lo **scrive il sistema** (`vetrina_con_quadro_erotismo`) e lo dice nella
-    risposta: chi ha il livello non deve conoscere due parole d'ordine. Per chiunque
-    altro nulla cambia; i minori non passano per nessuno.
-    """
-    ultimo = str((context[-1] if context else {}).get("text", "")).strip()
-    autore = str((context[-1] if context else {}).get("author", "")).strip().lower()
-    pezzi = ultimo.split(" ", 1)
-    comando = pezzi[0].lower().rstrip(":") if pezzi else ""
-    regola = ""
-    aggiunte = []            # le parole del quadro che il sistema ha scritto da sé
-    # Chi chiede: l'operatore e le muse che lui dichiara. Basta una delle due liste
-    # configurata per filtrare (era il mestiere di `CHANNEL_OPERATOR` da sola); con
-    # entrambe vuote la richiesta resta aperta a chi e' in chat (scelta dichiarata in
-    # docs/comfyui.md).
-    chiedenti = CHANNEL_OPERATOR | CHANNEL_VIP | CHANNEL_CERCHIA
-    if f"!{comando.lstrip('!')}" in COMANDI_IMMAGINE:
-        if chiedenti and autore not in chiedenti:
-            return ("Le immagini le chiede chi mi ha costruita: non posso mettere in coda "
-                    "una richiesta di chiunque, la scheda è una sola.")
-        idea = pezzi[1].strip() if len(pezzi) > 1 else ""
-    else:
-        if chiedenti and autore not in chiedenti:
-            return None          # fuori dalla banda intima: silenzio, parla la stanza
-        # Richiesta a parole ("fammi un disegno di X"): senza nessuna delle due liste
-        # resta aperta come il comando esplicito. Una frase non riconosciuta
-        # torna None: parla la stanza.
-        # Se la regola deterministica ha gia' capito la richiesta, il testo resta
-        # quello scritto dalla persona. Il riscrittore LLM aveva trasformato una
-        # richiesta esplicita del creatore in "artistic and non-explicit style":
-        # il negativo era aperto correttamente, ma il positivo la censurava di nuovo.
-        richiesta = richiesta_immagine(ultimo)
-        if richiesta is None:
-            richiesta = richiesta_immagine_smart(
-                ultimo, contesto=context[:-1], identita=persona_store.system_block())
-        if richiesta is None:
-            return None
-        idea = richiesta["idea"]
-        regola = richiesta["regola"]
-    if not idea:
-        return "Dimmi cosa disegnare, così: `!immagine una torre al tramonto`."
-    # I comandi espliciti restano prompt diretti. Le richieste naturali di
-    # disegno ricevono lo stile del diario, salvo una tecnica già specificata.
-    if regola:
-        idea = prepara_prompt_canale(idea, ultimo)
-    # Un canale può chiedere sia un soggetto qualsiasi sia un'immagine di Anna.
-    # Il primo resta uno sketch leggero; il secondo è una rappresentazione di sé e
-    # deve passare dalla sua vetrina, altrimenti Telegram la disegnerebbe con il
-    # checkpoint generico e perderebbe il volto canonico.
-    nome_persona = _nome_persona()
-    testo_richiesta = f"{idea} {ultimo}".lower()
-    richiesta_di_anna = richiesta_di_se(idea, ultimo, nome_persona)
-    # Il livello esplicito è di chi l'ha costruita **e delle muse che lui dichiara**:
-    # la variabile deve essere configurata perché il livello si accenda. Con le due liste
-    # vuote "aperto a chiunque" vale per le immagini normali, non per questa — un permesso
-    # si dà a qualcuno, e senza qualcuno non c'è a chi darlo.
-    livello_creatore = bool(autore) and autore in CHANNEL_OPERATOR
-    livello_musa = bool(autore) and autore in CHANNEL_CERCHIA
-    livello_vip = bool(autore) and autore in CHANNEL_VIP
-    livello_esplicito = livello_creatore or livello_musa
-    livello_privato = livello_esplicito or livello_vip
-    # In privato col creatore il soggetto puo' restare sottinteso: "nuda, figura
-    # intera" e' una continuazione naturale di "mandami una foto", non la richiesta
-    # di una donna anonima. Prima cadeva nello sketch generico: niente riferimento
-    # di Anna e, peggio, `negativo_sketch()` conteneva nude/nsfw/erotic. Manteniamo
-    # stretta l'ellissi: vale solo in PM, per il livello privato e per descrizioni
-    # del corpo/inquadratura senza un altro soggetto dichiarato.
-    descrizione_di_se_implicita = bool(re.search(
-        r"\b(?:nud\w*|naked|senza vestiti|lingerie|intimo|sexy|glamour|figura intera|full[- ]body|"
-        r"mezzo busto|primo piano|close[- ]up)\b", testo_richiesta, re.IGNORECASE))
-    altro_soggetto = bool(re.search(
-        r"^\s*(?:di\s+)?(?:un|uno|una|il|lo|la|i|gli|le|del|dello|della)\s+"
-        r"(?!te\b|anna\b)", str(idea), re.IGNORECASE))
-    if (not richiesta_di_anna and str(surface).lower() == "pm" and livello_privato
-            and descrizione_di_se_implicita and not altro_soggetto):
-        richiesta_di_anna = True
-    # I minori non passano da nessuna porta, nemmeno da questa: `!immagine` è il punto
-    # in cui una frase di una stanza diventa un prompt per il diffusion, e una richiesta
-    # che chiede un soggetto minorenne non si accoda e non si "riduce". Vale per
-    # chiunque, creatore compreso, ed è l'unico controllo che parla prima di sapere di
-    # che immagine si tratta.
-    if conflitti(testo_richiesta, VIETATI_MINORI):
-        return "Questa no: non disegno soggetti minorenni, mai e per nessuno."
-    richiesta_nuda_o_esplicita = bool(re.search(
-        r"\b(?:nud\w*|naked|senza vestiti|topless|masturb\w*|sesso|sex|esplicit\w*)\b",
-        testo_richiesta, re.IGNORECASE))
-    if livello_vip and richiesta_nuda_o_esplicita:
-        return ("Per la cerchia VIP posso fare foto glamour e lingerie sexy, non nudo "
-                "o erotismo esplicito. Quel livello è riservato alle MUSA.")
-    try:
-        if richiesta_di_anna:
-            sezioni = getattr(persona_store, "sezioni", {}) or {}
-            vetrina = vetrina_dal_documento({"vetrina": sezioni.get("vetrina", {})})
-            # La richiesta **è** la scena di questa generazione: il livello si legge lì,
-            # mentre per chiunque altro la vetrina resta quella dichiarata e il negativo
-            # non cambia di una virgola (una scena di estraneo non deve poter accendere
-            # il livello artistico del documento).
-            variante = {**vetrina, "scena": idea} if livello_privato else vetrina
-            scena_prompt = traduci_scena_immagine(idea)
-            richiesta_nudo = False
-            if livello_vip and re.search(r"\b(?:lingerie|intimo|sexy|glamour)\b",
-                                         testo_richiesta, re.IGNORECASE):
-                scena_prompt = (
-                    "(solo:1.3), single woman, glamorous lingerie editorial, "
-                    "elegant sensual pose, fully clothed intimate apparel. " + scena_prompt)
-            if livello_esplicito:
-                # Il quadro lo scrive il sistema, non chi chiede: `adult` e `virtual`
-                # sono cose che il documento sa già (il livello è dichiarato, il corpo è
-                # dichiaratamente virtuale), e chiederle era attrito travestito da
-                # controllo — il 2026-10-01 il creatore si è visto rifiutare la sua
-                # richiesta per una parola che il sistema conosceva già. Le parole
-                # aggiunte tornano indietro e si dicono.
-                variante, aggiunte = vetrina_con_quadro_erotismo(variante)
-                scena_prompt = traduci_scena_immagine(variante["scena"])
-                # SD 1.5 privilegia l'inizio della finestra CLIP. La vecchia ricetta
-                # metteva prima ~60 token di stile e lasciava "nuda figura intera"
-                # in fondo: il modello vedeva il volto/riferimento ma non la scena.
-                # Le intenzioni visive note vengono duplicate in tag inglesi brevi
-                # e portate davanti, senza affidarle a un riscrittore LLM.
-                priorita_visive = []
-                if re.search(r"\b(?:nud\w*|naked|senza vestiti)\b",
-                             testo_richiesta, re.IGNORECASE):
-                    richiesta_nudo = True
-                    priorita_visive.append(
-                        "(solo:1.3), single woman, one person, "
-                        "(adult virtual nude:1.4), (fully naked:1.35), no clothing")
-                    scena_prompt = re.sub(r"\badult\s+virtual\b\s*,?", "",
-                                          scena_prompt, flags=re.IGNORECASE).strip()
-                if re.search(r"\b(?:figura intera|full[- ]body|head to toe)\b",
-                             testo_richiesta, re.IGNORECASE):
-                    priorita_visive.append(
-                        "(full body:1.3), head to toe, entire figure visible, centered")
-                if priorita_visive:
-                    scena_prompt = ", ".join(priorita_visive) + ". " + scena_prompt
-                # La richiesta passa anche dalla verifica, come un ritratto da riga di
-                # comando: se il documento non dichiara il livello, o se resta qualcosa
-                # d'altro che non va (i minori, la figura senza marcatori), si dice —
-                # accodare e basta darebbe un'immagine che il negativo rende castigata
-                # senza che nessuno sappia perché.
-                problemi = verifica_vetrina(variante,
-                                            {"vetrina": sezioni.get("vetrina", {})},
-                                            creatore=True)
-                if problemi:
-                    return "Questa non te la disegno: " + "; ".join(problemi) + "."
-            # Il seed dichiarato e' l'ancora del volto, ma con IP-Adapter attivo non
-            # deve diventare l'identificatore immutabile di ogni foto privata. Prompt
-            # e seed identici producevano davvero lo stesso JPEG a ogni richiesta.
-            # Per il livello privato varia il rumore iniziale; il riferimento continua
-            # a tenere il volto. Per il pubblico resta il seed canonico della vetrina.
-            seed_ritratto = ((uuid.uuid4().int & ((1 << 63) - 1))
-                              if livello_privato else vetrina["seed"])
-            negativo = negativo_ritratto(variante, creatore=livello_esplicito)
-            if richiesta_nudo:
-                # Il riferimento canonico mostra una salopette: IP-Adapter può copiarla
-                # anche quando il testo chiede il contrario. Per questa sola scena
-                # abbassiamo il peso del riferimento (che deve conservare il volto, non
-                # l'abito) e rendiamo esplicito al sampler il conflitto da evitare.
-                negativo = (
-                    "multiple people, two women, twins, duplicate person, split screen, "
-                    "diptych, clothes, clothing, dress, shirt, bra, lingerie, underwear, "
-                    + negativo)
-            accodato = image_queue.accoda(nuovo_job(
-                prompt_ritratto(vetrina, scena=scena_prompt,
-                                scena_prima=livello_privato),
-                negativo=negativo,
-                larghezza=vetrina["larghezza"], altezza=vetrina["altezza"],
-                passi=vetrina["passi"], fix=vetrina["fix"], seed=seed_ritratto,
-                richiedente=autore, canale=channel, famiglia=vetrina["famiglia"],
-                modello=vetrina["modello"], destinazione=destinazione,
-                reference_image=vetrina["riferimento"],
-                reference_strength=(min(vetrina["riferimento_forza"], 0.6)
-                                    if richiesta_nudo else vetrina["riferimento_forza"])))
-        else:
-            # RealVisXL sul Mac: la famiglia conserva il nome storico sdxl-turbo.
-            accodato = image_queue.accoda(nuovo_job(
-                idea,
-                negativo=negativo_sketch(),
-                larghezza=SKETCH_LATO, altezza=SKETCH_LATO, passi=SKETCH_PASSI,
-                richiedente=autore, canale=channel,
-                famiglia=FAMIGLIA_SDXL,
-                destinazione=destinazione))
-    except ValueError:
-        return "Un'immagine senza descrizione non esiste: scrivi cosa disegnare."
-    except RuntimeError as e:
-        return f"Non posso adesso: {e}."
-    push_log('channel', f"{channel}: richiesta immagine",
-             detail=f"id={accodato['id']} da={autore or '?'} "
-                    f"via={regola or 'comando'} famiglia={accodato['famiglia']} "
-                    + (f"quadro={','.join(aggiunte)} " if aggiunte else "")
-                    + f"modello={accodato['modello_effettivo']} prompt={accodato['prompt']}",
-             source=f"channel:{channel}", status='info')
-    # Le parole del quadro scritte dal sistema si dicono: una cosa fatta al posto tuo e
-    # taciuta è la cosa che questo livello esiste per togliere.
-    nota = (" Il quadro (`" + "`, `".join(aggiunte) + "`) l'ho scritto io: senza, il "
-            "modello disegnerebbe un'altra cosa." if aggiunte else "")
-    if not destinazione:
-        return ("L'ho messa in coda, ma non so dove mandartela: chiedila dalla chat "
-                "(nel canale il driver manda l'id della conversazione)." + nota)
-    return "Ok! Mi metto subito al lavoro: appena è pronta te la mando qui." + nota
-
-
-def _trascrizione(context) -> str:
-    """Trascrizione compatta: ultimi N messaggi, ognuno troncato.
-
-    N e lunghezza si leggono a chiamata (`CHANNEL_CONTEXT_MESSAGES` /
-    `CHANNEL_CONTEXT_CHARS`): sono le due manopole che si toccano quando il bot
-    "non ricorda" cosa si è detto due battute fa.
-    """
-    righe = []
-    nome_bot = (persona_store.persona.name or "").strip().lower()
-    for evento in list(context)[-_channel_context_messages():]:
-        autore = str(evento.get("author", "")).strip()[:40] or "anonimo"
-        testo = " ".join(str(evento.get("text", "")).split())[:_channel_context_chars()]
-        if not testo:
-            continue
-        if CHANNEL_OPERATOR and autore.lower() in CHANNEL_OPERATOR:
-            etichetta = "(io)"
-        elif nome_bot and autore.lower() == nome_bot:
-            etichetta = f"({nome_bot})"
-        else:
-            etichetta = f"({autore})"
-        righe.append(f"{etichetta} {testo}")
-    return "\n".join(righe)
 
 
 PRESENTAZIONE_COMMANDS = ("!presentati", "!intro")
 
 
-def _channel_presentazione(context) -> str | None:
-    """Auto-presentazione richiesta con `!presentati`/`!intro` nell'ultimo messaggio.
-
-    Generata dalla persona (non dal modello): sempre fattuale e disclosure-safe.
-    """
-    ultimo = str((context[-1] if context else {}).get("text", "")).strip()
-    testo = " ".join(ultimo.split()).lower()
-    if any(testo == c or testo.startswith(c + " ") for c in PRESENTAZIONE_COMMANDS):
-        return build_introduction(persona_store.persona)
-    return None
-
-
-def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
-                   force: bool) -> dict:
-    """Genera la risposta del canale: identità dichiarata e audit attivi.
-
-    Differenze volute rispetto alla chat normale:
-      - `think=False` ESPLICITO: in una stanza non si aspetta, ed è esattamente
-        il caso che il percorso nativo del nodo ora rispetta;
-      - nessun tool: qui si conversa, non si esegue codice né si cerca sul web;
-      - l'audit di disclosure si applica PRIMA di restituire il testo, e una
-        battuta che rivendica di essere umano non esce da qui (fail-closed).
-
-    Il modello è quello di default, salvo `CHANNEL_MODEL`: una stanza può volere
-    un modello piccolo e veloce invece di quello buono per il lavoro.
-    """
-    ultimo = str((context[-1] if context else {}).get("text", ""))
-    decisione = should_disclose(ultimo)
-    vitalita = mesh_vitality(_node_list())
-    blocco = [
-        persona_store.system_block(ultimo, surface=surface, channel=channel),
-        f"Massimo {max(0, int(max_chars))} caratteri.",
-        ("Rispondi nella lingua dell'ultimo messaggio rivolto a te. "
-         "Se è inglese, rispondi in inglese; se è italiano, in italiano. "
-         "Mantieni nomi propri e username invariati. Usa l'italiano come "
-         "ripiego soltanto se la lingua non è riconoscibile."),
-        vitality_context(vitalita),
-    ]
-    # La vicinanza dichiarata vale anche qui (2026-10-01): l'operatore e le muse che
-    # lui dichiara non sono "la stanza", e **in privato** ricevono la voce che il
-    # documento riserva a loro — le stesse note del percorso Instagram
-    # (`compagna_context`, `musa_context`) — invece del registro pubblico, che è la
-    # censura che l'apertura esiste per togliere. In una stanza con altri no: lì la
-    # vicinanza è un fatto privato e il registro resta quello dichiarato per il pubblico.
-    if surface == "pm":
-        ultimo_autore = str((context[-1] if context else {}).get("author", "")).strip().lower()
-        if ultimo_autore in CHANNEL_CERCHIA:
-            blocco.append(musa_context())
-        elif ultimo_autore in CHANNEL_OPERATOR:
-            blocco.append(compagna_context())
-    if str(persona_store.persona.name or "").strip().lower() == "anna":
-        nota_sorella = _sister_note()
-        if nota_sorella:
-            blocco.append(nota_sorella)
-    contributori = mesh_contributors(_node_list())
-    presenti = sorted({str(e.get("author", "")).strip()
-                       for e in context
-                       if str(e.get("author", "")).strip().lower()
-                       in {c.lower() for c in contributori}})
-    if presenti:
-        blocco.append("Nella conversazione c'è chi ti dà energia "
-                      "(contribuisce alla mesh con un web node WebGPU): "
-                      + ", ".join(presenti)
-                      + ". Riconoscilo e dagli un'attenzione in più.")
-    # Memoria della stanza: senza questo, ogni sera riparte da zero e ripete le
-    # stesse battute. Poche righe, le più recenti: è un promemoria, non un
-    # archivio da leggere.
-    ricordi = _channel_memories(channel)
-    if ricordi:
-        blocco.append("Cose che ricordi di questa stanza (dalla tua memoria):\n"
-                      + "\n".join(f"- {riga}" for riga in ricordi))
-    nota_tip = channel_guard.nota_tip(channel=channel)
-    if nota_tip:
-        blocco.append(nota_tip)
-    messaggi = [
-        {"role": "system", "content": "\n\n".join(blocco)},
-        {"role": "user", "content": f"Ultimi messaggi:\n{_trascrizione(context)}\n\n"
-                                    "Rispondi con una battuta, nel tuo tono."},
-    ]
-    payload = {"model": _channel_model(vitalita), "messages": messaggi,
-               "stream": False, "think": False, "max_tokens": CHANNEL_MAX_TOKENS,
-               "options": {"num_ctx": _channel_num_ctx()}}
-    base = advanced_config["ollama"]["url"].rstrip("/")
-    try:
-        if ollama_native.needs_native_path(payload):
-            # Il percorso OpenAI-compatibile IGNORA think=false: misurato, con
-            # questo modello la risposta torna con `content` VUOTO e tutto il
-            # ragionamento in `reasoning` (che _assistant_text ripiega nel
-            # content pur di non mostrare il vuoto). Per una battuta in chat
-            # sarebbe testo sbagliato, quindi si parla nativo — la stessa
-            # traduzione che usa il nodo.
-            risposta = _local_model_post(f"{base}/api/chat",
-                                     json=ollama_native.to_native_chat(payload),
-                                     timeout=_inference_timeout(payload["model"]))
-            risposta.raise_for_status()
-            risposta = ollama_native.to_openai_chat(risposta.json(), payload["model"])
-        else:
-            risposta = _call_ollama(base, payload, sign=False)
-    except Exception as e:
-        return {"action": "error", "reason": f"modello non raggiungibile: {str(e)[:120]}"}
-    messaggio = ((risposta.get("choices") or [{}])[0] or {}).get("message") or {}
-    testo = " ".join(_assistant_text(messaggio).split())
-    if not testo:
-        return {"action": "error", "reason": "risposta vuota dal modello"}
-    if max_chars and len(testo) > int(max_chars):
-        testo = testo[:int(max_chars)].rstrip()
-    offese = audit_reply(testo)
-    if offese:
-        return {"action": "skip", "reason": f"audit: {', '.join(offese)[:80]}",
-                "disclosure": decisione.to_dict()}
-    return {"action": "reply", "text": testo, "disclosure": decisione.to_dict(),
-            "model": payload["model"], "forced": bool(force)}
 
 
 code_sandbox = HybridCodeSandboxClient()
@@ -2183,7 +1749,7 @@ from cp.memoria import (_ts_to_iso, _notify_bridge, _load_memory, _save_memory, 
 # chiamate dei loop. `NodeBusyError` sta li' perche' e' un segnale del protocollo
 # fra CP e nodi, e chi lo cattura lo importa da qui.
 from cp import inferenza as _inferenza
-from cp.inferenza import (NodeBusyError, _call_ollama, _call_ollama_one, _local_model_post, _audit_persona_reply)
+from cp.inferenza import (NodeBusyError, _call_ollama, _local_model_post, _audit_persona_reply)
 from cp.immagini import monta as monta_immagini
 from cp.instagram import avvia as _instagram_avvia
 
@@ -2776,127 +2342,6 @@ def _record_conversation(channel: str, surface: str, chat: str, context: list,
     _conversation_log.save(CONVERSATION_FILE)
 
 
-@app.route('/channel/vision', methods=['POST'])
-def channel_vision():
-    """One user-supplied image in, one text description out; no image retained."""
-    errore = _channel_error()
-    if errore:
-        return errore
-    data = request.get_json(silent=True) or {}
-    encoded = str(data.get("image_base64") or "")
-    if not encoded or len(encoded) > 6 * 1024 * 1024:
-        return jsonify({"ok": False, "error": "foto assente o troppo grande"}), 413
-    try:
-        from PIL import Image, ImageOps, UnidentifiedImageError
-        raw = base64.b64decode(encoded, validate=True)
-        if len(raw) > 4 * 1024 * 1024:
-            raise ValueError("foto troppo grande")
-        with Image.open(io.BytesIO(raw)) as source:
-            if source.format not in {"JPEG", "PNG", "WEBP"} or source.width * source.height > 20_000_000:
-                raise ValueError("formato o dimensioni foto non supportati")
-            normalized = ImageOps.exif_transpose(source).convert("RGB")
-            normalized.thumbnail((1024, 1024))
-            output = io.BytesIO()
-            normalized.save(output, "JPEG", quality=85)
-        image = base64.b64encode(output.getvalue()).decode("ascii")
-    except (binascii.Error, ValueError, UnidentifiedImageError,
-            Image.DecompressionBombError, OSError) as error:
-        return jsonify({"ok": False, "error": f"foto non valida: {str(error)[:100]}"}), 400
-    model = os.getenv("VISION_MODEL", "gemma4:e4b").strip()
-    if not model:
-        return jsonify({"ok": False, "error": "modello visivo non configurato"}), 503
-    question = " ".join(str(data.get("question") or "Cosa vedi in questa foto?").split())[:500]
-    try:
-        response = _local_model_post(
-            f"{advanced_config['ollama']['url'].rstrip('/')}/api/chat",
-            json={"model": model, "messages": [{"role": "user",
-                  "content": ("Rispondi in italiano in modo breve e concreto alla domanda sulla foto. "
-                              "Descrivi solo ciò che è visibile; se non sei sicuro, dillo. "
-                              "Non dedurre identità, salute o altri dati sensibili. "
-                              f"Domanda: {question}"), "images": [image]}],
-                  "stream": False, "think": False, "keep_alive": 0},
-            timeout=90)
-        response.raise_for_status()
-        answer = str((response.json().get("message") or {}).get("content") or "").strip()[:900]
-        if not answer:
-            raise ValueError("il modello visivo non ha risposto")
-    except (requests.RequestException, RuntimeError, ValueError) as error:
-        push_log("channel", "Analisi foto non riuscita", detail=str(error)[:160], status="warn")
-        return jsonify({"ok": False, "error": "Non riesco ad analizzare la foto adesso; riprova tra poco."}), 503
-    push_log("channel", "Foto Telegram analizzata", detail=f"model={model}", status="success")
-    _record_conversation(_channel_name(), "pm", str(data.get("chat") or ""),
-                         [{"author": "persona", "text": f"[foto] {question}"}],
-                         "reply", text=answer, reason="vision")
-    return jsonify({"ok": True, "text": answer})
-
-
-@app.route('/channel/reply', methods=['POST'])
-def channel_reply():
-    """"Cosa scrivo adesso?": il CP decide il ritmo, genera e verifica.
-
-    Il contesto lo manda il driver (è lui che sa chi ha scritto e da quanto); la
-    politica sul RITMO sta qui e torna con il motivo, così nei log si legge
-    perché il bot è stato zitto invece di doverlo dedurre.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    canale = _channel_name()
-    data = request.get_json(force=True, silent=True) or {}
-    contesto = [e for e in (data.get("context") or []) if isinstance(e, dict)]
-    pendenti = int(data.get("pending") or len(contesto) or 0)
-    eta_piu_vecchio = max(0.0, float(data.get("oldest_age_s") or 0.0))
-    forza = bool(data.get("force"))
-    max_chars = int(data.get("max_chars") or 0) or 90
-    superficie = str(data.get("surface", "chat")).strip().lower() or "chat"
-    chat = str(data.get("chat", "") or "").strip()
-
-    presentazione = _channel_presentazione(contesto)
-    if presentazione is not None:
-        _record_conversation(canale, superficie, chat, contesto, "reply",
-                             text=presentazione, reason="auto-presentazione")
-        return jsonify({"ok": True, "channel": canale, "action": "reply",
-                        "text": presentazione, "command": True,
-                        "disclosure": {"required": True, "rule": "auto-presentazione"}})
-
-    # Chi chiede un'immagine non aspetta il RITMO del bot: è una richiesta
-    # esplicita dell'operatore, non una battuta da dosare. Il job entra in coda e
-    # la risposta parte subito; l'immagine arriva dopo, via outbox.
-    immagine = _channel_immagine(contesto, channel=canale, destinazione=chat,
-                                 surface=superficie)
-    if immagine is not None:
-        _record_conversation(canale, superficie, chat, contesto, "reply",
-                             text=immagine, reason="comando-immagine")
-        return jsonify({"ok": True, "channel": canale, "action": "reply",
-                        "text": immagine, "command": True,
-                        "disclosure": {"required": False, "rule": "comando-immagine"}})
-
-    decisione = channel_pacing.decide(channel=canale, pending=pendenti,
-                                      oldest_age_s=eta_piu_vecchio, force=forza,
-                                      vitality=mesh_vitality(_node_list()))
-    if decisione["action"] != "reply":
-        # Il motivo entra nei log (una volta al minuto, per non fare flood): è la
-        # risposta a "perché tace?", che prima si poteva solo dedurre.
-        _log_pacing_reason(canale, decisione)
-        _record_conversation(canale, superficie, chat, contesto,
-                             decisione["action"], reason=decisione.get("reason", ""))
-        return jsonify({"ok": True, "channel": canale, "action": decisione["action"],
-                        "reason": decisione["reason"]})
-
-    esito = _channel_reply(channel=canale, surface=superficie,
-                           context=contesto, max_chars=max_chars, force=forza)
-    if esito["action"] == "reply":
-        # Il cooldown parte all'INTENTO di inviare, non alla conferma: se il
-        # driver muore dopo la generazione, il CP non deve restare senza freno.
-        channel_pacing.note_reply(canale)
-    push_log('channel', f"{canale}: risposta generata" if esito["action"] == "reply"
-             else f"{canale}: risposta non inviata ({esito['action']})",
-             detail=(esito.get("text", "") or esito.get("reason", ""))[:120],
-             source=f"channel:{canale}",
-             status='success' if esito["action"] == "reply" else 'warn')
-    _record_conversation(canale, superficie, chat, contesto, esito.get("action", ""),
-                         text=esito.get("text", ""), reason=esito.get("reason", ""))
-    return jsonify({"ok": esito["action"] != "error", "channel": canale, **esito})
 
 
 
@@ -3122,10 +2567,6 @@ def _sister_peer():
             return peer
     return None
 
-
-def _sister_note() -> str:
-    """Riga di contesto quando la sorella Aurora non è disponibile."""
-    return sister_note(_sister_peer())
 
 
 def _extract_federated_text(payload) -> str:
@@ -7049,10 +6490,15 @@ monta_immagini(app, image_queue=image_queue, image_memory_gate=image_memory_gate
 # (`channel_reply`, `channel_vision` e i loro helper) restano qui: tirarle fuori
 # avrebbe voluto dire iniettare l'inferenza nel dominio canali, cioe' il dominio
 # chat dentro quello dei canali. Quando si sposta l'inferenza, si spostano anche.
+# Ora e' fatto: `cp/inferenza.py` ha reso iniettabile quella dipendenza, e le due
+# rotte sono entrate insieme a tutti i loro helper.
 monta_canali(app, image_queue=image_queue,
              context_messages=_channel_context_messages,
              context_chars=_channel_context_chars, num_ctx=_channel_num_ctx,
-             channel_remember=_channel_remember, node_list=_node_list)
+             node_list=_node_list,
+             persona_store=persona_store, advanced_config=advanced_config,
+             sister_peer=_sister_peer, record_conversation=_record_conversation,
+             nome_persona=_nome_persona)
 
 
 if __name__ == '__main__':

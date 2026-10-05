@@ -31,6 +31,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # anche a cp/instagram.py: main.py li calcolava alla riga 58, prima ancora
 # dell'inserimento di sys.path, e duplicarli avrebbe dato due posti in cui il
 # fallback di `/app/data` puo' divergere senza che nessuno se ne accorga.
+VITALITY_BIG_LEVEL = max(0, int(os.getenv("VITALITY_BIG_LEVEL", "3")))
+VITALITY_BIG_MODEL = os.getenv("VITALITY_BIG_MODEL", "").strip()
 DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
     BASE_DIR, "..", "data", "diario-immagini")
 DIARIO_FILE         = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(

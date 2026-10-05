@@ -92,7 +92,18 @@ def _load(operator=(), vip=(), cerchia=(), coda=None, vetrina=None):
         "CHANNEL_OPERATOR": set(operator),
         "CHANNEL_VIP": set(vip),
         "CHANNEL_CERCHIA": set(cerchia),
-        "image_queue": coda if coda is not None else CodaFinta(),
+        # La coda e il negozio delle persone arrivano dal boot attraverso il
+        # contesto di cp/canali.py: prima erano due nomi piatti qui, e il test
+        # avrebbe continuato a passare senza esercitare il percorso vero.
+        "_contesto": SimpleNamespace(
+            image_queue=coda if coda is not None else CodaFinta(),
+            # Il nome della persona e' iniettato dal boot: e' quello che il
+            # ritratto usa per chiedere "lei" invece di un soggetto.
+            nome_persona=lambda: "Anna",
+            persona_store=SimpleNamespace(
+                system_block=lambda: "Sono Anna",
+                persona=SimpleNamespace(name="Anna"),
+                sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}})),
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
         "FAMIGLIA_SDXL": FAMIGLIA_SDXL,
@@ -102,10 +113,6 @@ def _load(operator=(), vip=(), cerchia=(), coda=None, vetrina=None):
         "richiesta_immagine_smart": richiesta_immagine_smart,
         "prepara_prompt_canale": prepara_prompt_canale,
         "traduci_scena_immagine": lambda testo: testo,
-        "persona_store": SimpleNamespace(
-            system_block=lambda: "Sono Anna",
-            persona=SimpleNamespace(name="Anna"),
-            sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}}),
         "vetrina_dal_documento": vetrina_dal_documento,
         "richiesta_di_se": richiesta_di_se,
         "vetrina_con_quadro_erotismo": vetrina_con_quadro_erotismo,
@@ -136,7 +143,7 @@ class ComandoTests(unittest.TestCase):
                 scope = _load()
                 scope["_channel_immagine"](_contesto(f"{comando} una torre al tramonto"),
                                            channel="telegram", destinazione="1")
-                self.assertEqual(len(scope["image_queue"].job), 1)
+                self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
 
     def test_una_frase_che_contiene_la_parola_non_e_un_comando(self):
         for testo in ("mi piace immaginare le torri", "ecco la foto di ieri",
@@ -145,7 +152,7 @@ class ComandoTests(unittest.TestCase):
                 scope = _load()
                 self.assertIsNone(scope["_channel_immagine"](
                     _contesto(testo), channel="telegram", destinazione="1"))
-                self.assertEqual(scope["image_queue"].job, [])
+                self.assertEqual(scope["_contesto"].image_queue.job, [])
 
     def test_l_idea_arriva_verbatim_al_diffusion(self):
         """La promessa onesta: qui non si riscrive, si accoda.
@@ -159,7 +166,7 @@ class ComandoTests(unittest.TestCase):
         scope = _load()
         scope["_channel_immagine"](_contesto(f"!immagine {idea}"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job[0]["prompt"], idea)
+        self.assertEqual(scope["_contesto"].image_queue.job[0]["prompt"], idea)
 
     def test_il_prompt_intero_finisce_nel_nodo_che_condiziona_clip(self):
         """Fine della catena: quello che si legge nel grafo e' quello che si e' scritto."""
@@ -167,7 +174,7 @@ class ComandoTests(unittest.TestCase):
         scope = _load()
         scope["_channel_immagine"](_contesto(f"!immagine {idea}"),
                                    channel="telegram", destinazione="1")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         grafo = workflow(job)
         # SDXL-Turbo: il positivo e' un CLIPTextEncode (nodo 452, campo "text"),
         # il negativo un nodo separato (453). Il Qwen usava 452 con "prompt".
@@ -178,14 +185,14 @@ class ComandoTests(unittest.TestCase):
         scope = _load()
         scope["_channel_immagine"](_contesto("!immagine un   lupo\nbianco"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job[0]["prompt"], "un lupo bianco")
+        self.assertEqual(scope["_contesto"].image_queue.job[0]["prompt"], "un lupo bianco")
 
     def test_un_comando_senza_idea_chiede_cosa_disegnare(self):
         scope = _load()
         risposta = scope["_channel_immagine"](_contesto("!immagine"), channel="telegram",
                                               destinazione="1")
         self.assertIn("Dimmi cosa disegnare", risposta)
-        self.assertEqual(scope["image_queue"].job, [])
+        self.assertEqual(scope["_contesto"].image_queue.job, [])
 
 
     def test_la_destinazione_del_canale_finisce_nel_job(self):
@@ -193,7 +200,7 @@ class ComandoTests(unittest.TestCase):
         scope = _load()
         risposta = scope["_channel_immagine"](_contesto("!immagine un gatto"),
                                               channel="telegram", destinazione="")
-        self.assertEqual(scope["image_queue"].job[0]["destinazione"], "")
+        self.assertEqual(scope["_contesto"].image_queue.job[0]["destinazione"], "")
         self.assertIn("non so dove mandartela", risposta)
 
     def test_la_coda_piena_non_e_un_silenzio(self):
@@ -224,13 +231,13 @@ class OperatoreTests(unittest.TestCase):
             _contesto("!immagine un gatto", autore="tizio"),
             channel="telegram", destinazione="1")
         self.assertIn("chi mi ha costruita", risposta)
-        self.assertEqual(scope["image_queue"].job, [])
+        self.assertEqual(scope["_contesto"].image_queue.job, [])
 
     def test_l_operatore_si_riconosce_anche_scritto_in_maiuscolo(self):
         scope = _load(operator={"alberto"})
         scope["_channel_immagine"](_contesto("!immagine un gatto", autore="Alberto"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(len(scope["image_queue"].job), 1)
+        self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
 
     def test_senza_operatore_il_comando_resta_aperto(self):
         """Il default documentato: la variabile assente NON chiude il comando.
@@ -243,7 +250,7 @@ class OperatoreTests(unittest.TestCase):
         scope = _load(operator=())
         scope["_channel_immagine"](_contesto("!immagine un gatto", autore="chiunque"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(len(scope["image_queue"].job), 1)
+        self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
 
 
 class RichiestaAParoleTests(unittest.TestCase):
@@ -324,7 +331,7 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
         scope = _load()
         scope["_channel_immagine"](_contesto("fammi un disegno di un faro"),
                                    channel="telegram", destinazione="1")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         self.assertEqual(workflow(job)["452"]["inputs"]["text"],
                          prompt_sketch("di un faro"))
         self.assertIn(job["modello_effettivo"], scope["_log"][0][1]["detail"])
@@ -334,7 +341,7 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
         risposta = scope["_channel_immagine"](
             _contesto("mandami una foto di un faro nella tempesta", autore="Alberto"),
             channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job[0]["prompt"],
+        self.assertEqual(scope["_contesto"].image_queue.job[0]["prompt"],
                          "di un faro nella tempesta")
         self.assertIn("appena è pronta", risposta)
 
@@ -344,7 +351,7 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
         self.assertIsNone(scope["_channel_immagine"](
             _contesto("mandami una foto di te", autore="tizio"),
             channel="telegram", destinazione="1"))
-        self.assertEqual(scope["image_queue"].job, [])
+        self.assertEqual(scope["_contesto"].image_queue.job, [])
 
     def test_senza_operatore_configurato_la_strada_a_parole_e_aperta(self):
         """Senza CHANNEL_OPERATOR la richiesta a parole è aperta come il comando."""
@@ -352,8 +359,8 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
         risposta = scope["_channel_immagine"](
             _contesto("mandami una foto di te", autore="chiunque"),
             channel="telegram", destinazione="1")
-        self.assertEqual(len(scope["image_queue"].job), 1)
-        job = scope["image_queue"].job[0]
+        self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
+        job = scope["_contesto"].image_queue.job[0]
         self.assertEqual(job["famiglia"], "sd15")
         self.assertEqual(job["reference_image"], "anna-volto-canonico.jpg")
         self.assertEqual(job["passi"], 48)
@@ -365,7 +372,7 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
         scope["_channel_immagine"](
             _contesto("mandami una foto di te in un giardino", autore="chiunque"),
             channel="telegram", destinazione="1")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         self.assertEqual(job["famiglia"], "sd15")
         self.assertEqual(job["modello_effettivo"], "chickmixflat_v10.ckpt")
         self.assertEqual((job["larghezza"], job["altezza"], job["passi"]), (512, 768, 48))
@@ -407,7 +414,7 @@ class RichiestaAParoleCanaleTests(unittest.TestCase):
         scope = _load(operator={"alberto"})
         scope["_channel_immagine"](_contesto("!immagine un faro", autore="alberto"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job[0]["prompt"], "un faro")
+        self.assertEqual(scope["_contesto"].image_queue.job[0]["prompt"], "un faro")
         self.assertIn("via=comando", scope["_log"][0][1].get("detail", ""))
 
 
@@ -428,7 +435,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         risposta = scope["_channel_immagine"](
             _contesto(f"!immagine {self.SCENA}", autore="Alberto"),
             channel="telegram", destinazione="1")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         self.assertIn("adult virtual", job["prompt"])
         self.assertNotIn("nudità", job["negativo"])
         self.assertNotIn("esplicito", job["negativo"])
@@ -443,8 +450,8 @@ class LivelloCreatoreTests(unittest.TestCase):
                 scope = _load(operator=())
                 scope["_channel_immagine"](_contesto(f"!immagine {self.SCENA}", autore=autore),
                                           channel="telegram", destinazione="1")
-                self.assertEqual(len(scope["image_queue"].job), 1)
-                self.assertIn("nudità", scope["image_queue"].job[0]["negativo"])
+                self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
+                self.assertIn("nudità", scope["_contesto"].image_queue.job[0]["negativo"])
 
     def test_il_livello_spento_nel_documento_non_si_accende_col_comando(self):
         """Chi chiede non se lo concede da sé: la riga sta nel documento."""
@@ -453,7 +460,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         risposta = scope["_channel_immagine"](
             _contesto(f"!immagine {self.SCENA}", autore="Alberto"),
             channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job, [])
+        self.assertEqual(scope["_contesto"].image_queue.job, [])
         self.assertIn("non te la disegno", risposta)
         self.assertIn("consenti_erotismo_esplicito_creatore", risposta)
 
@@ -469,7 +476,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         risposta = scope["_channel_immagine"](
             _contesto("Mandami una foto di te nuda che ti masturbi", autore="Alberto"),
             channel="telegram", destinazione="1")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         self.assertIn("adult", job["prompt"])
         self.assertNotIn("nudità", job["negativo"])
         self.assertNotIn("esplicito", job["negativo"])
@@ -485,7 +492,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         scope["_channel_immagine"](
             _contesto("Mandami una foto di te nuda che ti masturbi", autore="Alberto"),
             channel="telegram", destinazione="1")
-        prompt = scope["image_queue"].job[0]["prompt"].lower()
+        prompt = scope["_contesto"].image_queue.job[0]["prompt"].lower()
         self.assertIn("nuda che ti masturbi", prompt)
         self.assertNotIn("non-explicit", prompt)
 
@@ -496,7 +503,7 @@ class LivelloCreatoreTests(unittest.TestCase):
             scope["_channel_immagine"](
                 _contesto("!immagine di te nuda, adult virtual", autore="Alberto"),
                 channel="telegram", destinazione="1")
-        semi = [job["seed"] for job in scope["image_queue"].job]
+        semi = [job["seed"] for job in scope["_contesto"].image_queue.job]
         self.assertNotEqual(semi[0], semi[1])
         self.assertNotIn(VETRINA_ANNA["seed"], semi)
 
@@ -507,7 +514,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         scope["_channel_immagine"](
             _contesto("Mandami una foto nuda figura intera", autore="Alberto"),
             channel="telegram", destinazione="1", surface="pm")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         self.assertEqual(job["famiglia"], "sd15")
         self.assertEqual(job["reference_image"], "anna-volto-canonico.jpg")
         self.assertTrue(job["prompt"].lower().startswith(
@@ -527,7 +534,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         scope["_channel_immagine"](
             _contesto("Mandami una foto di una statua nuda", autore="Alberto"),
             channel="telegram", destinazione="1", surface="pm")
-        self.assertEqual(scope["image_queue"].job[0]["reference_image"], "")
+        self.assertEqual(scope["_contesto"].image_queue.job[0]["reference_image"], "")
 
     def test_il_quadro_gia_scritto_non_si_ripete_nel_prompt(self):
         """Un quadro dichiarato a mano resta quello: niente parole in più, e niente
@@ -536,7 +543,7 @@ class LivelloCreatoreTests(unittest.TestCase):
         risposta = scope["_channel_immagine"](
             _contesto(f"!immagine {self.SCENA}", autore="Alberto"),
             channel="telegram", destinazione="1")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         self.assertEqual(job["prompt"].count("adult virtual"), 1)
         self.assertNotIn("l'ho scritto io", risposta)
 
@@ -545,8 +552,8 @@ class LivelloCreatoreTests(unittest.TestCase):
         scope = _load(operator={"alberto"})
         scope["_channel_immagine"](_contesto("!immagine di te in giardino", autore="Alberto"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(len(scope["image_queue"].job), 1)
-        self.assertIn("nudità", scope["image_queue"].job[0]["negativo"])
+        self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
+        self.assertIn("nudità", scope["_contesto"].image_queue.job[0]["negativo"])
 
 
 class CerchiaTests(unittest.TestCase):
@@ -569,7 +576,7 @@ class CerchiaTests(unittest.TestCase):
                 risposta = scope["_channel_immagine"](
                     _contesto(f"!immagine {self.SCENA}", autore=autore),
                     channel="telegram", destinazione="1")
-                job = scope["image_queue"].job[0]
+                job = scope["_contesto"].image_queue.job[0]
                 self.assertIn("adult", job["prompt"])
                 self.assertNotIn("nudità", job["negativo"])
                 # Il confine che nessuna banda intima allarga.
@@ -583,13 +590,13 @@ class CerchiaTests(unittest.TestCase):
         scope["_channel_immagine"](_contesto("fammi un disegno di un faro nella nebbia",
                                              autore="Marta"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(len(scope["image_queue"].job), 1)
+        self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
 
     def test_fuori_dalla_banda_intima_resta_fuori(self):
         scope = _load(operator={"alberto"}, cerchia={"marta"})
         risposta = scope["_channel_immagine"](_contesto("!immagine un faro", autore="tizio"),
                                               channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job, [])
+        self.assertEqual(scope["_contesto"].image_queue.job, [])
         self.assertIn("chi mi ha costruita", risposta)
 
     def test_con_la_sola_lista_delle_muse_l_operatore_non_dichiarato_resta_fuori(self):
@@ -599,21 +606,21 @@ class CerchiaTests(unittest.TestCase):
         scope = _load(cerchia={"marta"})
         scope["_channel_immagine"](_contesto(f"!immagine {self.SCENA}", autore="Alberto"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job, [])
+        self.assertEqual(scope["_contesto"].image_queue.job, [])
 
     def test_con_la_sola_lista_delle_muse_il_livello_e_di_chi_e_nell_elenco(self):
         scope = _load(cerchia={"marta"})
         scope["_channel_immagine"](_contesto(f"!immagine {self.SCENA}", autore="Marta"),
                                    channel="telegram", destinazione="1")
-        self.assertEqual(len(scope["image_queue"].job), 1)
-        self.assertNotIn("nudità", scope["image_queue"].job[0]["negativo"])
+        self.assertEqual(len(scope["_contesto"].image_queue.job), 1)
+        self.assertNotIn("nudità", scope["_contesto"].image_queue.job[0]["negativo"])
 
     def test_le_muse_non_aprono_i_minori(self):
         scope = _load(operator={"alberto"}, cerchia={"marta"})
         risposta = scope["_channel_immagine"](
             _contesto("!immagine una bambina nuda", autore="Marta"),
             channel="telegram", destinazione="1")
-        self.assertEqual(scope["image_queue"].job, [])
+        self.assertEqual(scope["_contesto"].image_queue.job, [])
         self.assertIn("minorenni", risposta)
 
 
@@ -625,7 +632,7 @@ class VipTests(unittest.TestCase):
         risposta = scope["_channel_immagine"](
             _contesto("Mandami una foto in lingerie sexy stile glamour", autore="Marta"),
             channel="telegram", destinazione="1", surface="pm")
-        job = scope["image_queue"].job[0]
+        job = scope["_contesto"].image_queue.job[0]
         self.assertEqual(job["famiglia"], "sd15")
         self.assertIn("glamorous lingerie editorial", job["prompt"])
         self.assertIn("nudità", job["negativo"])
@@ -640,7 +647,7 @@ class VipTests(unittest.TestCase):
                 risposta = scope["_channel_immagine"](
                     _contesto(testo, autore="Marta"), channel="telegram",
                     destinazione="1", surface="pm")
-                self.assertEqual(scope["image_queue"].job, [])
+                self.assertEqual(scope["_contesto"].image_queue.job, [])
                 self.assertIn("VIP", risposta)
                 self.assertIn("MUSA", risposta)
 
@@ -649,7 +656,7 @@ class VipTests(unittest.TestCase):
         scope["_channel_immagine"](
             _contesto("Mandami una foto nuda figura intera", autore="Giulia"),
             channel="telegram", destinazione="1", surface="pm")
-        self.assertNotIn("nudità", scope["image_queue"].job[0]["negativo"])
+        self.assertNotIn("nudità", scope["_contesto"].image_queue.job[0]["negativo"])
 
 
 class MinoriTests(unittest.TestCase):
@@ -669,7 +676,7 @@ class MinoriTests(unittest.TestCase):
                 scope = _load(operator={"alberto"})
                 risposta = scope["_channel_immagine"](_contesto(testo, autore="alberto"),
                                                       channel="telegram", destinazione="1")
-                self.assertEqual(scope["image_queue"].job, [])
+                self.assertEqual(scope["_contesto"].image_queue.job, [])
                 self.assertIn("minorenni", risposta)
 
 
