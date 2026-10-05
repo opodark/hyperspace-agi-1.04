@@ -101,6 +101,15 @@ def raccogli() -> dict:
         "web_status": _get("/web/status"),
         "web_register_corpo_vuoto": _post("/web/register", {}),
 
+        # le altre tre rotte del web node. Il long-poll occupa un thread fino a
+        # WEB_NODE_MAX_POLL_S: qui si mette in lista un nodo che non esiste, cosi'
+        # la risposta e' subito un 404 e la richiesta non si trattiene.
+        "web_poll_nodo_inesistente": _post("/web/poll", {"node_id": "inesistente"}),
+        "web_result_corpo_vuoto": _post("/web/result", {}),
+        "web_enqueue_nodo_inesistente": _post("/web/tasks",
+                                              {"node_id": "inesistente",
+                                               "task_type": "sconosciuto"}),
+
         # l'annuncio: e' la via che un nodo si presenta
         "announce_corpo_vuoto": _post("/mesh/announce", {}),
     }

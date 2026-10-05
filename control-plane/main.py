@@ -79,12 +79,6 @@ from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryError
 from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
 from shared import web_search
-from shared.web_node import (
-    WebNodeError,
-    WebNodeRegistry,
-    WebNodeUnknown,
-    WebTaskRejected,
-)
 from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
 from shared.mcp_auth import McpAuthPolicy
 from shared.persona import (PersonaStore, identity_expected, identity_tools_hidden, should_disclose)
@@ -169,14 +163,7 @@ from cp.config import (                        _AUTHORITY_ENABLED,
                         PROMPT_COMPRESSION_MODE,
                         REGISTRY_URL,
                         ROUTING_MAX_CANDIDATES,
-                        SEARXNG_URL,
-                        WEB_NODE_ENABLED,
-                        WEB_NODE_HEARTBEAT_S,
-                        WEB_NODE_MAX_NODES,
-                        WEB_NODE_MAX_PAYLOAD,
-                        WEB_NODE_MAX_POLL_S,
-                        WEB_NODE_MAX_QUEUE,
-                        WEB_NODE_TASK_TTL_S)
+                        SEARXNG_URL)
 
 
 # Nodi appena scelti dal router (node_id -> istante), per il termine
@@ -697,16 +684,6 @@ PRESENTAZIONE_COMMANDS = ("!presentati", "!intro")
 
 
 code_sandbox = HybridCodeSandboxClient()
-# Registry in memoria dei web node e dei task web-safe. Volutamente NON
-# persistito: un web node e' una scheda del browser e non deve mai essere
-# fonte di verita' (vedi shared/web_node.py).
-web_registry = WebNodeRegistry(
-    max_nodes=WEB_NODE_MAX_NODES,
-    max_queue=WEB_NODE_MAX_QUEUE,
-    max_payload_bytes=WEB_NODE_MAX_PAYLOAD,
-    task_ttl_s=WEB_NODE_TASK_TTL_S,
-    max_poll_s=WEB_NODE_MAX_POLL_S,
-)
 _last_foreground_activity = time.time()
 _development_dream = None
 _development_dream_lock = threading.Lock()
@@ -1463,6 +1440,7 @@ from cp.memoria import (_ts_to_iso, _notify_bridge, _load_memory, _save_memory, 
 # fra CP e nodi, e chi lo cattura lo importa da qui.
 from cp import inferenza as _inferenza
 from cp.inferenza import (NodeBusyError, _call_ollama, _local_model_post, _audit_persona_reply)
+from cp.webnode import monta as monta_webnode
 from cp.immagini import monta as monta_immagini
 from cp.instagram import avvia as _instagram_avvia
 
@@ -3391,149 +3369,6 @@ def metrics_summary():
         "sample_size":        len(rows),
     })
 
-# ── WEB NODES — worker nel browser ────────────────────────────────────────────
-# Un web node non ha un endpoint in ingresso: il CP non puo' chiamarlo. Si
-# registra, poi TIRA il lavoro con un long-poll e pubblica il risultato —
-# stessa inversione di direzione del runner sandbox (shared/code_sandbox.py).
-# Solo i task in WEB_SAFE_TASK_TYPES possono essere accodati: nessuna inferenza
-# pesante puo' finire su una scheda del browser. Richiede che le route /web/*
-# girino su un server multi-thread: il long-poll occupa un thread fino a
-# WEB_NODE_MAX_POLL_S secondi (vedi docs/web-node.md).
-def _web_error(error):
-    """Mappa le eccezioni del registry del web node sullo status HTTP corretto."""
-    if isinstance(error, WebNodeUnknown):
-        status = 404
-    elif isinstance(error, WebTaskRejected):
-        status = 409
-    else:
-        status = 400
-    return jsonify({"ok": False, "error": str(error)}), status
-
-def _web_node_id(data) -> str:
-    return str((data or {}).get("node_id", "") or "").strip()
-
-def _web_capable_node(capability: str):
-    """Primo web node (per anzianita' di registrazione) che ha la capability."""
-    matches = [n for n in web_registry.nodes() if capability in n["capabilities"]]
-    matches.sort(key=lambda n: n.get("registered_at", 0))
-    return matches[0]["node_id"] if matches else None
-
-@app.route('/web/register', methods=['POST'])
-def web_register():
-    if not WEB_NODE_ENABLED:
-        return jsonify({"ok": False, "error": "web node disattivati su questo control-plane"}), 503
-    data = request.get_json(force=True, silent=True) or {}
-    node_id = _web_node_id(data)
-    if not node_id:
-        return jsonify({"ok": False, "error": "missing node_id"}), 400
-    try:
-        record = web_registry.register(
-            node_id,
-            capabilities=data.get("capabilities") or [],
-            label=data.get("label", ""),
-            browser=data.get("browser", ""),
-            limits=data.get("limits") or {},
-        )
-    except WebNodeError as error:
-        return _web_error(error)
-    # Il web node compare anche nella lista mesh (is_web_node=True) cosi' la
-    # dashboard lo mostra, ma _best_endpoint lo tiene fuori dal routing: un
-    # browser non e' chiamabile.
-    endpoint = f"browser://{node_id}"
-    info = {**(_nodes_by_id.get(node_id) or {}), **data, "node_id": node_id,
-            "endpoint": endpoint, "status": "active", "is_web_node": True,
-            "type": "web-node",
-            "last_seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    _nodes_by_id[node_id] = info
-    _known_endpoints.add(endpoint)
-    db.upsert_node(info)
-    push_log('mesh_event', f'Web node registered: {node_id[:12]}',
-             f"caps={','.join(record['capabilities']) or '-'} browser={record['browser'][:40]}",
-             source=node_id[:12], status='success')
-    return jsonify({"ok": True, "node": record,
-                    "heartbeat_interval_s": WEB_NODE_HEARTBEAT_S,
-                    "max_poll_s": WEB_NODE_MAX_POLL_S})
-
-@app.route('/web/poll', methods=['POST'])
-def web_poll():
-    if not WEB_NODE_ENABLED:
-        return jsonify({"ok": False, "error": "web node disattivati su questo control-plane"}), 503
-    data = request.get_json(force=True, silent=True) or {}
-    try:
-        timeout_s = int(data.get("timeout_s", WEB_NODE_MAX_POLL_S))
-    except (TypeError, ValueError):
-        timeout_s = WEB_NODE_MAX_POLL_S
-    try:
-        task = web_registry.poll(_web_node_id(data), timeout_s=timeout_s)
-    except WebNodeError as error:
-        return _web_error(error)
-    if task is None:
-        return jsonify({"ok": True, "task": None,
-                        "next_poll_s": max(1, WEB_NODE_HEARTBEAT_S // 2)})
-    push_log('web_task', f"Web task {task['task_id']} -> {task['node_id'][:12]}",
-             f"type={task['type']}", source='control-plane',
-             target=task['node_id'][:12], status='pending')
-    return jsonify({"ok": True, "task": task})
-
-@app.route('/web/result', methods=['POST'])
-def web_result():
-    if not WEB_NODE_ENABLED:
-        return jsonify({"ok": False, "error": "web node disattivati su questo control-plane"}), 503
-    data = request.get_json(force=True, silent=True) or {}
-    node_id = _web_node_id(data)
-    task_id = str(data.get("task_id", "") or "").strip()
-    if not task_id:
-        return jsonify({"ok": False, "error": "missing task_id"}), 400
-    try:
-        duration_ms = int(data["duration_ms"]) if data.get("duration_ms") is not None else None
-    except (TypeError, ValueError):
-        duration_ms = None
-    try:
-        entry = web_registry.complete(node_id, task_id, ok=bool(data.get("ok")),
-                                      result=data.get("result"),
-                                      error=data.get("error", ""),
-                                      duration_ms=duration_ms)
-    except WebNodeError as error:
-        return _web_error(error)
-    push_log('web_task', f"Web task {task_id} {'done' if entry['ok'] else 'failed'}",
-             f"node={node_id[:12]} matched={entry['matched']} err={entry['error'][:80]}",
-             source=node_id[:12], target='control-plane',
-             status='success' if entry['ok'] else 'warn')
-    return jsonify({"ok": True, "result": entry})
-
-@app.route('/web/tasks', methods=['POST'])
-def web_enqueue():
-    """Accoda un task web-safe. Riservato all'operatore (token di rete)."""
-    auth_error = _network_admin_error()
-    if auth_error:
-        return auth_error
-    if not WEB_NODE_ENABLED:
-        return jsonify({"ok": False, "error": "web node disattivati su questo control-plane"}), 503
-    data = request.get_json(force=True, silent=True) or {}
-    task_type = str(data.get("type", "") or "").strip()
-    node_id = _web_node_id(data) or _web_capable_node(task_type)
-    if not node_id:
-        available = sorted({c for n in web_registry.nodes() for c in n["capabilities"]})
-        return jsonify({"ok": False,
-                        "error": f"nessun web node con capability '{task_type}'",
-                        "available_capabilities": available}), 409
-    try:
-        task = web_registry.enqueue(node_id, task_type, data.get("payload") or {},
-                                    constraints=data.get("constraints") or {})
-    except WebNodeError as error:
-        return _web_error(error)
-    push_log('web_task', f"Web task enqueued {task['task_id']}",
-             f"type={task_type} node={node_id[:12]}",
-             source='control-plane', target=node_id[:12], status='pending')
-    return jsonify({"ok": True, "task": task}), 202
-
-@app.route('/web/status')
-def web_status():
-    """Istantanea per la dashboard: nodi browser, coda e ultimi esiti."""
-    return jsonify({"enabled": WEB_NODE_ENABLED,
-                    "heartbeat_interval_s": WEB_NODE_HEARTBEAT_S,
-                    **web_registry.status(),
-                    "recent_results": web_registry.results(limit=10)})
 
 # ── MESH ──────────────────────────────────────────────────────────────────────
 @app.route('/mesh/announce', methods=['POST'])
@@ -6062,6 +5897,13 @@ monta_immagini(app, image_queue=image_queue, image_memory_gate=image_memory_gate
 # sono ingegneria del nodo, e le usa anche la telemetria e il tool di ricerca.
 # `_node_aliases` NON viene passato: e' stato del modulo, e i due punti qui che
 # lo leggono vanno da `mesh._node_aliases` perche' mesh lo riassegna.
+# ── MONTAGGIO DEI WEB NODES ────────────────────────────────────────────────────
+# Cinque route /web/* e il registro che le serve. Il registro e' costruito dentro
+# il modulo, perche' e' l'ultimo pezzo di stato dei web node e non dipende dal
+# boot: non c'e' niente da iniettare, e non ha una seconda copia da mantenere
+#(all'incirca 'errore silenzioso' numero tre della prima estrazione).
+monta_webnode(app)
+
 mesh.monta(app,
            advanced_config=advanced_config,
            recent_routing_lock=_recent_routing_lock,
