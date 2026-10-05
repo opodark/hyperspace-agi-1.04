@@ -1,0 +1,62 @@
+{
+  "alias_dopodoposto": {
+    "body": "{}\n",
+    "status": 200
+  },
+  "alias_nodo_inesistente": {
+    "body": "{\"error\":\"nodo non trovato\"}\n",
+    "status": 404
+  },
+  "announce_corpo_vuoto": {
+    "body": "{\"error\":\"missing node_id\",\"ok\":false}\n",
+    "status": 400
+  },
+  "elimina_nodo_inesistente": {
+    "body": "{\"error\":\"nodo non trovato\",\"ok\":false}\n",
+    "status": 404
+  },
+  "mesh_nodes": {
+    "body": "[{\"active_requests\":0,\"alias\":\"\",\"backend_type\":\"model_manager\",\"capabilities\":[\"ollama\",\"control-plane\"],\"capacity\":1,\"degraded\":false,\"endpoint\":\"\",\"is_local\":true,\"last_seen\":\"2026-10-05T21:28:33Z\",\"node_id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"queued_requests\":0,\"saturation\":0.0,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\",\"vram_gb\":16.0}]\n",
+    "status": 200
+  },
+  "nodes_active": {
+    "body": "[{\"active_requests\":0,\"alias\":\"\",\"backend_type\":\"model_manager\",\"capabilities\":[\"ollama\",\"control-plane\"],\"capacity\":1,\"degraded\":false,\"endpoint\":\"\",\"is_local\":true,\"last_seen\":\"2026-10-05T21:28:33Z\",\"node_id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"queued_requests\":0,\"saturation\":0.0,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\",\"vram_gb\":16.0}]\n",
+    "status": 200
+  },
+  "nodes_aliases": {
+    "body": "{}\n",
+    "status": 200
+  },
+  "peers_nodo_inesistente": {
+    "body": "{\"error\":\"HTTPConnectionPool(host='inesistente', port=80): Max retries exceeded with url: /peers (Caused by NameResolutionError(\\\"HTTPConnection(host='inesistente', port=80): Failed to resolve 'inesistente' ([Errno 8] nodename nor servname provided, or not known)\\\"))\"}\n",
+    "status": 503
+  },
+  "pull_nodo_inesistente": {
+    "body": "data: {\"error\": \"HTTPConnectionPool(host='inesistente', port=80): Max retries exceeded with url: /ollama/pull (Caused by NameResolutionError(\\\"HTTPConnection(host='inesistente', port=80): Failed to resolve 'inesistente' ([Errno 8] nodename nor servname provided, or not known)\\\"))\"}\n\n",
+    "status": 200
+  },
+  "registry_nodes": {
+    "body": "{\"error\":\"HTTPConnectionPool(host='registry', port=8086): Max retries exceeded with url: /nodes/active (Caused by NameResolutionError(\\\"HTTPConnection(host='registry', port=8086): Failed to resolve 'registry' ([Errno 8] nodename nor servname provided, or not known)\\\"))\",\"registry_url\":\"http://registry:8086\"}\n",
+    "status": 503
+  },
+  "routing_weights": {
+    "body": "{\"backend\":0.15,\"backend_scores\":{\"inference_server\":1.0,\"model_manager\":0.5},\"gpu\":0.2,\"latency\":0.45,\"load\":0.25,\"max_candidates\":3,\"recent_penalty\":0.1,\"recent_window\":45.0,\"tier\":0.1,\"tput\":0.35,\"uptime\":0.1,\"vram\":0.55}\n",
+    "status": 200
+  },
+  "status_nodo_inesistente": {
+    "body": "{\"error\":\"HTTPConnectionPool(host='inesistente', port=80): Max retries exceeded with url: /status (Caused by NameResolutionError(\\\"HTTPConnection(host='inesistente', port=80): Failed to resolve 'inesistente' ([Errno 8] nodename nor servname provided, or not known)\\\"))\"}\n",
+    "status": 503
+  },
+  "topology": {
+    "body": "{\"edges\":[],\"nodes\":[{\"endpoint\":\"\",\"id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"score\":0.365,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\"}]}\n",
+    "status": 200
+  },
+  "web_register_corpo_vuoto": {
+    "body": "{\"error\":\"missing node_id\",\"ok\":false}\n",
+    "status": 400
+  },
+  "web_status": {
+    "body": "{\"enabled\":true,\"heartbeat_interval_s\":30,\"inflight\":0,\"max_payload_bytes\":65536,\"max_poll_s\":30,\"max_queue_per_node\":32,\"nodes\":[],\"queued\":0,\"recent_results\":[],\"task_ttl_s\":60,\"web_nodes\":0,\"web_safe_task_types\":[\"embed_texts\",\"moderate\",\"summarize\",\"translate\",\"validate_json\"]}\n",
+    "status": 200
+  }
+}

@@ -33,6 +33,55 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # fallback di `/app/data` puo' divergere senza che nessuno se ne accorga.
 VITALITY_BIG_LEVEL = max(0, int(os.getenv("VITALITY_BIG_LEVEL", "3")))
 VITALITY_BIG_MODEL = os.getenv("VITALITY_BIG_MODEL", "").strip()
+# ── ROUTING: PESI DELLO SCORING ─────────────────────────────────────────────
+# v1.05: scoring IBRIDO metric-driven (vedi control-plane/routing.py). Il
+# blocco QUALITÀ (latenza/throughput per modello, pressione VRAM motore)
+# domina quando i campioni /metrics sono freschi; il blocco STRUTTURALE
+# (vram/tier/uptime/backend) è il fallback quando i dati mancano. I pesi
+# strutturali restano configurabili via ROUTING_WEIGHT_* (sono relativi, non
+# devono sommare a 1); quelli di qualità via ROUTING_WEIGHT_LATENCY/TPUT/GPU.
+# Esposti in sola lettura via /config/routing-weights.
+ROUTING_WEIGHT_VRAM   = float(os.getenv("ROUTING_WEIGHT_VRAM", "0.55"))
+ROUTING_WEIGHT_LOAD   = float(os.getenv("ROUTING_WEIGHT_LOAD", "0.25"))
+ROUTING_WEIGHT_TIER   = float(os.getenv("ROUTING_WEIGHT_TIER", "0.10"))
+ROUTING_WEIGHT_UPTIME = float(os.getenv("ROUTING_WEIGHT_UPTIME", "0.10"))
+# Peso del paradigma di serving (backend_type: inference_server vs
+# model_manager) nel blocco strutturale. Il punteggio per backend_type vive
+# in shared/engine_profiles.py — unica fonte di verità.
+ROUTING_WEIGHT_ENGINE = float(os.getenv("ROUTING_WEIGHT_ENGINE", "0.15"))
+# Blocco qualità (in funzione delle metriche osservate).
+ROUTING_WEIGHT_LATENCY = float(os.getenv("ROUTING_WEIGHT_LATENCY", "0.45"))
+ROUTING_WEIGHT_TPUT    = float(os.getenv("ROUTING_WEIGHT_TPUT", "0.35"))
+ROUTING_WEIGHT_GPU     = float(os.getenv("ROUTING_WEIGHT_GPU", "0.20"))
+# Bilanciamento: penalità "ultimo scelto" — il nodo appena usato viene
+# lievemente depenalizzato, con decadimento esponenziale nella finestra.
+# Piccola a default: rompe i pareggi senza far perdere un nodo migliore.
+ROUTING_RECENT_PENALTY  = float(os.getenv("ROUTING_RECENT_PENALTY", "0.10"))
+ROUTING_RECENT_WINDOW_S = float(os.getenv("ROUTING_RECENT_WINDOW_S", "45"))
+
+# I pesi con cui il mesh sceglie un nodo. Nessuno domina: un peso alto non esclude
+# gli altri, li penalizza. La tab Setup li espone perché sono la leva che
+# l'operatore ha quando un nodo viene scelto male, e `/config/routing-weights` li
+# restituisce in sola lettura.
+_ROUTING_WEIGHTS = {
+    "vram": ROUTING_WEIGHT_VRAM,
+    "load": ROUTING_WEIGHT_LOAD,
+    "tier": ROUTING_WEIGHT_TIER,
+    "uptime": ROUTING_WEIGHT_UPTIME,
+    "backend": ROUTING_WEIGHT_ENGINE,
+    "latency": ROUTING_WEIGHT_LATENCY,
+    "tput": ROUTING_WEIGHT_TPUT,
+    "gpu": ROUTING_WEIGHT_GPU,
+    "recent_penalty": ROUTING_RECENT_PENALTY,
+    "recent_window": ROUTING_RECENT_WINDOW_S,
+}
+
+# Se questo nodo partecipa alla mesh come nodo locale (per l'inferenza diretta e
+# per l'annuncio) e l'endpoint con cui si annuncia. Vuoto = partecipa ma non si
+# annuncia: nodo noto al suo host, ignoto agli altri.
+_LOCAL_NODE_ENABLED = os.getenv("LOCAL_NODE_ENABLED", "true").lower() not in ("0", "false", "no")
+_LOCAL_NODE_ENDPOINT = os.getenv("LOCAL_NODE_ENDPOINT", "")  # es. http://192.168.1.10:11434
+
 DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
     BASE_DIR, "..", "data", "diario-immagini")
 DIARIO_FILE         = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(

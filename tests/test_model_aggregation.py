@@ -16,7 +16,6 @@ richiede Flask, il DB e la rete al momento dell'import.
 import ast
 import time
 import unittest
-from pathlib import Path
 
 MAC = "d7bc05baed5b752aeab6ba2624243b59fc333b9f"
 GHOST = "local-e62fa5e950a7d234"
@@ -25,18 +24,33 @@ MODELS = ["qwen3:8b", "gemma4:e4b"]
 
 
 def _load_functions():
-    """Estrae dal CP le funzioni sotto test e le esegue in uno scope isolato."""
-    tree = ast.parse((Path(__file__).parents[1] / "control-plane/main.py").read_text(encoding="utf-8"))
+    """Estrae dal CP le funzioni sotto test e le esegue in uno scope isolato.
+
+    Le cerca con `cp_source`, che e' l'unica vista di main.py + `cp/*.py`: due delle
+    tre sono nel modulo del mesh e non in main.py, e il perche' e' gia' scritto li'.
+    """
+    from tests import cp_source
+
     wanted = {"_aggregate_mesh_models", "_best_endpoint", "_normalize_endpoint"}
-    body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
-    assert {n.name for n in body} == wanted, "funzioni rinominate nel CP: aggiorna questo test"
+    funzioni = cp_source.funzioni()
+    mancanti = wanted - set(funzioni)
+    assert not mancanti, f"funzioni spostate o rinominate nel CP: {sorted(mancanti)}"
+    body = [funzioni[n] for n in sorted(wanted)]
     return compile(ast.Module(body=body, type_ignores=[]), "cp", "exec")
 
 
 def _run(nodes, models_by_node, aliases=None):
     """Esegue _aggregate_mesh_models con la lista nodi e i modelli indicati."""
+    # Gli alias sono di `cp/mesh.py` (li riassegna lui), e `_aggregate_mesh_models`
+    # li va a prendere li' — quindi lo scope isolato riceve un `mesh` finto con la
+    # stessa forma, non un dizionario locale.
+    class _Mesh:
+        _node_aliases = aliases or {}
+        _node_ref_for = staticmethod(lambda nid: (aliases or {}).get(nid) or nid[:8])
+
     scope = {
         "time": time,
+        "mesh": _Mesh,
         "_MODELS_CACHE": {"ts": 0.0, "data": None},
         "_MODELS_CACHE_TTL": 15,
         "_node_aliases": aliases or {},
