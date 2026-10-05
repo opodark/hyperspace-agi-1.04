@@ -19,6 +19,9 @@
 
 import os
 
+from flask import jsonify, request
+
+from cp.log import push_log
 from shared.channel import ChannelGuard, ChannelPolicy, ChannelRuntime, ReplyPacing
 
 _CHANNEL_TOKEN_HEADER = "X-Hyperspace-Channel-Token"
@@ -29,6 +32,26 @@ def _channel_int(nome: str, default: int) -> int:
         return int(os.getenv(nome, str(default)) or default)
     except (TypeError, ValueError):
         return default
+
+
+def _channel_error():
+    """Risposta Flask se il chiamante non è un canale autorizzato, altrimenti None."""
+    if not channel_policy.enabled:
+        return jsonify({"ok": False, "error": "canali disattivati "
+                                              "(CHANNEL_ENABLED=false)"}), 503
+    if not channel_policy.configured:
+        return jsonify({"ok": False, "error": "nessun canale configurato: serve un token "
+                                              "di almeno 32 caratteri in CHANNEL_CLIENTS"}), 503
+    if not channel_policy.authenticate(request.headers.get(_CHANNEL_TOKEN_HEADER, "")):
+        push_log('channel', 'Token di canale assente o non valido',
+                 detail=f"from={request.remote_addr}", status='warn')
+        return jsonify({"ok": False, "error": "token di canale mancante o non valido"}), 401
+    return None
+
+
+def _channel_name() -> str:
+    return (channel_policy.authenticate(request.headers.get(_CHANNEL_TOKEN_HEADER, ""))
+            or "")
 
 
 def _channel_float(nome: str, default: float) -> float:

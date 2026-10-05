@@ -1,0 +1,46 @@
+{
+  "accodato": {
+    "body": "{\"job\":{\"altezza\":512,\"canale\":\"com4\",\"consegnato\":false,\"creato_ts\":1791197541.080649,\"destinazione\":\"\",\"esito\":{},\"famiglia\":\"qwen-image-2.1\",\"fix\":0,\"id\":\"1e178c7d2549\",\"larghezza\":512,\"lora_name\":\"\",\"lora_strength\":0.8,\"modello\":\"\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"negativo\":\"\",\"passi\":25,\"pose_image\":\"\",\"pose_preset\":\"\",\"pose_strength\":1.0,\"preso_ts\":0.0,\"prompt\":\"un faro di notte\",\"reference_image\":\"\",\"reference_strength\":0.8,\"richiedente\":\"\",\"seed\":0,\"stato\":\"pending\"},\"ok\":true,\"scheda\":\"\"}\n",
+    "status": 201
+  },
+  "coda_vuota_204": {
+    "body": "",
+    "status": 204
+  },
+  "defer_inesistente": {
+    "body": "{\"ok\":false}\n",
+    "status": 200
+  },
+  "esito_dentro_volume": {
+    "body": "{\"job\":{\"altezza\":512,\"canale\":\"com4\",\"consegnato\":false,\"creato_ts\":1791197541.1003299,\"destinazione\":\"\",\"esito\":{\"durata_ms\":0,\"errore\":\"\",\"file\":\"HyperSpace/bridge_00002_.jpg\",\"ts\":1791197541.104623},\"famiglia\":\"qwen-image-2.1\",\"fix\":0,\"id\":\"49a90d12e131\",\"larghezza\":512,\"lora_name\":\"\",\"lora_strength\":0.8,\"modello\":\"\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"negativo\":\"\",\"passi\":25,\"pose_image\":\"\",\"pose_preset\":\"\",\"pose_strength\":1.0,\"preso_ts\":0.0,\"prompt\":\"disegno con percorso lecito\",\"reference_image\":\"\",\"reference_strength\":0.8,\"richiedente\":\"\",\"seed\":0,\"stato\":\"done\"},\"ok\":true}\n",
+    "status": 200
+  },
+  "esito_fuori_volume": {
+    "body": "{\"job\":{\"altezza\":512,\"canale\":\"com4\",\"consegnato\":false,\"creato_ts\":1791197541.0919309,\"destinazione\":\"\",\"esito\":{\"durata_ms\":0,\"errore\":\"\",\"file\":\"../../../etc/passwd\",\"ts\":1791197541.096083},\"famiglia\":\"qwen-image-2.1\",\"fix\":0,\"id\":\"fedc93e27957\",\"larghezza\":512,\"lora_name\":\"\",\"lora_strength\":0.8,\"modello\":\"\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"negativo\":\"\",\"passi\":25,\"pose_image\":\"\",\"pose_preset\":\"\",\"pose_strength\":1.0,\"preso_ts\":0.0,\"prompt\":\"disegno con percorso che esce dal volume\",\"reference_image\":\"\",\"reference_strength\":0.8,\"richiedente\":\"\",\"seed\":0,\"stato\":\"done\"},\"ok\":true}\n",
+    "status": 200
+  },
+  "esito_ok": {
+    "body": "{\"job\":{\"altezza\":512,\"canale\":\"com4\",\"consegnato\":false,\"creato_ts\":1791197541.080649,\"destinazione\":\"\",\"esito\":{\"durata_ms\":0,\"errore\":\"\",\"file\":\"bridge_00001_.jpg\",\"ts\":1791197541.087316},\"famiglia\":\"qwen-image-2.1\",\"fix\":0,\"id\":\"1e178c7d2549\",\"larghezza\":512,\"lora_name\":\"\",\"lora_strength\":0.8,\"modello\":\"\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"negativo\":\"\",\"passi\":25,\"pose_image\":\"\",\"pose_preset\":\"\",\"pose_strength\":1.0,\"preso_ts\":1791197541.084831,\"prompt\":\"un faro di notte\",\"reference_image\":\"\",\"reference_strength\":0.8,\"richiedente\":\"\",\"seed\":0,\"stato\":\"done\"},\"ok\":true}\n",
+    "status": 200
+  },
+  "genera_corpo_vuoto": {
+    "body": "{\"error\":\"prompt vuoto: un job immagine senza prompt non esiste\",\"ok\":false}\n",
+    "status": 400
+  },
+  "job_inesistente": {
+    "body": "{\"error\":\"job sconosciuto\",\"ok\":false}\n",
+    "status": 404
+  },
+  "job_preso": {
+    "body": "{\"job\":{\"altezza\":512,\"canale\":\"com4\",\"consegnato\":false,\"creato_ts\":1791197541.080649,\"destinazione\":\"\",\"esito\":{},\"famiglia\":\"qwen-image-2.1\",\"fix\":0,\"id\":\"1e178c7d2549\",\"larghezza\":512,\"lora_name\":\"\",\"lora_strength\":0.8,\"modello\":\"\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"negativo\":\"\",\"passi\":25,\"pose_image\":\"\",\"pose_preset\":\"\",\"pose_strength\":1.0,\"preso_ts\":1791197541.084831,\"prompt\":\"un faro di notte\",\"reference_image\":\"\",\"reference_strength\":0.8,\"richiedente\":\"\",\"seed\":0,\"stato\":\"running\"},\"ok\":true}\n",
+    "status": 200
+  },
+  "senza_token": {
+    "body": "{\"error\":\"token di canale mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "stato": {
+    "body": "{\"da_consegnare\":0,\"in_coda\":0,\"in_esecuzione\":0,\"max_jobs\":8,\"memory_gate\":{\"active_chats\":0,\"image_job\":\"\",\"lease_remaining_s\":0},\"ok\":true,\"per_stato\":{\"done\":3,\"failed\":0,\"pending\":0,\"running\":0},\"ttl_s\":43200.0,\"ultimi\":[{\"esito\":{\"durata_ms\":0,\"errore\":\"\",\"file\":\"bridge_00001_.jpg\",\"ts\":1791197541.087316},\"famiglia\":\"qwen-image-2.1\",\"id\":\"1e178c7d2549\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"prompt\":\"un faro di notte\",\"stato\":\"done\"},{\"esito\":{\"durata_ms\":0,\"errore\":\"\",\"file\":\"../../../etc/passwd\",\"ts\":1791197541.096083},\"famiglia\":\"qwen-image-2.1\",\"id\":\"fedc93e27957\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"prompt\":\"disegno con percorso che esce dal volume\",\"stato\":\"done\"},{\"esito\":{\"durata_ms\":0,\"errore\":\"\",\"file\":\"HyperSpace/bridge_00002_.jpg\",\"ts\":1791197541.104623},\"famiglia\":\"qwen-image-2.1\",\"id\":\"49a90d12e131\",\"modello_effettivo\":\"qwen-image-2.1-UC-Q5_K_M.gguf\",\"prompt\":\"disegno con percorso lecito\",\"stato\":\"done\"}]}\n",
+    "status": 200
+  }
+}

@@ -79,8 +79,6 @@ from shared.forge_skills import ECC_BUNDLE_DIR, load_ecc_bundle, attach_skills, 
 from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryError
 from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
-from shared import gpu_budget
-from shared.poetry_image import readable_excerpt, compose_readable
 from shared import web_search
 from shared.web_node import (
     WebNodeError,
@@ -98,8 +96,7 @@ from shared.persona_dream import PersonaDream
 from shared.channel import COMANDI_DRIVER, KNOWN_CHANNELS
 from shared.vitality import mesh_contributors, mesh_vitality, vitality_context
 from shared.image_jobs import (FAMIGLIA_SDXL, FAMIGLIE_CHECKPOINT, ImmagineQueue,
-                               LATO_CONSIGLIATO, RIFERIMENTO_FORZA_DEFAULT,
-                               nuovo_job, richiesta_immagine, usa_checkpoint)
+                               nuovo_job, richiesta_immagine)
 from shared.image_memory_gate import ImageMemoryGate
 from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto,
                             prompt_ritratto, richiesta_di_se, verifica_vetrina,
@@ -111,7 +108,7 @@ from shared.feed import Feed, nuovo_post
 from shared.post_gen import (MOTIVO_ECO, build_poem_prompt, build_post_prompt, filtra_post,
                              parse_post, prossima_mossa)
 from shared.sketch import SKETCH_LATO, SKETCH_PASSI, job_sketch, negativo_sketch, puo_generare
-from shared.diario import (Diario, file_da_job, voce)
+from shared.diario import (Diario, voce)
 from shared.dialogue_image import compose_dialogue
 from shared.conversation_log import ConversationLog, battuta
 from shared.social_dreams import social_dream_inspirations
@@ -135,7 +132,6 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 # percorsi di fallback non cambiano.
 from cp.config import (CODE_SERVER_PORT,
                         DIARIO_FILE,
-                        DIARIO_IMMAGINI_DIR,
                         DEFAULT_MODEL,
                       FEDERATION_ENABLED,
                       FEDERATION_PUBLIC_URL,
@@ -700,7 +696,8 @@ def _tool_persona_note(args) -> str:
 # autosufficiente (solo os e shared.channel). Qui il resto del canale — le
 # rotte, il reply, l'ingest — che usa persona_store, image_queue e push_log.
 from cp import canali as _canali
-from cp.canali import (_CHANNEL_TOKEN_HEADER, _channel_float, _channel_int,
+from cp.canali import (_channel_error, _channel_float,
+                      _channel_int, _channel_name,
                       channel_guard, channel_pacing, channel_policy, channel_runtime)
 
 # ── STATO DEI SISTEMI: immagini, Instagram, canali, memoria ──────────────────
@@ -852,26 +849,6 @@ def _reload_channel_config() -> None:
                               flood_window_s=_channel_float("CHANNEL_FLOOD_WINDOW_S", 15.0))
     push_log('channel', 'Configurazione canali ricaricata',
              detail=f"canali={sorted(channel_policy.clients)}", status='success')
-
-
-def _channel_error():
-    """Risposta Flask se il chiamante non è un canale autorizzato, altrimenti None."""
-    if not channel_policy.enabled:
-        return jsonify({"ok": False, "error": "canali disattivati "
-                                              "(CHANNEL_ENABLED=false)"}), 503
-    if not channel_policy.configured:
-        return jsonify({"ok": False, "error": "nessun canale configurato: serve un token "
-                                              "di almeno 32 caratteri in CHANNEL_CLIENTS"}), 503
-    if not channel_policy.authenticate(request.headers.get(_CHANNEL_TOKEN_HEADER, "")):
-        push_log('channel', 'Token di canale assente o non valido',
-                 detail=f"from={request.remote_addr}", status='warn')
-        return jsonify({"ok": False, "error": "token di canale mancante o non valido"}), 401
-    return None
-
-
-def _channel_name() -> str:
-    return (channel_policy.authenticate(request.headers.get(_CHANNEL_TOKEN_HEADER, ""))
-            or "")
 
 
 # Perché il bot NON ha risposto: nei log, ma non a ogni giro.
@@ -2433,7 +2410,8 @@ def connectors_status():
 # thread che pubblica la voce, e il `__main__` chiama `avvia()`. Tutto il resto
 # di Instagram e' dentro il modulo, e i due flag dei thread sono attributi del
 # suo contesto — vedi `_ensure_instagram_*` li', che li alzano una volta sola.
-from cp.instagram import _instagram_publish_voce, avvia as _instagram_avvia
+from cp.immagini import monta as monta_immagini
+from cp.instagram import avvia as _instagram_avvia
 
 
 # ── INSTAGRAM: il canale ──────────────────────────────────────────────────────
@@ -2612,111 +2590,6 @@ def persona_dream_run():
 # 204 su /image/jobs significa "niente da fare": è la risposta normale di un
 # ponte in attesa, non un errore.
 
-def _libera_scheda_per_immagine() -> str:
-    """Fa posto sulla scheda prima di accodare un'immagine (una scheda, un modello).
-
-    Il diffusion di ComfyUI e il modello della chat non stanno insieme in 8 GB, e la
-    contesa si presentava come `CUDA error: unknown error` (2026-09-22: 6.2 GB a
-    Ollama, 1.7 liberi). Non blocca mai: se Ollama non risponde, il job si accoda lo
-    stesso e il motivo resta scritto.
-    """
-    modello = gpu_budget.da_scaricare()
-    if not modello:
-        return ""
-    base = (os.getenv("OLLAMA_RAW_BASE_URL", "") or "http://127.0.0.1:11434").rstrip("/")
-    try:
-        risposta = requests.post(f"{base}{gpu_budget.SCARICA_PATH}",
-                                 json=gpu_budget.richiesta_scarico(modello), timeout=30)
-    except requests.RequestException as e:
-        return gpu_budget.descrivi_esito(0, errore=str(e)[:120], modello=modello)
-    return gpu_budget.descrivi_esito(risposta.status_code, modello=modello)
-
-
-@app.route('/image/generate', methods=['POST'])
-def image_generate():
-    """Mette in coda un job immagine e torna subito con l'id."""
-    errore = _channel_error()
-    if errore:
-        return errore
-    dati = request.get_json(silent=True) or {}
-    famiglia = str(dati.get("famiglia", "")).strip().lower()
-    # Le famiglie a checkpoint unico — Pony per gli sketch, ChickMixFlat per il
-    # volto di Anna — girano sul Mac: lì la memoria la libera il ponte al claim,
-    # mentre il percorso Qwen/Windows scarica subito la sua GPU dedicata.
-    checkpoint = usa_checkpoint(famiglia)
-    lato = LATO_CONSIGLIATO.get(famiglia, 768)
-    scheda = "" if checkpoint else _libera_scheda_per_immagine()
-    try:
-        job = nuovo_job(dati.get("prompt", ""),
-                        negativo=dati.get("negativo", negativo_sketch() if checkpoint else ""),
-                        larghezza=dati.get("larghezza", lato),
-                        altezza=dati.get("altezza", lato),
-                        passi=dati.get("passi", SKETCH_PASSI if checkpoint else 25),
-                        fix=dati.get("fix", 0),
-                        seed=dati.get("seed", 0),
-                        richiedente=dati.get("richiedente", ""),
-                        canale=_channel_name(),
-                        destinazione=dati.get("destinazione", ""),
-                        modello=dati.get("modello", ""), famiglia=famiglia,
-                        pose_image=dati.get("pose_image", ""),
-                        pose_preset=dati.get("pose_preset", ""),
-                        pose_strength=dati.get("pose_strength", 1.0),
-                        # Il volto: il riferimento che la vetrina di Anna dichiara
-                        # (`riferimento`), o quello che un client passa a mano. Un nome
-                        # dentro ComfyUI/input, e la famiglia deve avere l'IP-Adapter:
-                        # dove non ce l'ha il job fallisce in modo visibile invece di
-                        # uscire con un volto qualunque.
-                        reference_image=dati.get("reference_image", ""),
-                        # Il default è quello di `shared/image_jobs` e non un 0.8 scritto
-                        # qui: due copie dello stesso numero sono due default che si
-                        # allontanano, e a divergere sarebbe quella che si legge meno.
-                        reference_strength=dati.get("reference_strength",
-                                                    RIFERIMENTO_FORZA_DEFAULT),
-                        lora_name=dati.get("lora_name", ""),
-                        lora_strength=dati.get("lora_strength", 0.8))
-    except (ValueError, TypeError) as e:
-        return jsonify({"ok": False, "error": str(e)[:160]}), 400
-    try:
-        accodato = image_queue.accoda(job)
-    except RuntimeError as e:
-        return jsonify({"ok": False, "error": str(e)}), 429
-    push_log('channel', 'Job immagine in coda',
-             detail=f"id={accodato['id']} {accodato['larghezza']}x{accodato['altezza']} "
-                    f"passi={accodato['passi']} da={accodato['richiedente'] or '?'}"
-                    + (f" · {scheda}" if scheda else ""),
-             status='info')
-    return jsonify({"ok": True, "job": accodato, "scheda": scheda}), 201
-
-
-@app.route('/image/jobs')
-def image_jobs():
-    """Il prossimo job per il ponte. Vuoto = 204, che non è un errore.
-
-    `?famiglia=` limita ai job di quel modello: un ponte SDXL-Turbo (il Mac)
-    chiede `?famiglia=sdxl-turbo` e non prende i job Qwen-Image della win11.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    famiglia = (request.args.get("famiglia") or "").strip()
-    job = image_queue.prossimo(capace_di=famiglia or None)
-    if job is None:
-        return ('', 204)
-    if usa_checkpoint(job.get("famiglia")):
-        if not image_memory_gate.reserve_image(job["id"]):
-            image_queue.rinvia(job["id"])
-            return jsonify({"ok": False, "error": "memoria occupata: job rinviato"}), 503
-    return jsonify({"ok": True, "job": job})
-
-
-@app.route('/image/defer', methods=['POST'])
-def image_defer():
-    errore = _channel_error()
-    if errore:
-        return errore
-    job_id = str((request.get_json(silent=True) or {}).get("id", ""))
-    image_memory_gate.release_image(job_id)
-    return jsonify({"ok": image_queue.rinvia(job_id)})
 
 
 
@@ -2725,135 +2598,18 @@ def image_defer():
 
 
 
-def _percorso_disegno_servibile(percorso) -> str:
-    """Percorso relativo servibile per un disegno, oppure "" se non è servibile.
-
-    La rotta `/instagram/media/<token>/<path:nome>` serve `DIARIO_IMMAGINI_DIR`
-    con il percorso relativo *completo* (`HyperSpace/bridge_00048_.jpg`): qui si
-    verifica che il file esista davvero e che resti dentro il volume, così l'URL
-    dato a Instagram non è mai un 404.
-    """
-    rel = str(percorso or "").strip().lstrip("/")
-    if not rel:
-        return ""
-    radice = os.path.realpath(DIARIO_IMMAGINI_DIR)
-    pieno = os.path.realpath(os.path.join(radice, rel))
-    if not pieno.startswith(radice + os.sep) or not os.path.isfile(pieno):
-        return ""
-    return rel
 
 
-@app.route('/image/result', methods=['POST'])
-def image_result():
-    """Il ponte riferisce com'è andata: è l'unico modo per saperlo."""
-    errore = _channel_error()
-    if errore:
-        return errore
-    dati = request.get_json(silent=True) or {}
-    job_id = str(dati.get("id", ""))
-    chiuso = image_queue.concludi(job_id, bool(dati.get("ok")),
-                                  file=dati.get("file", ""), errore=dati.get("errore", ""),
-                                  durata_ms=dati.get("durata_ms", 0))
-    if chiuso is None:
-        image_memory_gate.release_image(job_id)
-        return jsonify({"ok": False, "error": "job sconosciuto"}), 404
-    if chiuso.pop("_already_concluded", False):
-        image_memory_gate.release_image(job_id)
-        return jsonify({"ok": True, "job": chiuso})
-    # Non liberare la memoria unificata fra immagini consecutive del Mac:
-    # altrimenti Ollama puo' ricaricarsi nel breve intervallo result -> jobs.
-    if (usa_checkpoint(chiuso.get("famiglia"))
-            and image_queue.ha_in_coda(FAMIGLIE_CHECKPOINT)):
-        image_memory_gate.continue_image_queue(job_id)
-    else:
-        image_memory_gate.release_image(job_id)
-    esito = chiuso["esito"]
-    fatto = file_da_job(chiuso)
-    if fatto:
-        voce_id, percorso = fatto
-        page = diario.get(voce_id)
-        if page:
-            excerpt = readable_excerpt(page.get("prompt", ""), page.get("testo", ""))
-            if excerpt:
-                try:
-                    root = os.path.realpath(DIARIO_IMMAGINI_DIR)
-                    source = os.path.realpath(os.path.join(root, percorso))
-                    if not source.startswith(root + os.sep) or not os.path.isfile(source):
-                        raise ValueError("immagine Comfy fuori dal volume consentito")
-                    name = f"{voce_id}.jpg"
-                    if not re.fullmatch(r"[A-Za-z0-9_-]+\.jpg", name):
-                        raise ValueError("id voce non valido")
-                    compose_readable(source, os.path.join(TYPOGRAPHY_IMAGES_DIR, name), excerpt)
-                    percorso = "typography/" + name
-                except Exception as error:
-                    push_log('feed', 'Pannello poesia non creato', detail=str(error)[:200],
-                             source='post-loop', status='warn')
-        if diario.aggiorna_file(voce_id, percorso):
-            page = diario.get(voce_id)
-            if page and page.get("tipo") in ("sogno", "poesia"):
-                diario.aggiorna_instagram(voce_id, status="pending")
-            diario.save(DIARIO_FILE)
-            push_log('feed', f'sketch nel diario', detail=f'voce={voce_id} file={percorso}',
-                     source='post-loop', status='success')
-            page = diario.get(voce_id)
-            if page and page.get("tipo") in ("sogno", "poesia"):
-                threading.Thread(target=_instagram_publish_voce,
-                                 args=(voce_id, percorso), daemon=True).start()
-    if (chiuso.get("stato") == "done" and chiuso.get("canale") == "instagram"
-            and chiuso.get("destinazione") and esito.get("file")):
-        public_base = os.getenv("INSTAGRAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
-        media_token = os.getenv("INSTAGRAM_MEDIA_TOKEN", "").strip()
-        disegno = _percorso_disegno_servibile(esito.get("file"))
-        if public_base and media_token and disegno:
-            image_url = (f"{public_base}/instagram/media/{quote(media_token, safe='')}/"
-                         f"{quote(disegno, safe='/')}")
-            sent = connector_manager.execute("instagram_send_image", {
-                "recipient_id": chiuso["destinazione"], "image_url": image_url})
-            if str(sent).lstrip().startswith("{"):
-                image_queue.consegnato(chiuso["id"])
-                push_log('instagram', 'Disegno VIP consegnato',
-                         detail=f"job={chiuso['id']}", status='success')
-            else:
-                push_log('instagram', 'Disegno VIP non consegnato',
-                         detail=str(sent)[:200], status='warn')
-        elif public_base and media_token:
-            push_log('instagram', 'Disegno VIP non consegnato',
-                     detail=f"file non servibile: {str(esito.get('file'))[:120]}",
-                     status='warn')
-    push_log('channel', 'Job immagine concluso',
-             detail=(f"id={chiuso['id']} stato={chiuso['stato']} "
-                     f"{esito.get('file') or esito.get('errore') or ''}")[:200],
-             status=('success' if chiuso["stato"] == "done" else 'warn'))
-    return jsonify({"ok": True, "job": chiuso})
 
 
-@app.route('/image/status')
-def image_status():
-    """Coda, ultimi job e scadenze: serve a "dov'è finita la mia immagine?"."""
-    errore = _channel_error()
-    if errore:
-        return errore
-    return jsonify({"ok": True, **image_queue.stato(), "memory_gate": image_memory_gate.status()})
 
 
-@app.route('/image/job/<job_id>')
-def image_job(job_id):
-    """Un job per id: "dov'è finita la mia immagine?" senza leggere tutta la coda.
 
-    Cerca prima fra i job vivi, poi nello storico: un job già concluso e potato
-    (scadenza di 15 minuti) resta leggibile finché è fra gli ultimi venti, ed è
-    esattamente il caso di chi arriva un minuto dopo la fine.
-    """
-    errore = _channel_error()
-    if errore:
-        return errore
-    job = image_queue.job(job_id)
-    if job:
-        return jsonify({"ok": True, "job": job, "da_storico": False})
-    for voce in image_queue.stato().get("ultimi", []):
-        if str(voce.get("id")) == str(job_id):
-            return jsonify({"ok": True, "job": voce, "da_storico": True})
-    return jsonify({"ok": False, "error": "job sconosciuto"}), 404
+
+
+
+
+
 
 
 @app.route('/channel/outbox')
@@ -7809,6 +7565,14 @@ instagram_vips, instagram_memory, instagram_reply_outbox = monta(
     connector_manager=connector_manager, persona_store=persona_store,
     diario=diario, nome_persona=_nome_persona, sister_peer=_sister_peer,
     record_conversation=_record_conversation)
+
+# ── MONTAGGIO DELLA CODA IMMAGINI ─────────────────────────────────────────────
+# Le sei route del ponte ComfyUI stanno in cp/immagini.py. Qui la coda e il gate
+# vengono solo passati: sono infrastruttura condivisa, e questa riga non è il posto
+# giusto per spostare la loro creazione — ci stanno ancora i canali, `_channel_
+# immagine` e gli sketch dei loop, che li usano tutti.
+monta_immagini(app, image_queue=image_queue, image_memory_gate=image_memory_gate,
+                connector_manager=connector_manager, diario=diario)
 
 
 if __name__ == '__main__':

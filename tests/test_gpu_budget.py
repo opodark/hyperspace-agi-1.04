@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tests import cp_source  # noqa: E402
 from shared import gpu_budget  # noqa: E402
 
 
@@ -54,7 +55,7 @@ class CablaggioTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        albero = ast.parse((ROOT / "control-plane" / "main.py").read_text(encoding="utf-8"))
+        albero = cp_source.albero()
         cls.funzioni = {n.name: n for n in albero.body if isinstance(n, ast.FunctionDef)}
 
     def test_esiste_e_usa_il_modulo(self):

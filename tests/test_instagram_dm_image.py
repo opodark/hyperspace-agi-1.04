@@ -75,16 +75,20 @@ def _run(tmp_path, file_esito, sent='{"message_id": "img.1"}'):
         "_channel_error": lambda: None,
         "usa_checkpoint": usa_checkpoint,
         "FAMIGLIE_CHECKPOINT": FAMIGLIE_CHECKPOINT,
-        "image_memory_gate": SimpleNamespace(release_image=lambda *a, **k: None,
-                                             continue_image_queue=lambda *a, **k: False),
-        "image_queue": queue,
+        # coda, gate, connettori e diario arrivano dal boot attraverso il
+        # contesto di cp/immagini.py: prima erano quattro nomi piatti qui.
+        "_serve": lambda *campi: None,
+        "_contesto": SimpleNamespace(
+            image_memory_gate=SimpleNamespace(release_image=lambda *a, **k: None,
+                                              continue_image_queue=lambda *a, **k: False),
+            image_queue=queue,
+            connector_manager=SimpleNamespace(
+                execute=lambda tool, args: (calls.append((tool, args)), sent)[1]),
+            diario=SimpleNamespace(get=lambda *a: None, save=lambda *a: None,
+                                   aggiorna_file=lambda *a: False)),
         "file_da_job": lambda _job: None,
         "push_log": lambda *a, **kw: logs.append((a, kw)),
         "jsonify": lambda payload: payload,
-        "diario": SimpleNamespace(get=lambda *a: None, save=lambda *a: None,
-                                  aggiorna_file=lambda *a: False),
-        "connector_manager": SimpleNamespace(
-            execute=lambda tool, args: (calls.append((tool, args)), sent)[1]),
     }
     body = [funzioni["_percorso_disegno_servibile"], funzioni["image_result"]]
     exec(compile(ast.Module(body=body, type_ignores=[]), "cp", "exec"), scope)

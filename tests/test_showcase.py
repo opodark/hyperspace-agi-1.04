@@ -22,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tests import cp_source  # noqa: E402
 from shared.image_jobs import (FAMIGLIA_SD15, MODELLO_SD15, nuovo_job,  # noqa: E402
                                workflow)
 from shared.showcase import (CONFLITTI_IDENTITA, MARCATORI_DIGITALI,  # noqa: E402
@@ -587,7 +588,7 @@ class RottaJobTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        albero = ast.parse((ROOT / "control-plane" / "main.py").read_text(encoding="utf-8"))
+        albero = cp_source.albero()
         cls.funzioni = {n.name: n for n in albero.body if isinstance(n, ast.FunctionDef)}
 
     def test_esiste_e_cerca_anche_nello_storico(self):

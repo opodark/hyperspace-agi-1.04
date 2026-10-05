@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Esegue la rotta reale senza avviare server o generazioni."""
 import ast
-from pathlib import Path
 from types import SimpleNamespace
+
+from tests import cp_source
 
 from shared.image_jobs import (FAMIGLIA_SD15, FAMIGLIA_SDXL, LATO_CONSIGLIATO,
                                MODELLO_SD15, RIFERIMENTO_FORZA_DEFAULT,
@@ -11,21 +12,26 @@ from shared.sketch import SKETCH_LATO, SKETCH_PASSI, negativo_sketch
 
 
 def generate(payload):
-    path = Path(__file__).resolve().parents[1] / 'control-plane/main.py'
-    fn = next(n for n in ast.parse(path.read_text()).body
-              if isinstance(n, ast.FunctionDef) and n.name == 'image_generate')
+    # Non più `main.py`: la funzione ora sta in cp/immagini.py, e `cp_source`
+    # sa già dove guardare. Il resto del test non cambia.
+    fn = cp_source.funzioni()['image_generate']
     fn.decorator_list = []
     scope = dict(FAMIGLIA_SDXL=FAMIGLIA_SDXL, FAMIGLIA_SD15=FAMIGLIA_SD15,
                  LATO_CONSIGLIATO=LATO_CONSIGLIATO, usa_checkpoint=usa_checkpoint,
                  RIFERIMENTO_FORZA_DEFAULT=RIFERIMENTO_FORZA_DEFAULT,
                  SKETCH_LATO=SKETCH_LATO,
                  SKETCH_PASSI=SKETCH_PASSI, negativo_sketch=negativo_sketch,
-                 nuovo_job=nuovo_job, image_queue=ImmagineQueue(),
+                 nuovo_job=nuovo_job,
+                 # la coda arriva dal boot attraverso il contesto del dominio
+                 _contesto=SimpleNamespace(image_queue=ImmagineQueue(),
+                                           image_memory_gate=None,
+                                           connector_manager=None, diario=None),
                  request=SimpleNamespace(get_json=lambda **kw: payload),
                  _channel_error=lambda: None, _channel_name=lambda: 'webui',
                  _libera_scheda_per_immagine=lambda: '',
                  push_log=lambda *a, **kw: None, jsonify=lambda x: x)
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(path), 'exec'), scope)
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), 'cp/immagini.py', 'exec'),
+         scope)
     return scope['image_generate']()
 
 
