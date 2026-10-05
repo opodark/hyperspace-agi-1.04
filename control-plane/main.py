@@ -43,10 +43,10 @@
 
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
-import os, threading, time, requests, json, uuid, gzip, hashlib, re, ast, base64, io, binascii
+import os, threading, time, requests, json, uuid, hashlib, re, ast, base64, io, binascii
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import sys
 import faulthandler
 from urllib.parse import quote
@@ -171,7 +171,6 @@ from cp.config import (CODE_SERVER_PORT,
                       REGISTRY_URL,
                       ROUTING_MAX_CANDIDATES,
                       SEARXNG_URL,
-                      UI_BRIDGE_URL,
                       WEB_NODE_ENABLED,
                       WEB_NODE_HEARTBEAT_S,
                       WEB_NODE_MAX_NODES,
@@ -765,9 +764,22 @@ def _reload_memory_sync() -> None:
     Non è pignoleria: i percorsi e gli interruttori vivono *dentro* MemorySync, non
     in costanti globali, quindi un valore nuovo senza ricostruzione resterebbe
     "salvato ma inerte" — il difetto che la tab Setup esiste per non avere.
+
+    Qui il `global` serve e non è un errore: il binding di `memory_sync` vive in
+    questo modulo, non in `cp/memoria.py`. Senza, la riassegnazione creerebbe una
+    variabile locale — cioè una che sparisce all'uscita — e le quattro funzioni
+    che lo leggono continuerebbero a usare l'oggetto vecchio: "salvato ma
+    inerte", che è il difetto che questa funzione esiste per evitare. La prova
+    che la confusione è facile è che a scriverlo così sembrava la soluzione
+    elegante, e il controllo dopo il salvataggio dalla tab Setup mostrava che
+    l'oggetto non era cambiato.
+
+    `cp/memoria.py` ricarica il suo e restituisce il nuovo; questo modulo si
+    rilega il proprio. Due aggiornamenti, e non uno, perché due moduli tengono un
+    riferimento: è il prezzo di non aver creato l'oggetto qui dentro.
     """
     global memory_sync
-    memory_sync = _build_memory_sync()
+    memory_sync = _memoria.ricarica()
 
 
 def _reload_channel_config() -> None:
@@ -1384,29 +1396,8 @@ def _load_tasks_from_db():
         loaded += 1
     print(f"[CP] Loaded {loaded} tasks from DB")
 
-def _ts_sort_key(entry: dict) -> float:
-    ts = entry.get("ts") or entry.get("timestamp")
-    if ts is None:
-        return 0.0
-    if isinstance(ts, (int, float)):
-        return float(ts)
-    try:
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
 
-def _ts_to_iso(ts) -> str:
-    if ts is None:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if isinstance(ts, (int, float)):
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return str(ts)[:20]
 
-def _notify_bridge(event_type: str, payload: dict):
-    try:
-        requests.post(f"{UI_BRIDGE_URL}/push/{event_type}", json=payload, timeout=1.5)
-    except Exception:
-        pass
 
 # ── TESTO DEI MESSAGGI ASSISTANT ──────────────────────────────────────────────
 # In cp/assistant.py: dove sta il testo in un chunk e in un JSON OpenAI, e
@@ -1414,65 +1405,9 @@ def _notify_bridge(event_type: str, payload: dict):
 # vuoto. Senza stato, con i due contatori di rate-limit dentro il modulo.
 from cp.assistant import _assistant_text, _normalize_assistant_message
 # ── MEMORY ────────────────────────────────────────────────────────────────────
-def _load_memory() -> list:
-    if MEMORY_BACKEND == "hermes":
-        # Con Hermes spento non si torna vuoti: si legge il mirror locale e la
-        # lettura degradata resta scritta nei log da MemorySync.
-        return memory_sync.read(MEMORY_MAX_ENTRIES)["entries"]
-    if MEMORY_BACKEND != "legacy":
-        raise RuntimeError(f"unsupported MEMORY_BACKEND: {MEMORY_BACKEND}")
-    if not os.path.exists(MEMORY_FILE_GZ):
-        return []
-    try:
-        with gzip.open(MEMORY_FILE_GZ, "rt", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception:
-        return []
 
-def _save_memory(entries: list) -> None:
-    if MEMORY_BACKEND != "legacy":
-        raise RuntimeError("legacy memory writes are disabled; Hermes is authoritative")
-    with gzip.open(MEMORY_FILE_GZ, "wt", encoding="utf-8") as f:
-        json.dump(_prune_memory(entries), f, ensure_ascii=False)
 
-def _prune_memory(entries: list) -> list:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=MEMORY_TTL_DAYS)
-    fresh = []
-    for e in entries:
-        ts_val = e.get("ts") or e.get("timestamp")
-        try:
-            if isinstance(ts_val, (int, float)):
-                ts_dt = datetime.fromtimestamp(float(ts_val), tz=timezone.utc)
-            else:
-                ts_dt = datetime.fromisoformat(str(ts_val).replace("Z", "+00:00"))
-            if ts_dt >= cutoff:
-                fresh.append(e)
-        except Exception:
-            fresh.append(e)
-    fresh.sort(key=_ts_sort_key, reverse=True)
-    return fresh[:MEMORY_MAX_ENTRIES]
 
-def _memory_append(entry: dict):
-    if "ts" not in entry and "timestamp" in entry:
-        entry["ts"] = _ts_to_iso(entry["timestamp"])
-    if MEMORY_BACKEND == "hermes":
-        # Scrittura locale-prima: il mirror si scrive sempre, e se Hermes non
-        # risponde la voce va in coda invece di andare persa. Torna `deferred`.
-        return memory_sync.write(entry)
-    if MEMORY_BACKEND != "legacy":
-        raise RuntimeError(f"unsupported MEMORY_BACKEND: {MEMORY_BACKEND}")
-    entries = _load_memory()
-    ts_key      = entry.get("ts") or entry.get("timestamp", "")
-    content_key = str(entry.get("content", "") or entry.get("prompt", ""))[:64]
-    dedup_key   = f"{ts_key}:{content_key}"
-    existing_keys = {
-        f"{e.get('ts') or e.get('timestamp','')}:{str(e.get('content','') or e.get('prompt',''))[:64]}"
-        for e in entries
-    }
-    if dedup_key not in existing_keys:
-        entries.append(entry)
-        _save_memory(entries)
 
 # ── SMART TASK ROUTING ────────────────────────────────────────────────────────
 class NodeBusyError(Exception):
@@ -1843,11 +1778,8 @@ from cp.log import push_log
 # `push_log`, che è definito sopra. Il mirror è il file di memoria di sempre, la coda
 # gli sta accanto — stesso volume, quindi sopravvivono a un rebuild e si possono
 # guardare a occhio.
-def _build_memory_sync() -> MemorySync:
-    return from_env(_hermes_memory, log=push_log, memory_file=MEMORY_FILE_GZ)
 
 
-memory_sync = _build_memory_sync()
 
 # ── OMEGA MEMORY TOOLS ────────────────────────────────────────────────────────
 def _omega_format_memories(entries: list) -> list:
@@ -2266,8 +2198,18 @@ from cp.canali import monta as monta_canali
 # `imposta_handlers` registra dove stanno i tool nativi. `cp/chat.py` non puo'
 # importarli da qui — creerebbe un ciclo, perche' questo file lo importa —
 # quindi il puntatore glielo passiamo una volta sola, dopo la definizione.
-from cp.chat import (imposta_handlers, parse_inference_urls,
-                      _inference_urls, _chunk_finale, _stream_direct, _requested_thinking, _decide_thinking, _deadline_exceeded, _tool_calls_passthrough, _tool_del_client, _risposta_solo_tool_del_client)
+from cp.chat import (imposta_handlers, _inference_urls, _chunk_finale, _stream_direct, _decide_thinking, _deadline_exceeded, _tool_del_client, _risposta_solo_tool_del_client)
+# La memoria e le sue voci stanno in cp/memoria.py: il file, il tetto, l'ordine e
+# il bridge. `memory_sync` e' di li' e si ricarica da li', quindi la funzione che
+# lo ricarica non ha piu' un `global` da dichiarare.
+from cp import memoria as _memoria
+# `memory_sync` è posseduto da `cp/memoria.py`, che lo costruisce da solo: qui se
+# ne tiene un riferimento per le quattro funzioni che lo leggono ancora (una
+# ricerca degradata e il percorso MCP). È un binding riassegnato da
+# `_reload_memory_sync`, non un `global` — un `global` riassegnerebbe il nome in
+# questo namespace e lascerebbe il modulo con l'oggetto vecchio.
+memory_sync = _memoria.memory_sync
+from cp.memoria import (_ts_to_iso, _notify_bridge, _load_memory, _save_memory, _memory_append)
 from cp.immagini import monta as monta_immagini
 from cp.instagram import avvia as _instagram_avvia
 

@@ -17,6 +17,9 @@ import sys
 import tempfile
 import time
 import unittest
+
+from cp import memoria  # noqa: E402
+from tests import cp_source  # noqa: E402
 import unittest.mock
 from pathlib import Path
 
@@ -397,7 +400,10 @@ class CablaggioControlPlaneTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        sorgente = (ROOT / "control-plane" / "main.py").read_text(encoding="utf-8")
+        # `cp_source` guarda main.py e i moduli `cp/`, quindi il test segue le
+        # funzioni della memoria dove ora stanno: prima leggeva solo main.py, e
+        # avrebbe smesso di vederle al primo spostamento.
+        sorgente = cp_source.SORGENTE()
         albero = ast.parse(sorgente)
         cls.funzioni = {n.name: n for n in albero.body if isinstance(n, ast.FunctionDef)}
 
@@ -443,3 +449,51 @@ class CablaggioControlPlaneTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class OggettoUnicoTests(unittest.TestCase):
+    """`memory_sync` vive in `cp/memoria.py` e `main.py` ne tiene un riferimento.
+
+    Sono due moduli con due nomi che punt allo stesso oggetto, e la trappola è che
+    il ricaricamento dalla tab Setup ne aggiorni solo uno: l'altro continua a
+    usare il vecchio, e il salvataggio è "salvato ma inerte" — il difetto che
+    `_reload_memory_sync` esiste per evitare.
+
+    Il caso è già successo in questa sessione: scrivendo la riassegnazione senza
+    `global` sembrava la soluzione elegante, perché la funzione restituiva il
+    nuovo oggetto, ma creava una variabile locale che sparisce all'uscita. Il
+    sintomo non è un errore: è che `memory_sync` continua a valere quello vecchio.
+
+    Qui non si importa `main.py` — all'import scrive su `/app`, che in test non
+    esiste, ed è il motivo per cui quasi tutti i test di questo repository
+    leggono il sorgente con `cp_source` invece di eseguire il monolite. La prova
+    che i due moduli restino allineati la fa `tests/test_memory_sync.py` a mano,
+    con l'ambiente puntato su un tmpdir; qui si verifica la parte che si puo'
+    verificare senza avviare il server.
+    """
+
+    def test_ricarica_restituisce_l_oggetto_del_modulo(self):
+        self.assertIs(memoria.ricarica(), memoria.memory_sync)
+
+    def test_il_modulo_dopo_ricarica_ha_un_oggetto_nuovo(self):
+        prima = memoria.memory_sync
+        dopo = memoria.ricarica()
+        self.assertIsNot(dopo, prima,
+                         "ricarica() ha restituito lo stesso oggetto: il "
+                         "salvataggio dalla tab Setup non cambierebbe nulla")
+
+    def test_main_py_si_rilega_alla_ricarica_del_modulo(self):
+        """La forma della riassegnazione, letta dal sorgente.
+
+        Il `global` qui e' obbligatorio e sembra il contrario di cio' che si fa
+        altrove nel refactor: li' la dichiarazione creava una seconda copia, qui
+        senza dichiarazione la riassegnazione crea una variabile LOCALE che
+        sparisce all'uscita della funzione. Due errori opposti, e la differenza
+        e' che `main.py` tiene un binding (e va dichiarato) mentre nei canali
+        l'oggetto e' posseduto dal modulo e il chiamante non ne tiene uno.
+        """
+        corpo = cp_source.SORGENTE()
+        blocco = corpo[corpo.index("def _reload_memory_sync"):
+                       corpo.index("def _reload_channel_config")]
+        self.assertIn("global memory_sync", blocco)
+        self.assertIn("_memoria.ricarica()", blocco)
