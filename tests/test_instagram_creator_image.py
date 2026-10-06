@@ -84,6 +84,16 @@ def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
     nomi = {"_queue_instagram_creator_image", "_job_ritratto_instagram",
             "_livello_immagine_intima", "_nome_persona"}
     nodi = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in nomi]
+    archivio_finto = SimpleNamespace(
+        # `system_block` nel modulo vero accetta il testo dell'utente e il mezzo:
+        # il finto deve accettarli, altrimenti la chiamata muore e il test
+        # continuerebbe a passare provando un'altra funzione.
+        system_block=lambda *_a, **_kw: "Sono Anna",
+        persona=SimpleNamespace(
+            name="Anna",
+            # `sezioni` sta sul PROFILO, non sull'archivio: e' una parte del
+            # documento d'identita', e non un attributo di chi lo contiene.
+            sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}}))
     scope = {
         "CREATOR_LEVEL": CREATOR_LEVEL,
         "INTIMATE_LEVELS": INTIMATE_LEVELS,
@@ -98,11 +108,13 @@ def load(queue, consenso: str = "", vetrina=None, prompt_reader=None):
             # `_nome_persona` e' una funzione di main.py, iniettata come callable:
             # il dominio non la puo' creare, e questa e' la stessa risposta che
             # le darebbe `monta()`.
-            nome_persona=lambda: "Anna",
-            persona_store=SimpleNamespace(
-                system_block=lambda: "Sono Anna",
-                persona=SimpleNamespace(name="Anna"),
-                sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}})),
+            nome_persona=lambda: "Anna",),
+        # La persona non passa piu' dal contesto: `cp/persona.py` ne e' il
+        # proprietario e i canali chiedono a lui. Qui un finto con la stessa
+        # forma, perche' il test eserciti il percorso vero e non uno vicino.
+        "persona": SimpleNamespace(
+            persona=lambda: archivio_finto,
+            profilo=lambda: archivio_finto.persona),
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
         "prepara_prompt_canale": prepara_prompt_canale,

@@ -88,6 +88,16 @@ def _load(operator=(), vip=(), cerchia=(), coda=None, vetrina=None):
                                             for t in n.targets):
             nodi.append(n)
     registrati = []
+    archivio_finto = SimpleNamespace(
+        # `system_block` nel modulo vero accetta il testo dell'utente e il mezzo:
+        # il finto deve accettarli, altrimenti la chiamata muore e il test
+        # continuerebbe a passare provando un'altra funzione.
+        system_block=lambda *_a, **_kw: "Sono Anna",
+        persona=SimpleNamespace(
+            name="Anna",
+            # `sezioni` sta sul PROFILO, non sull'archivio: e' una parte del
+            # documento d'identita', e non un attributo di chi lo contiene.
+            sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}}))
     scope = {
         "CHANNEL_OPERATOR": set(operator),
         "CHANNEL_VIP": set(vip),
@@ -99,11 +109,13 @@ def _load(operator=(), vip=(), cerchia=(), coda=None, vetrina=None):
             image_queue=coda if coda is not None else CodaFinta(),
             # Il nome della persona e' iniettato dal boot: e' quello che il
             # ritratto usa per chiedere "lei" invece di un soggetto.
-            nome_persona=lambda: "Anna",
-            persona_store=SimpleNamespace(
-                system_block=lambda: "Sono Anna",
-                persona=SimpleNamespace(name="Anna"),
-                sezioni={"vetrina": {**VETRINA_ANNA, **(vetrina or {})}})),
+            nome_persona=lambda: "Anna",),
+        # La persona non passa piu' dal contesto: `cp/persona.py` ne e' il
+        # proprietario e i canali chiedono a lui. Qui un finto con la stessa
+        # forma, perche' il test eserciti il percorso vero e non uno vicino.
+        "persona": SimpleNamespace(
+            persona=lambda: archivio_finto,
+            profilo=lambda: archivio_finto.persona),
         "nuovo_job": nuovo_job,
         "richiesta_immagine": richiesta_immagine,
         "FAMIGLIA_SDXL": FAMIGLIA_SDXL,

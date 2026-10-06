@@ -43,6 +43,7 @@ from shared.channel import (COMANDI_DRIVER, KNOWN_CHANNELS, ChannelGuard,
 from shared.image_jobs import FAMIGLIA_SDXL, nuovo_job, richiesta_immagine
 from shared.image_translation import traduci_scena_immagine
 from shared.instagram_intimacy import compagna_context, musa_context
+from cp import persona
 from shared.persona import audit_reply, build_introduction, should_disclose
 from shared.prompt_immagine import prepara_prompt_canale, richiesta_immagine_smart
 from shared.showcase import (VIETATI_MINORI, conflitti, negativo_ritratto, prompt_ritratto,
@@ -140,7 +141,7 @@ def _serve(*campi):
 
 def monta(app, *, image_queue=None, context_messages=None, context_chars=None,
           num_ctx=None, channel_remember=None, node_list=None,
-          persona_store=None, advanced_config=None, sister_peer=None,
+          advanced_config=None, sister_peer=None,
           record_conversation=None, nome_persona=None):
     """Registra le dieci route del canale, e tiene i riferimenti al boot.
 
@@ -165,7 +166,6 @@ def monta(app, *, image_queue=None, context_messages=None, context_chars=None,
         channel_remember=channel_remember,
         node_list=node_list,
         # Le rotte che parlano col modello e le funzioni che le servono.
-        persona_store=persona_store,
         advanced_config=advanced_config,
         sister_peer=sister_peer,
         record_conversation=record_conversation,
@@ -527,7 +527,7 @@ def _trascrizione(context) -> str:
     "non ricorda" cosa si è detto due battute fa.
     """
     righe = []
-    nome_bot = (_contesto.persona_store.persona.name or "").strip().lower()
+    nome_bot = (persona.profilo().name or "").strip().lower()
     for evento in list(context)[-_contesto.channel_context_messages():]:
         autore = str(evento.get("author", "")).strip()[:40] or "anonimo"
         testo = " ".join(str(evento.get("text", "")).split())[:_contesto.channel_context_chars()]
@@ -590,7 +590,7 @@ def _channel_presentazione(context) -> str | None:
     ultimo = str((context[-1] if context else {}).get("text", "")).strip()
     testo = " ".join(ultimo.split()).lower()
     if any(testo == c or testo.startswith(c + " ") for c in PRESENTAZIONE_COMMANDS):
-        return build_introduction(_contesto.persona_store.persona)
+        return build_introduction(persona.profilo())
     return None
 
 
@@ -653,7 +653,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
         richiesta = richiesta_immagine(ultimo)
         if richiesta is None:
             richiesta = richiesta_immagine_smart(
-                ultimo, contesto=context[:-1], identita=_contesto.persona_store.system_block())
+                ultimo, contesto=context[:-1], identita=persona.persona().system_block())
         if richiesta is None:
             return None
         idea = richiesta["idea"]
@@ -710,7 +710,7 @@ def _channel_immagine(context, *, channel: str, destinazione: str = "",
                 "o erotismo esplicito. Quel livello è riservato alle MUSA.")
     try:
         if richiesta_di_anna:
-            sezioni = getattr(_contesto.persona_store, "sezioni", {}) or {}
+            sezioni = getattr(persona.profilo(), "sezioni", {}) or {}
             vetrina = vetrina_dal_documento({"vetrina": sezioni.get("vetrina", {})})
             # La richiesta **è** la scena di questa generazione: il livello si legge lì,
             # mentre per chiunque altro la vetrina resta quella dichiarata e il negativo
@@ -862,7 +862,7 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
     decisione = should_disclose(ultimo)
     vitalita = mesh_vitality(_contesto.node_list())
     blocco = [
-        _contesto.persona_store.system_block(ultimo, surface=surface, channel=channel),
+        persona.persona().system_block(ultimo, surface=surface, channel=channel),
         f"Massimo {max(0, int(max_chars))} caratteri.",
         ("Rispondi nella lingua dell'ultimo messaggio rivolto a te. "
          "Se è inglese, rispondi in inglese; se è italiano, in italiano. "
@@ -882,7 +882,7 @@ def _channel_reply(*, channel: str, surface: str, context: list, max_chars: int,
             blocco.append(musa_context())
         elif ultimo_autore in CHANNEL_OPERATOR:
             blocco.append(compagna_context())
-    if str(_contesto.persona_store.persona.name or "").strip().lower() == "anna":
+    if str(persona.profilo().name or "").strip().lower() == "anna":
         nota_sorella = _sister_note()
         if nota_sorella:
             blocco.append(nota_sorella)

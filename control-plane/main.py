@@ -70,7 +70,7 @@ from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: t
 from shared import web_search
 from shared.mcp_auth import MIN_TOKEN_LENGTH as MIN_MCP_TOKEN_LENGTH
 from shared.mcp_auth import McpAuthPolicy
-from shared.persona import (PersonaStore, identity_expected, identity_tools_hidden, should_disclose)
+from shared.persona import PersonaStore, identity_expected, should_disclose
 from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
 from shared.image_jobs import (FAMIGLIE_CHECKPOINT, ImmagineQueue)
@@ -99,6 +99,11 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 # BASE_DIR (dirname(dirname(__file__)) arriva allo stesso posto), quindi i
 # percorsi di fallback non cambiano.
 import cp.config as _config
+
+# L'archivio della persona ha un solo proprietario: `cp/persona.py`. Questo import e'
+# in alto e non nel blocco di cablaggio perche' `persona.monta(...)` gira al
+# boot, e un import piu' in basso arriverebbe troppo tardi.
+from cp import persona
 import cp.mesh as mesh
 import cp.mesh as mesh
 # Le funzioni del registro, per nome. Le loro `global` sono quelle di cp.mesh,
@@ -254,7 +259,12 @@ connector_manager = ConnectorManager(on_event=_connector_event)
 # Chi è l'agente, cosa non fa, e quando DEVE dire di essere un'IA. Il documento
 # vive sotto DATA_DIR (volume), quindi l'identità sopravvive ai riavvii; le
 # annotazioni su di sé le aggiunge l'agente stesso col tool persona_note.
-persona_store = PersonaStore.load()
+# L'archivio della persona ha un solo proprietario, `cp/persona.py`. Main non ne
+# tiene una copia: ogni lettura sotto chiama `persona.persona()`, perche' un
+# binding qui si terrebbe l'archivio di quando e' stato preso, e `_reload_persona`
+# lo sostituisce — la copia resterebbe quella vecchia, e i canali avrebbero una
+# persona diversa dal control-plane. E' il bug che quel modulo e' nato per chiudere.
+persona.monta(PersonaStore.load())
 
 
 def _persona_enabled(surface: str | None = None) -> bool:
@@ -274,13 +284,12 @@ def _persona_enabled(surface: str | None = None) -> bool:
 
 def _reload_persona() -> None:
     """Rilegge identità e annotazioni dal disco (dopo un salvataggio in Setup)."""
-    global persona_store
     try:
-        persona_store = PersonaStore.load()
+        ricaricata = persona.ricarica()
         _reload_persona_dream()
         push_log('system', 'Persona ricaricata',
-                 detail=f"name={persona_store.persona.name} "
-                        f"osservazioni={len(persona_store.persona.observations)}",
+                 detail=f"name={ricaricata.persona.name} "
+                        f"osservazioni={len(ricaricata.persona.observations)}",
                  status='success')
     except Exception as e:
         push_log('system', 'Reload persona fallito', str(e), status='warn')
@@ -366,7 +375,7 @@ def _materiale_identita(limit: int = 12) -> dict:
         sociali = []
     memoria.extend(f"Eco sociale anonimo: {testo}" for testo in sociali)
     return {"memoria": memoria,
-            "osservazioni": [str(o.get("text", "")) for o in persona_store.persona.observations],
+            "osservazioni": [str(o.get("text", "")) for o in persona.profilo().observations],
             "guardia": channel_guard.snapshot()}
 
 
@@ -380,12 +389,12 @@ def _initialize_persona_dream():
     """
     global _persona_dream
     _persona_dream = PersonaDream(
-        os.path.dirname(persona_store.path) or ".", _proponi_identita,
+        os.path.dirname(persona.persona().path) or ".", _proponi_identita,
         enabled=_persona_dream_enabled(),
         start_hour=_persona_dream_int("PERSONA_DREAM_START_HOUR", 4),
         end_hour=_persona_dream_int("PERSONA_DREAM_END_HOUR", 7),
         idle_seconds=_persona_dream_int("PERSONA_DREAM_IDLE_S", 1800),
-        nome=persona_store.persona.name,
+        nome=persona.profilo().name,
     )
     return _persona_dream
 
@@ -412,60 +421,35 @@ def _reload_persona_dream() -> None:
     _safe_initialize_persona_dream()
 
 
-def _last_user_text(messages) -> str:
-    """Testo dell'ultimo messaggio utente (le parti multimodali vengono unite)."""
-    for message in reversed(list(messages or [])):
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return " ".join(str(part.get("text", "")) for part in content
-                            if isinstance(part, dict) and part.get("type") == "text")
-        return str(content or "")
-    return ""
-
-
-def _with_persona(messages, user_text: str = "", surface: str | None = None) -> list:
-    """Messaggi con il blocco di identità (e il contesto del mezzo) in testa.
-
-    Se il client ha già un system message il blocco viene APPESO a quello invece
-    di sostituirlo: il prompt dell'utente resta suo, l'identità è un'aggiunta.
-    """
-    blocco = persona_store.system_block(user_text, surface=surface)
-    out = [dict(m) if isinstance(m, dict) else m for m in (messages or [])]
-    for index, message in enumerate(out):
-        if (isinstance(message, dict) and message.get("role") == "system"
-                and isinstance(message.get("content"), str)):
-            out[index] = {**message, "content": message["content"].rstrip() + "\n\n" + blocco}
-            return out
-    return [{"role": "system", "content": blocco}] + out
 
 
 
 
 def _tool_persona_get(args) -> str:
-    persona = persona_store.persona
-    righe = [f"Identità: {persona.name} (IA)", f"Scopo: {persona.purpose}"]
-    if persona.values:
-        righe.append("Valori: " + "; ".join(persona.values))
-    if persona.boundaries:
-        righe.append("Confini: " + "; ".join(persona.boundaries))
-    if persona.capabilities:
-        righe.append("Capacità reali: " + "; ".join(persona.capabilities))
-    if persona.limitations:
-        righe.append("Limiti reali: " + "; ".join(persona.limitations))
-    if persona.observations:
+    # La variabile locale si chiama `profilo` e non `persona`: il modulo che
+    # possiede l'archivio si chiama `persona`, e una variabile locale con lo stesso
+    # nome lo coprirebbe — diventando `persona = persona.profilo()`, che e' un
+    # NameError travestito da variabile locale.
+    profilo = persona.profilo()
+    righe = [f"Identità: {profilo.name} (IA)", f"Scopo: {profilo.purpose}"]
+    if profilo.values:
+        righe.append("Valori: " + "; ".join(profilo.values))
+    if profilo.boundaries:
+        righe.append("Confini: " + "; ".join(profilo.boundaries))
+    if profilo.capabilities:
+        righe.append("Capacità reali: " + "; ".join(profilo.capabilities))
+    if profilo.limitations:
+        righe.append("Limiti reali: " + "; ".join(profilo.limitations))
+    if profilo.observations:
         righe.append("Annotazioni recenti: "
-                     + "; ".join(o.get("text", "") for o in persona.observations[-5:]))
+                     + "; ".join(o.get("text", "") for o in profilo.observations[-5:]))
     return "\n".join(righe)
 
 
 def _tool_persona_note(args) -> str:
     args = args or {}
-    osservazione = persona_store.observe(args.get("note", ""),
-                                        args.get("kind", "self_observation"))
+    osservazione = persona.persona().observe(args.get("note", ""),
+                                             args.get("kind", "self_observation"))
     if osservazione is None:
         return ("Nessuna annotazione salvata: nota vuota, oppure identica all'ultima "
                 "già registrata (il self-model non accumula ripetizioni).")
@@ -659,7 +643,7 @@ def _nome_persona() -> str:
     il documento non ne dichiara uno, e allora restano le formule esplicite
     ("di te"): `richiesta_di_se` le legge entrambe.
     """
-    return str(getattr(getattr(persona_store, "persona", None), "name", "")).strip()
+    return str(getattr(persona.profilo(), "name", "") or "").strip()
 
 
 
@@ -736,7 +720,7 @@ def _load_tasks_from_db():
 # In cp/assistant.py: dove sta il testo in un chunk e in un JSON OpenAI, e
 # il caso `think=false` che rimanda tutto in `reasoning` lasciando `content`
 # vuoto. Senza stato, con i due contatori di rate-limit dentro il modulo.
-from cp.assistant import _assistant_text, _normalize_assistant_message
+from cp.assistant import _assistant_text
 # ── MEMORY ────────────────────────────────────────────────────────────────────
 
 
@@ -1294,22 +1278,6 @@ def _handlers_nativi() -> dict:
     }
 
 
-def _catalogo_nativi(superficie: str = "") -> list:
-    """Il catalogo dei tool nativi che QUESTA superficie può vedere.
-
-    `workbench` (la console usata come banco di lavoro) non riceve i tool
-    dell'identità: offrirli invita il modello a chiedere chi è, e la risposta
-    arriva con il carattere delle stanze proprio dove non deve. Misurato il
-    2026-09-23, la prima prova di `workbench`: "chi sei?" → `tool_call:
-    persona_get` → "Sono Aurora, un'IA che tiene compagnia a una cerchia
-    ristretta…". La regola (quali tool, e perché) sta in `shared/persona.py`.
-    """
-    nascosti = identity_tools_hidden(superficie)
-    if not nascosti:
-        return list(BUILTIN_TOOLS)
-    return [tool for tool in BUILTIN_TOOLS
-            if tool.get("function", {}).get("name") not in nascosti]
-
 
 def _execute_tool_call(tool_name: str, tool_args) -> str:
     if isinstance(tool_args, str):
@@ -1396,7 +1364,7 @@ from cp.canali import monta as monta_canali
 # `imposta_handlers` registra dove stanno i tool nativi. `cp/chat.py` non puo'
 # importarli da qui — creerebbe un ciclo, perche' questo file lo importa —
 # quindi il puntatore glielo passiamo una volta sola, dopo la definizione.
-from cp.chat import (imposta_handlers, _inference_urls, _chunk_finale, _stream_direct, _decide_thinking, _deadline_exceeded, _tool_del_client, _risposta_solo_tool_del_client)
+from cp.chat import (_catalogo_nativi, _chunk_finale, _compress_prompt_via_omniroute, _deadline_exceeded, _decide_thinking, _finalize_task, _inference_urls, _last_user_text, _native_direct_enabled, _risposta_solo_tool_del_client, _stream_direct, _tool_del_client, _try_omniroute_fallback, _with_persona, imposta_handlers)
 # La memoria e le sue voci stanno in cp/memoria.py: il file, il tetto, l'ordine e
 # il bridge. `memory_sync` e' di li' e si ricarica da li', quindi la funzione che
 # lo ricarica non ha piu' un `global` da dichiarare.
@@ -1479,7 +1447,7 @@ def persona_status():
     agente?" prima di metterlo davanti a una persona. `enabled` dice se il
     blocco viene davvero iniettato nelle richieste.
     """
-    payload = persona_store.describe()
+    payload = persona.persona().describe()
     payload["enabled"] = _persona_enabled()
     payload["dream"] = (_persona_dream.status() if _persona_dream is not None
                         else {"enabled": False, "running": False, "pending_review": 0})
@@ -1530,7 +1498,7 @@ def persona_dream_review(dream_id):
     if azione == "promote":
         for proposta in candidata.get("proposals", []):
             testo = str(proposta.get("text", ""))
-            if persona_store.observe(testo, str(proposta.get("kind", "self_observation")),
+            if persona.persona().observe(testo, str(proposta.get("kind", "self_observation")),
                                      persist=False):
                 promosse.append(testo)
             else:
@@ -1539,7 +1507,7 @@ def persona_dream_review(dream_id):
             # Un salvataggio solo per tutte le annotazioni: l'identità è un
             # documento, non un log da appendere una riga alla volta.
             if promosse:
-                persona_store.save()
+                persona.persona().save()
         except Exception as e:
             return jsonify({"ok": False, "error": f"identità non salvata: {str(e)[:160]}"}), 500
     try:
@@ -1551,13 +1519,13 @@ def persona_dream_review(dream_id):
     push_log('dream', f'Sogno di identità revisionato: {record.get("status")}',
              detail=json.dumps({"id": dream_id, "promoted": promosse,
                                 "skipped": scartate,
-                                "identity_version": persona_store.persona.version},
+                                "identity_version": persona.profilo().version},
                                ensure_ascii=False)[:2000],
              source='persona-dream',
              status=('success' if azione == "promote" else 'info'))
     return jsonify({"ok": True, "status": record.get("status"), "reviewed_at":
                     record.get("reviewed_at"), "promoted": promosse, "skipped": scartate,
-                    "identity_version": persona_store.persona.version})
+                    "identity_version": persona.profilo().version})
 
 
 @app.route('/persona/dream', methods=['POST'])
@@ -1690,7 +1658,7 @@ def _post_persona_block(autore: str) -> str:
     """Il blocco di identità della persona che posta (cache per autore)."""
     autore = (autore or "").strip().lower()
     if autore == "anna":
-        return persona_store.system_block()
+        return persona.persona().system_block()
     if autore not in _post_persona_blocks:
         blocco = ""
         percorso = _POST_PERSONA_FILES.get(autore)
@@ -2044,12 +2012,6 @@ def sandbox_status():
 
 
 
-def _native_direct_enabled(model):
-    # Mixed endpoint lists use the common OpenAI protocol, not Ollama /api/chat.
-    return (INFERENCE_BACKEND.strip().lower() == "ollama"
-            and len(_inference_urls()) == 1
-            and _use_native_chat_fallback(model))
-
 
 def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: bool = False,
                    node_id: str = "", builtin_tools=None) -> dict:
@@ -2209,71 +2171,6 @@ def _tool_ask_aurora(args: dict) -> str:
         return ("Aurora non ha risposto: il control-plane federato "
                 f"'{peer.get('label') or peer.get('peer_id', '?')[:12]}' non è raggiungibile.")
     return _extract_federated_text(result)
-
-def _try_omniroute_fallback(data: dict, timeout: int = 60):
-    """Ultimo livello di fallback: inoltra la richiesta chat/completions cosi'
-    com'e' a OmniRoute (gateway verso 278+ provider esterni, molti free-tier),
-    chiamato SOLO quando mesh e federazione hanno gia' fallito entrambe.
-    OMNIROUTE_API_KEY e' opzionale: l'immagine ufficiale risponde gia' con
-    provider free-tier di default senza alcuna configurazione — la chiave
-    va aggiunta solo se/quando l'utente collega provider propri dalla
-    dashboard OmniRoute. OMNIROUTE_ENABLED=false disattiva del tutto questo
-    livello. Ritorna None su qualunque errore, cosi' il chiamante puo'
-    proseguire con l'ultimo fallback locale (ollama diretto) invariato."""
-    if not OMNIROUTE_ENABLED:
-        return None
-    payload = {**data, "model": data.get("model") or OMNIROUTE_MODEL, "stream": False}
-    headers = {"Authorization": f"Bearer {OMNIROUTE_API_KEY}"} if OMNIROUTE_API_KEY else {}
-    if PROMPT_COMPRESSION_ENABLED:
-        headers["x-omniroute-compression"] = PROMPT_COMPRESSION_MODE
-    try:
-        r = requests.post(
-            f"{OMNIROUTE_URL}/v1/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        result = r.json()
-        if isinstance(result, dict) and not result.get("error"):
-            return result
-    except Exception as e:
-        push_log('inter_node_message', 'OmniRoute fallback fallito', str(e), status='warn')
-    return None
-
-def _compress_prompt_via_omniroute(text: str) -> str:
-    """Comprime un prompt lungo destinato a un nodo della mesh LOCALE (non
-    OmniRoute) usando l'engine Caveman reale di OmniRoute (POST
-    /api/compression/preview), invece di reimplementarne le regole a mano.
-    Chiamata solo se PROMPT_COMPRESSION_ENABLED e il testo supera
-    PROMPT_COMPRESSION_MIN_CHARS. Fail-open: qualunque errore (OmniRoute giu',
-    endpoint non disponibile, risposta inattesa) ritorna il testo originale
-    invariato, mai un'eccezione verso il chiamante."""
-    if not (PROMPT_COMPRESSION_ENABLED and OMNIROUTE_ENABLED):
-        return text
-    if len(text) < PROMPT_COMPRESSION_MIN_CHARS:
-        return text
-    try:
-        r = requests.post(
-            f"{OMNIROUTE_URL}/api/compression/preview",
-            json={"messages": [{"role": "user", "content": text}], "mode": PROMPT_COMPRESSION_MODE},
-            timeout=10,
-        )
-        r.raise_for_status()
-        result = r.json()
-        compressed = result.get("compressed", "")
-        # La preview include il prefisso "user: " del ruolo — lo toglie prima
-        # di riusare il testo come prompt vero e proprio verso il nodo.
-        if compressed.startswith("user: "):
-            compressed = compressed[len("user: "):]
-        if compressed and result.get("savingsPct", 0) > 0:
-            push_log('system', 'Prompt compresso (Caveman)',
-                     f'{result.get("originalTokens")}->{result.get("compressedTokens")} token '
-                     f'({result.get("savingsPct")}% risparmio)', status='info')
-            return compressed
-    except Exception as e:
-        push_log('inter_node_message', 'Compressione prompt fallita, invio originale', str(e), status='warn')
-    return text
 
 # ── /v1/models ────────────────────────────────────────────────────────────────
 @app.route('/models/capabilities')
@@ -2746,60 +2643,6 @@ def v1_chat_completions():
 
     _finalize_task(task, task_id, "ollama-direct", model, prompt, direct_result)
     return _respond_result(direct_result)
-
-def _finalize_task(task, task_id, node_id, model, prompt, result_json):
-    if _is_error_payload(result_json):
-        # Un errore NON e' un completamento: niente memoria, niente log di
-        # successo, stato failed. Prima finiva come "done" con HTTP 200, quindi
-        # un fallimento era indistinguibile da un successo senza leggere il
-        # corpo (osservato in sessione di test: due timeout chiusi come done).
-        detail = str(result_json.get("error"))[:300]
-        task["status"] = "failed"
-        task["error"] = detail
-        task["result"] = result_json
-        task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        db.update_task(task_id, "failed", error=detail)
-        push_log('inter_node_message', f'task {task_id} FAILED su {node_id[:12]}',
-                 detail, source=node_id[:12], target='webui', status='failed')
-        return
-    # Normalizza PRIMA di leggere e registrare: i chiamanti fanno
-    # `jsonify(result_json)` subito dopo questa funzione, quindi cio' che
-    # sistemiamo qui e' anche cio' che riceve il client. Copre in un punto solo
-    # tutti i percorsi non-stream (nodo, federazione, omniroute, ollama diretto).
-    if isinstance(result_json, dict):
-        _normalize_assistant_message(result_json, f"task {task_id}")
-    try:
-        reply_text = result_json["choices"][0]["message"]["content"]
-    except Exception:
-        reply_text = json.dumps(result_json)[:300]
-    # Quando il modello chiede un tool, `content` è `null` — è lo standard OpenAI,
-    # non un modello rotto. Il `try` qui sopra non lo intercetta, perché
-    # `["content"]` su una chiave presente che vale None non solleva nulla: il
-    # None arriva fino a `reply_text[:500]` e fa TypeError, cioè un 500 su
-    # /v1/chat/completions ogni volta che il modello usa un tool. Il testo in quel
-    # caso è il nome del tool: è quello che finisce in memoria e nei log, e
-    # vuotolo lascerebbe "webui_response" senza contenuto.
-    if reply_text is None:
-        chiamate = result_json.get("choices", [{}])[0].get("message", {}).get(
-            "tool_calls") or []
-        reply_text = ", ".join(
-            str((c.get("function") or {}).get("name") or c.get("name") or "?")
-            for c in chiamate) or "(nessun testo: il modello ha chiesto un tool)"
-    task["status"]       = "done"
-    task["result"]       = result_json
-    task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.update_task(task_id, "done", result=json.dumps(result_json))
-    ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _memory_append({"ts": ts_now, "type": "webui_prompt", "content": prompt,
-                    "model": model, "task_id": task_id, "node_id": node_id, "source": "webui",
-                    "status": "active", "priority": 2})
-    _memory_append({"ts": ts_now, "type": "webui_response", "content": reply_text[:500],
-                    "model": model, "task_id": task_id, "node_id": node_id, "source": "webui",
-                    "status": "active", "priority": 2})
-    push_log('inter_node_message', f'task {task_id} done', reply_text[:120],
-             source=node_id[:12], target='webui', status='success')
-    _notify_bridge("task", {"from": node_id[:12], "to": "cp", "type": "task", "label": f"reply: {reply_text[:40]}"})
-    _notify_bridge("memory_sync", {"from": node_id[:12], "to": "cp", "entries": 2, "label": "conversation saved"})
 
 # ── OMEGA MCP ─────────────────────────────────────────────────────────────────
 _health_memory_cache = {"ts": 0.0, "count": 0}
@@ -3730,7 +3573,7 @@ def get_advanced_config():
 def set_advanced_config():
     global OLLAMA_URL, DEFAULT_MODEL
     data = request.get_json(force=True, silent=True) or {}
-    sec, mesh, ollama, auth = (
+    sec, sezione_mesh, ollama, auth = (
         data.get('security',{}), data.get('mesh',{}),
         data.get('ollama',{}),   data.get('_authority',{})
     )
@@ -3741,9 +3584,9 @@ def set_advanced_config():
         advanced_config['ollama']['url'] = ollama['url']; OLLAMA_URL = ollama['url']
     if 'defaultModel' in ollama:
         advanced_config['ollama']['defaultModel'] = ollama['defaultModel']; DEFAULT_MODEL = ollama['defaultModel']
-    if 'nodeEndpoints' in mesh:
-        advanced_config['mesh']['nodeEndpoints'] = mesh['nodeEndpoints']
-        for ep in mesh['nodeEndpoints']:
+    if 'nodeEndpoints' in sezione_mesh:
+        advanced_config['mesh']['nodeEndpoints'] = sezione_mesh['nodeEndpoints']
+        for ep in sezione_mesh['nodeEndpoints']:
             _known_endpoints.add(_normalize_endpoint(ep))
     if 'serverUrl' in auth: advanced_config['_authority']['serverUrl'] = auth['serverUrl']
     if 'enabled'   in auth: advanced_config['_authority']['enabled']   = bool(auth['enabled'])
@@ -4884,7 +4727,7 @@ def _initialize_development_dream():
 instagram_vips, instagram_memory, instagram_reply_outbox = monta(
     app,
     image_queue=image_queue, advanced_config=advanced_config,
-    connector_manager=connector_manager, persona_store=persona_store,
+    connector_manager=connector_manager,
     diario=diario, nome_persona=_nome_persona, sister_peer=_sister_peer,
     record_conversation=_record_conversation)
 
@@ -4968,7 +4811,7 @@ monta_canali(app, image_queue=image_queue,
              context_messages=_channel_context_messages,
              context_chars=_channel_context_chars, num_ctx=_channel_num_ctx,
              node_list=_node_list,
-             persona_store=persona_store, advanced_config=advanced_config,
+             advanced_config=advanced_config,
              sister_peer=_sister_peer, record_conversation=_record_conversation,
              nome_persona=_nome_persona)
 

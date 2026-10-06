@@ -347,12 +347,12 @@ class WiringTests(unittest.TestCase):
 
     def test_promuovere_scrive_nell_identita_solo_dopo(self):
         body = ast.unparse(self.functions["persona_dream_review"])
-        self.assertIn("persona_store.observe", body)
-        self.assertIn("persona_store.save", body)
+        self.assertIn("persona.persona().observe", body)
+        self.assertIn("persona.persona().save", body)
         self.assertIn("journal.review", body)
         # L'identità si scrive PRIMA di registrare la revisione: il contrario
         # marcherebbe "promossa" una proposta mai entrata nel documento.
-        self.assertLess(body.index("persona_store.save"), body.index("journal.review"))
+        self.assertLess(body.index("persona.persona().save"), body.index("journal.review"))
 
     def test_il_sogno_non_parte_se_e_spento(self):
         body = ast.unparse(self.functions["persona_dream_run"])
@@ -370,7 +370,7 @@ class WiringTests(unittest.TestCase):
     def test_materiale_solo_da_memoria_identita_e_guardia(self):
         body = ast.unparse(self.functions["_materiale_identita"])
         self.assertIn("_load_memory", body)
-        self.assertIn("persona_store.persona.observations", body)
+        self.assertIn("persona.profilo().observations", body)
         self.assertIn("channel_guard.snapshot", body)
 
     def test_scheduler_avviato_e_gated_dall_idle(self):
@@ -402,9 +402,9 @@ class WiringTests(unittest.TestCase):
 
     def test_il_diario_sta_accanto_al_documento_di_identita(self):
         body = ast.unparse(self.functions["_initialize_persona_dream"])
-        self.assertIn("os.path.dirname(persona_store.path)", body)
+        self.assertIn("os.path.dirname(persona.persona().path)", body)
         self.assertIn("_persona_dream_enabled()", body)
-        self.assertIn("persona_store.persona.name", body)
+        self.assertIn("persona.profilo().name", body)
         self.assertIn("_persona_dream_int", body)
 
     def test_il_reload_in_setup_riallinea_il_sogno(self):

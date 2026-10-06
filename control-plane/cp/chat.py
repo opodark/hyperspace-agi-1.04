@@ -60,15 +60,24 @@
 import json
 import os
 import time
+from datetime import datetime, timezone
 
 import requests
 from flask import jsonify
 
 import shared.db as db
-from cp.assistant import _assistant_text
-from cp.budget import _inference_timeout
+from cp import persona as _persona_modulo
+from cp.assistant import _assistant_text, _normalize_assistant_message
+from cp.budget import _inference_timeout, _is_error_payload
 from cp.log import push_log
-from cp.config import OLLAMA_URL
+from cp.config import (INFERENCE_BACKEND, OLLAMA_URL, OMNIROUTE_API_KEY,
+                       OMNIROUTE_ENABLED, OMNIROUTE_MODEL, OMNIROUTE_URL,
+                       PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MIN_CHARS,
+                       PROMPT_COMPRESSION_MODE)
+from cp.memoria import _memory_append, _notify_bridge
+from cp.model_caps import _use_native_chat_fallback
+from cp.tools_defs import BUILTIN_TOOLS
+from shared.persona import identity_tools_hidden
 
 # I tool nativi disponibili: il modello li vede nel catalogo, e un tool che non ha
 # un handler non deve essere proposto. Resta in main.py perche' gli handler
@@ -278,3 +287,195 @@ def _risposta_solo_tool_del_client(resp, tool_calls):
         messaggio["content"] = ""
     scelte[0]["finish_reason"] = "tool_calls"
     return risposta
+
+# ── chi era l'ultima persona, e se la persona e' attiva ───────────────────
+
+def _last_user_text(messages) -> str:
+    """Testo dell'ultimo messaggio utente (le parti multimodali vengono unite)."""
+    for message in reversed(list(messages or [])):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(str(part.get("text", "")) for part in content
+                            if isinstance(part, dict) and part.get("type") == "text")
+        return str(content or "")
+    return ""
+
+
+def _persona():
+    """L'archivio della persona di ADESSO.
+
+    Non un import per nome: `cp/persona.py` ricarica l'archivio quando il nome
+    o il file della persona cambiano dalla tab Setup, e un binding tenuto qui
+    continuerebbe a usare la persona precedente.
+    """
+    return _persona_modulo.persona()
+
+
+def _with_persona(messages, user_text: str = "", surface: str | None = None) -> list:
+    """Messaggi con il blocco di identità (e il contesto del mezzo) in testa.
+
+    Se il client ha già un system message il blocco viene APPESO a quello invece
+    di sostituirlo: il prompt dell'utente resta suo, l'identità è un'aggiunta.
+    """
+    blocco = _persona().system_block(user_text, surface=surface)
+    out = [dict(m) if isinstance(m, dict) else m for m in (messages or [])]
+    for index, message in enumerate(out):
+        if (isinstance(message, dict) and message.get("role") == "system"
+                and isinstance(message.get("content"), str)):
+            out[index] = {**message, "content": message["content"].rstrip() + "\n\n" + blocco}
+            return out
+    return [{"role": "system", "content": blocco}] + out
+
+# ── il catalogo dei tool che questa superficie puo' vedere ────────────────
+
+def _catalogo_nativi(superficie: str = "") -> list:
+    """Il catalogo dei tool nativi che QUESTA superficie può vedere.
+
+    `workbench` (la console usata come banco di lavoro) non riceve i tool
+    dell'identità: offrirli invita il modello a chiedere chi è, e la risposta
+    arriva con il carattere delle stanze proprio dove non deve. Misurato il
+    2026-09-23, la prima prova di `workbench`: "chi sei?" → `tool_call:
+    persona_get` → "Sono Aurora, un'IA che tiene compagnia a una cerchia
+    ristretta…". La regola (quali tool, e perché) sta in `shared/persona.py`.
+    """
+    nascosti = identity_tools_hidden(superficie)
+    if not nascosti:
+        return list(BUILTIN_TOOLS)
+    return [tool for tool in BUILTIN_TOOLS
+            if tool.get("function", {}).get("name") not in nascosti]
+
+# ── la compressione del prompt e il ripiego su OmniRoute ──────────────────
+
+def _try_omniroute_fallback(data: dict, timeout: int = 60):
+    """Ultimo livello di fallback: inoltra la richiesta chat/completions cosi'
+    com'e' a OmniRoute (gateway verso 278+ provider esterni, molti free-tier),
+    chiamato SOLO quando mesh e federazione hanno gia' fallito entrambe.
+    OMNIROUTE_API_KEY e' opzionale: l'immagine ufficiale risponde gia' con
+    provider free-tier di default senza alcuna configurazione — la chiave
+    va aggiunta solo se/quando l'utente collega provider propri dalla
+    dashboard OmniRoute. OMNIROUTE_ENABLED=false disattiva del tutto questo
+    livello. Ritorna None su qualunque errore, cosi' il chiamante puo'
+    proseguire con l'ultimo fallback locale (ollama diretto) invariato."""
+    if not OMNIROUTE_ENABLED:
+        return None
+    payload = {**data, "model": data.get("model") or OMNIROUTE_MODEL, "stream": False}
+    headers = {"Authorization": f"Bearer {OMNIROUTE_API_KEY}"} if OMNIROUTE_API_KEY else {}
+    if PROMPT_COMPRESSION_ENABLED:
+        headers["x-omniroute-compression"] = PROMPT_COMPRESSION_MODE
+    try:
+        r = requests.post(
+            f"{OMNIROUTE_URL}/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        result = r.json()
+        if isinstance(result, dict) and not result.get("error"):
+            return result
+    except Exception as e:
+        push_log('inter_node_message', 'OmniRoute fallback fallito', str(e), status='warn')
+    return None
+
+
+def _compress_prompt_via_omniroute(text: str) -> str:
+    """Comprime un prompt lungo destinato a un nodo della mesh LOCALE (non
+    OmniRoute) usando l'engine Caveman reale di OmniRoute (POST
+    /api/compression/preview), invece di reimplementarne le regole a mano.
+    Chiamata solo se PROMPT_COMPRESSION_ENABLED e il testo supera
+    PROMPT_COMPRESSION_MIN_CHARS. Fail-open: qualunque errore (OmniRoute giu',
+    endpoint non disponibile, risposta inattesa) ritorna il testo originale
+    invariato, mai un'eccezione verso il chiamante."""
+    if not (PROMPT_COMPRESSION_ENABLED and OMNIROUTE_ENABLED):
+        return text
+    if len(text) < PROMPT_COMPRESSION_MIN_CHARS:
+        return text
+    try:
+        r = requests.post(
+            f"{OMNIROUTE_URL}/api/compression/preview",
+            json={"messages": [{"role": "user", "content": text}], "mode": PROMPT_COMPRESSION_MODE},
+            timeout=10,
+        )
+        r.raise_for_status()
+        result = r.json()
+        compressed = result.get("compressed", "")
+        # La preview include il prefisso "user: " del ruolo — lo toglie prima
+        # di riusare il testo come prompt vero e proprio verso il nodo.
+        if compressed.startswith("user: "):
+            compressed = compressed[len("user: "):]
+        if compressed and result.get("savingsPct", 0) > 0:
+            push_log('system', 'Prompt compresso (Caveman)',
+                     f'{result.get("originalTokens")}->{result.get("compressedTokens")} token '
+                     f'({result.get("savingsPct")}% risparmio)', status='info')
+            return compressed
+    except Exception as e:
+        push_log('inter_node_message', 'Compressione prompt fallita, invio originale', str(e), status='warn')
+    return text
+
+# ── chiudere un task: la risposta che il modello non da' ──────────────────
+
+def _finalize_task(task, task_id, node_id, model, prompt, result_json):
+    if _is_error_payload(result_json):
+        # Un errore NON e' un completamento: niente memoria, niente log di
+        # successo, stato failed. Prima finiva come "done" con HTTP 200, quindi
+        # un fallimento era indistinguibile da un successo senza leggere il
+        # corpo (osservato in sessione di test: due timeout chiusi come done).
+        detail = str(result_json.get("error"))[:300]
+        task["status"] = "failed"
+        task["error"] = detail
+        task["result"] = result_json
+        task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        db.update_task(task_id, "failed", error=detail)
+        push_log('inter_node_message', f'task {task_id} FAILED su {node_id[:12]}',
+                 detail, source=node_id[:12], target='webui', status='failed')
+        return
+    # Normalizza PRIMA di leggere e registrare: i chiamanti fanno
+    # `jsonify(result_json)` subito dopo questa funzione, quindi cio' che
+    # sistemiamo qui e' anche cio' che riceve il client. Copre in un punto solo
+    # tutti i percorsi non-stream (nodo, federazione, omniroute, ollama diretto).
+    if isinstance(result_json, dict):
+        _normalize_assistant_message(result_json, f"task {task_id}")
+    try:
+        reply_text = result_json["choices"][0]["message"]["content"]
+    except Exception:
+        reply_text = json.dumps(result_json)[:300]
+    # Quando il modello chiede un tool, `content` è `null` — è lo standard OpenAI,
+    # non un modello rotto. Il `try` qui sopra non lo intercetta, perché
+    # `["content"]` su una chiave presente che vale None non solleva nulla: il
+    # None arriva fino a `reply_text[:500]` e fa TypeError, cioè un 500 su
+    # /v1/chat/completions ogni volta che il modello usa un tool. Il testo in quel
+    # caso è il nome del tool: è quello che finisce in memoria e nei log, e
+    # vuotolo lascerebbe "webui_response" senza contenuto.
+    if reply_text is None:
+        chiamate = result_json.get("choices", [{}])[0].get("message", {}).get(
+            "tool_calls") or []
+        reply_text = ", ".join(
+            str((c.get("function") or {}).get("name") or c.get("name") or "?")
+            for c in chiamate) or "(nessun testo: il modello ha chiesto un tool)"
+    task["status"]       = "done"
+    task["result"]       = result_json
+    task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.update_task(task_id, "done", result=json.dumps(result_json))
+    ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _memory_append({"ts": ts_now, "type": "webui_prompt", "content": prompt,
+                    "model": model, "task_id": task_id, "node_id": node_id, "source": "webui",
+                    "status": "active", "priority": 2})
+    _memory_append({"ts": ts_now, "type": "webui_response", "content": reply_text[:500],
+                    "model": model, "task_id": task_id, "node_id": node_id, "source": "webui",
+                    "status": "active", "priority": 2})
+    push_log('inter_node_message', f'task {task_id} done', reply_text[:120],
+             source=node_id[:12], target='webui', status='success')
+    _notify_bridge("task", {"from": node_id[:12], "to": "cp", "type": "task", "label": f"reply: {reply_text[:40]}"})
+    _notify_bridge("memory_sync", {"from": node_id[:12], "to": "cp", "entries": 2, "label": "conversation saved"})
+
+# ── il backend diretto, quando non c'e' un nodo ───────────────────────────
+
+def _native_direct_enabled(model):
+    # Mixed endpoint lists use the common OpenAI protocol, not Ollama /api/chat.
+    return (INFERENCE_BACKEND.strip().lower() == "ollama"
+            and len(_inference_urls()) == 1
+            and _use_native_chat_fallback(model))

@@ -280,7 +280,7 @@ class PersonaWiringTests(unittest.TestCase):
     def test_la_route_persona_espone_lo_stato(self):
         self.assertIn("persona_status", self.functions)
         body = ast.unparse(self.functions["persona_status"])
-        self.assertIn("persona_store.describe", body)
+        self.assertIn("persona.persona().describe", body)
         self.assertIn("_persona_enabled", body)
 
     def test_i_tool_di_identita_sono_pubblicati_e_dispatchati(self):

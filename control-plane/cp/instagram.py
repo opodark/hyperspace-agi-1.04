@@ -41,6 +41,7 @@ from flask import (Blueprint, Response, jsonify, request,
                    send_from_directory)
 
 from cp.budget import _inference_timeout
+from cp import persona
 from cp.canali import _channel_int
 from cp.config import (DIARIO_FILE, DIARIO_IMMAGINI_DIR, INSTAGRAM_LANGUAGE_CODEX,
                        INSTAGRAM_MEMORY_FILE, INSTAGRAM_REPLY_OUTBOX_FILE,
@@ -125,14 +126,13 @@ def _serve(*campi):
 
 
 def _contesto_iniziale(*, image_queue, advanced_config, connector_manager,
-                       persona_store, diario, nome_persona, sister_peer,
+                       diario, nome_persona, sister_peer,
                        record_conversation, dream_publish_lock=None):
     """Costruisce il contesto. Chiamata da `monta()`, non da fuori."""
     return SimpleNamespace(
         image_queue=image_queue,
         advanced_config=advanced_config,
         connector_manager=connector_manager,
-        persona_store=persona_store,
         diario=diario,
         nome_persona=nome_persona,
         sister_peer=sister_peer,
@@ -240,7 +240,7 @@ def _blueprint() -> Blueprint:
 
 def monta(app, *, vip_file=None, memory_file=None, outbox_file=None,
           image_queue=None, advanced_config=None, connector_manager=None,
-          persona_store=None, diario=None, nome_persona=None, sister_peer=None,
+          diario=None, nome_persona=None, sister_peer=None,
           record_conversation=None, dream_publish_lock=None):
     """Apre i tre store e registra le route. Restituisce i tre store.
 
@@ -271,7 +271,7 @@ def monta(app, *, vip_file=None, memory_file=None, outbox_file=None,
     global _contesto
     _contesto = _contesto_iniziale(
         image_queue=image_queue, advanced_config=advanced_config,
-        connector_manager=connector_manager, persona_store=persona_store,
+        connector_manager=connector_manager,
         diario=diario, nome_persona=nome_persona, sister_peer=sister_peer,
         record_conversation=record_conversation,
         dream_publish_lock=dream_publish_lock)
@@ -330,7 +330,7 @@ def avvia() -> None:
     vivi che scrivono su file. Qui la scelta e' esplicita e si vede.
     """
     _serve("image_queue", "advanced_config", "connector_manager",
-           "persona_store", "diario", "nome_persona", "sister_peer",
+           "diario", "nome_persona", "sister_peer",
            "record_conversation")
     _ensure_instagram_reply_started()
     _ensure_instagram_poll_started()
@@ -343,7 +343,7 @@ def avvia() -> None:
 @_webhook_bp.route("/instagram/webhook", methods=["GET", "POST"])
 def instagram_webhook():
     _serve("image_queue", "advanced_config", "connector_manager",
-          "persona_store", "diario", "nome_persona", "sister_peer",
+          "diario", "nome_persona", "sister_peer",
           "record_conversation")
     if request.method == 'GET':
         expected = os.getenv("INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "").strip()
@@ -726,7 +726,7 @@ def _queue_instagram_creator_image(sender_id: str, text: str, vip: dict) -> bool
     richiesta = richiesta_immagine(text)
     if richiesta is None:
         richiesta = richiesta_immagine_smart(
-            text, identita=_contesto.persona_store.system_block())
+            text, identita=persona.persona().system_block())
     if not richiesta or not richiesta.get("idea"):
         return False
     idea = str(richiesta["idea"])
@@ -800,7 +800,7 @@ def _job_ritratto_instagram(sender_id: str, idea: str, richiedente: str,
     modello. Accodare e tacere darebbe un'immagine castigata senza che nessuno sappia
     perché; prometterla e non accodarla sarebbe peggio.
     """
-    documento = {"vetrina": (getattr(_contesto.persona_store, "sezioni", {}) or {}).get("vetrina", {})}
+    documento = {"vetrina": (getattr(persona.profilo(), "sezioni", {}) or {}).get("vetrina", {})}
     vetrina = vetrina_dal_documento(documento)
     esplicito = livello in ("creatore", "musa")
     variante = {**vetrina, "scena": idea}
