@@ -109,7 +109,7 @@ from cp.mesh import (_best_endpoint, _invalidate_fleet_scores, _known_endpoints,
                      _load_aliases_from_db, _load_nodes_from_db, _node_ids_with_model,
                      _node_list, _node_ref_for, _node_score, _normalize_endpoint,
                      _parse_model_node_ref, _record_routing_pick, _register_local_node,
-                     _routing_scores, _nodes_by_id)
+                     _routing_scores)
 from cp.config import (                        _AUTHORITY_ENABLED,
                         _AUTHORITY_URL,
                         CODE_SERVER_PORT,
@@ -214,14 +214,8 @@ from cp.model_caps import _use_native_chat_fallback
 
 
 tasks: dict = {}
-_synced_memory_keys: set = set()
 _last_discarded_warn_ids: set = set()  # throttling per il log "nodo senza endpoint"
 
-hb_state = {
-    "cycle": 0, "last_tick": None, "last_conn": None,
-    "last_memory_sync": None,
-    "nodes_seen": [], "running": False,
-}
 
 advanced_config = {
     "ollama":     {"url": OLLAMA_URL, "defaultModel": DEFAULT_MODEL},
@@ -969,7 +963,7 @@ def _aggregate_mesh_models(force: bool = False) -> dict:
 
 # ── SSE HEADERS ───────────────────────────────────────────────────────────────
 # In cp/http.py: gli header dello stream e i guard delle rotte admin.
-from cp.http import _is_valid_json_response, _sse_headers
+from cp.http import _sse_headers
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
 # `push_log` e LOG_TYPES sono in cp/log.py: e' la funzione piu' chiamata del
@@ -1413,14 +1407,21 @@ from cp import memoria as _memoria
 # `_reload_memory_sync`, non un `global` — un `global` riassegnerebbe il nome in
 # questo namespace e lascerebbe il modulo con l'oggetto vecchio.
 memory_sync = _memoria.memory_sync
-from cp.memoria import (_ts_to_iso, _notify_bridge, _load_memory, _save_memory, _memory_append)
+from cp.memoria import _load_memory, _memory_append, _notify_bridge, _ts_to_iso
 # Le chiamate all'inferenza stanno in cp/inferenza.py: il tentativo sui candidati,
 # la chiamata firmata verso i nodi, e il post locale che tiene conto delle
 # chiamate dei loop. `NodeBusyError` sta li' perche' e' un segnale del protocollo
 # fra CP e nodi, e chi lo cattura lo importa da qui.
 from cp import inferenza as _inferenza
 from cp.inferenza import (NodeBusyError, _call_ollama, _local_model_post, _audit_persona_reply)
+from cp import battito as _battito
 from cp import metriche
+# `hb_state` e' lo stato del battito, e vive in `cp/battito.py`. Si importa per
+# riferimento e non dal modulo: e' un dizionario che si aggiunge e non una variabile
+# che si riassegna, quindi tutti ne vedono lo stesso. Se un giorno diventasse un
+# riassegnamento, questo import diventerebbe una copia morta — lo dice anche la
+# testa di cp/battito.py, che ha la trappola a portata di mano.
+from cp.battito import hb_state
 from cp.bottles import monta as monta_bottiglie
 from cp.federazione import (_extract_federated_text, _federate_to_peer, _sister_peer,
                             _try_federated_execution, invalida_vista,
@@ -4691,130 +4692,8 @@ def memory_lifecycle():
 
 
 
-# ── MEMORY SYNC ───────────────────────────────────────────────────────────────
-def _sync_memory_across_nodes():
-    if MEMORY_BACKEND == "hermes":
-        # Hermes is the single shared store. Replicating its view back into
-        # node-local files would reintroduce dual-write and sync loops. La coda di
-        # `shared/memory_sync.py` non è una replica: va solo *verso* Hermes, e il
-        # mirror locale è una vista del nodo, non quella di un altro.
-        return
-    active_nodes = [n for n in _node_list() if n.get("status") == "active"]
-    if len(active_nodes) < 2:
-        return
-    node_memories: dict = {}
-    for node in active_nodes:
-        nid = node.get("node_id", "")
-        ep  = _best_endpoint(node)
-        if not ep or node.get("is_local"):
-            continue
-        try:
-            r = requests.get(f"{ep}/memory", params={"limit": 30}, timeout=4)
-            if r.status_code == 200:
-                node_memories[nid] = r.json().get("entries", [])
-        except Exception:
-            pass
-    if not node_memories:
-        return
-    pushed_total  = 0
-    local_entries = _load_memory()
-    local_changed = False
-    for src_nid, entries in node_memories.items():
-        for entry in entries:
-            ts  = entry.get("ts") or entry.get("timestamp", "")
-            key = f"{src_nid}:{ts}"
-            if key in _synced_memory_keys:
-                continue
-            _synced_memory_keys.add(key)
-            content_key = str(entry.get("content","") or entry.get("prompt",""))[:64]
-            dedup_key   = f"{ts}:{content_key}"
-            existing_k  = {
-                f"{e.get('ts') or e.get('timestamp','')}:{str(e.get('content','') or e.get('prompt',''))[:64]}"
-                for e in local_entries
-            }
-            if dedup_key not in existing_k:
-                local_entries.append(entry)
-                local_changed = True
-            for dst_node in active_nodes:
-                if dst_node.get("node_id") == src_nid or dst_node.get("is_local"): continue
-                ep_dst = _best_endpoint(dst_node)
-                if not ep_dst: continue
-                try:
-                    requests.post(f"{ep_dst}/memory/push",
-                                  json={"node_id": src_nid, "entry": entry}, timeout=4)
-                    pushed_total += 1
-                except Exception:
-                    pass
-    if local_changed:
-        _save_memory(local_entries)
-    if pushed_total > 0:
-        push_log('memory_sync', f'Memory sync: {pushed_total} entries su {len(active_nodes)} nodi', status='success')
-        _notify_bridge("memory_sync", {"from": "cp", "to": "mesh",
-                                        "entries": pushed_total, "label": f"sync {pushed_total}"})
 
 # ── HEARTBEAT ─────────────────────────────────────────────────────────────────
-
-def _poll_mesh_nodes():
-    for ep in list(_known_endpoints):
-        if ep and _LOCAL_NODE_ENDPOINT and _normalize_endpoint(ep) == _normalize_endpoint(_LOCAL_NODE_ENDPOINT):
-            continue
-        try:
-            r = requests.get(f"{ep}/status", timeout=3)
-            if r.status_code == 200 and _is_valid_json_response(r):
-                info = r.json()
-                nid  = info.get("node_id", "")
-                info.update({
-                    "endpoint":  ep,
-                    "status":    "active",
-                    "last_seen": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                })
-                if nid:
-                    existing = _nodes_by_id.get(nid)
-                    if not existing or \
-                       not _normalize_endpoint(existing.get("endpoint","")).startswith("https://") or \
-                       ep.startswith("https://"):
-                        _nodes_by_id[nid] = info
-                        db.upsert_node(info)
-                try:
-                    rp = requests.get(f"{ep}/peers", timeout=2)
-                    if _is_valid_json_response(rp):
-                        for peer in rp.json().get("peers", []):
-                            pep = _normalize_endpoint(peer.get("endpoint", ""))
-                            if pep and pep not in _known_endpoints:
-                                _known_endpoints.add(pep)
-                except Exception:
-                    pass
-            else:
-                for nid, n in list(_nodes_by_id.items()):
-                    if _normalize_endpoint(n.get("endpoint","")) == ep and n.get("node_id") != _LOCAL_NODE_ID:
-                        _nodes_by_id[nid]["status"] = "unreachable"
-                        db.upsert_node({**_nodes_by_id[nid], "status": "unreachable"})
-                        push_log('mesh_event',
-                                 f'Node zombie detected: {nid[:12]}',
-                                 f'endpoint={ep} http={r.status_code} content-type={r.headers.get("Content-Type","?")}',
-                                 source='heartbeat', status='warn')
-        except Exception:
-            for nid, n in list(_nodes_by_id.items()):
-                if _normalize_endpoint(n.get("endpoint","")) == ep and n.get("node_id") != _LOCAL_NODE_ID:
-                    _nodes_by_id[nid]["status"] = "unreachable"
-                    db.upsert_node({**_nodes_by_id[nid], "status": "unreachable"})
-
-    if _LOCAL_NODE_ENABLED:
-        remote_active = [
-            n for n in _node_list()
-            if n.get("status") == "active" and n.get("node_id") != _LOCAL_NODE_ID
-        ]
-        local_node = _nodes_by_id.get(_LOCAL_NODE_ID)
-        if local_node and not remote_active and local_node.get("tier") != "root":
-            local_node["tier"] = "root"
-            db.upsert_node(local_node)
-            push_log('mesh_event', f'Local node promoted to root (mesh empty)',
-                     source=_LOCAL_NODE_ID[:16], status='info')
-        elif local_node and remote_active and local_node.get("tier") == "root":
-            local_node["tier"] = "hub"
-            db.upsert_node(local_node)
-            push_log('mesh_event', f'Local node demoted to hub ({len(remote_active)} remote active)',
-                     source=_LOCAL_NODE_ID[:16], status='info')
 
 # ── TELEMETRIA NODI: COLLECTOR (pull periodico di /metrics) ────────────────
 # Cache in-memory: node_id -> {samples: deque(maxlen=METRICS_WINDOW),
@@ -4890,53 +4769,6 @@ def persona_dream_loop():
             push_log('dream', 'Persona dream scheduler error', str(error),
                      source='persona-dream', status='failed')
         time.sleep(120)
-
-def heartbeat_loop():
-    time.sleep(3)
-    push_log('system', 'Control-plane v1.05 started',
-             detail=f'nodes={len(_nodes_by_id)} endpoints={list(_known_endpoints)} federation_id={CP_ID[:16]}',
-             status='info')
-    hb_state["running"] = True
-    while True:
-        cycle = hb_state["cycle"] + 1
-        hb_state["cycle"]     = cycle
-        hb_state["last_tick"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _poll_mesh_nodes()
-        hb_state["nodes_seen"] = [
-            n.get("node_id", n.get("endpoint","?"))[:12]
-            for n in _node_list() if n.get("status") == "active"
-        ]
-        if cycle % 2 == 0:
-            _sync_memory_across_nodes()
-            hb_state["last_memory_sync"] = hb_state["last_tick"]
-        for node in _node_list():
-            if node.get("status") != "active": continue
-            if node.get("is_local"): continue
-            nid = node.get("node_id", node.get("endpoint","unknown"))[:12]
-            ep  = _best_endpoint(node)
-            if not ep: continue
-            tid = str(uuid.uuid4())[:8]
-            try:
-                t0  = time.time()
-                r   = requests.get(f"{ep}/health", timeout=2)
-                lat = int((time.time()-t0)*1000)
-                if _is_valid_json_response(r):
-                    push_log('connection_test', f'HB#{cycle} ping OK -> {nid}',
-                             f'latency: {lat}ms | score: {round(_node_score(node),3)}',
-                             source='control-plane', target=nid, status='success', trace_id=tid)
-                    hb_state["last_conn"] = hb_state["last_tick"]
-                    _notify_bridge("task", {"from": "cp", "to": nid, "type": "heartbeat",
-                                            "label": f"HB#{cycle} {lat}ms"})
-                else:
-                    push_log('connection_test', f'HB#{cycle} zombie -> {nid}',
-                             f'HTTP {r.status_code} non-JSON ({r.headers.get("Content-Type","?")})',
-                             source='control-plane', target=nid, status='failed', trace_id=tid)
-                    node["status"] = "unreachable"
-                    db.upsert_node({**node, "status": "unreachable"})
-            except Exception as e:
-                push_log('connection_test', f'HB#{cycle} FAILED -> {nid}', str(e),
-                         source='control-plane', target=nid, status='failed', trace_id=tid)
-        time.sleep(15)
 
 # ── DASHBOARD ─────────────────────────────────────────────────────────────────
 @app.route('/')
@@ -5108,6 +4940,11 @@ monta_webnode(app)
 # avanzata — e' il dominio piu' staccato fra quelli che sono passati qui.
 monta_bottiglie(app, cp_identity=_cp_identity)
 
+# ── COLLEGAMENTO DEL BATTITO ───────────────────────────────────────────────────
+# Non e' un montaggio: `cp/battito.py` non registra rotte, ha un thread solo suo.
+# Riceve la memoria da replicare e l'identita' del nodo da annunciare.
+_battito.collega(memory_sync, local_node_id=_LOCAL_NODE_ID, cp_id=CP_ID)
+
 monta_federazione(app,
                   cp_identity=_cp_identity,
                   select_best_node=_select_best_node,
@@ -5143,7 +4980,7 @@ if __name__ == '__main__':
     _register_local_node()
     _initialize_development_dream()
     _safe_initialize_persona_dream()
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=_battito.heartbeat_loop, daemon=True).start()
     threading.Thread(target=metriche.metrics_loop, daemon=True).start()
     threading.Thread(target=development_dream_loop, daemon=True).start()
     threading.Thread(target=persona_dream_loop, daemon=True).start()

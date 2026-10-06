@@ -34,7 +34,7 @@ BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8085").rstrip("/")
 ADMIN = os.environ.get("NETWORK_ADMIN_TOKEN", "")
 
 VOLATILI = ("ts", "at", "last_seen", "ultimo", "ultima", "created_at", "updated_at",
-            "uptime", "duration_ms", "elapsed_ms", "_ts", "sampled_at")
+            "uptime", "duration_ms", "elapsed_ms", "_ts", "sampled_at", "last_tick")
 
 SOTTOPESI = {"X-Hyperspace-Network-Token": ADMIN}
 
@@ -88,6 +88,14 @@ def raccogli() -> dict:
         # le metriche raccolte dai nodi: stessa fonte del punteggio, e quindi
         # il posto dove si vede se il punteggio e' stato calcolato sui dati giusti
         "metrics_nodes": _get("/metrics/nodes"),
+        # lo stato del battito: e' l'unica cosa che il thread periodico espone
+        # direttamente, e quindi il posto dove si vede se sta girando e cosa ha
+        # visto. Va dopo /metrics/nodes perche' il battito scrive nel registro.
+        # I suoi campi sono per meta' volatili per natura (l'orario, il risultato
+        # della connessione, il conteggio dei cicli): la normalizzazione ne tiene
+        # il significato — "il loop e' partito e ha visto i nodi" — senza fissare
+        # un numero che cresce da solo.
+        "hb_status": _get("/hb/status"),
         "topology": _get("/mesh/topology"),
 
         # percorsi che non esistono: il driver e il CLI li chiamano comunque
@@ -176,6 +184,13 @@ def _normalizza(testo: str) -> str:
     except (json.JSONDecodeError, ValueError):
         return testo.strip()
     _azzera_orari(dati)
+    # Il battito e' un contatore: dice "sono passati N cicli", e N cresce da solo.
+    # Interessa il fatto che sia partito, non quanto sia andato avanti.
+    if isinstance(dati, dict) and "running" in dati and "cycle" in dati:
+        dati["cycle"] = "almeno-un-ciclo" if dati["cycle"] >= 1 else "nessun-ciclo"
+        for campo in ("last_conn", "last_memory_sync"):
+            if dati.get(campo) is not None:
+                dati[campo] = "<qualcosa>"
     testo = json.dumps(dati, sort_keys=True)
     return testo
 
