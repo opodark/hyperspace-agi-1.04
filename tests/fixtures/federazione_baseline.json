@@ -1,0 +1,70 @@
+{
+  "execute_non_firmato": {
+    "body": "{\"error\":\"peer non autorizzato\"}\n",
+    "status": 403
+  },
+  "identity": {
+    "body": "{\"endpoint\":\"\",\"peer_id\":\"0579ced7f1a50ee925abda1fd827e5cde8aacf67\",\"pubkey\":\"045b71dba77ee6e0d08d8b567fe686a2b9108610eb5b63d4bd19fde77b5027f6235b5b8c2eb695855328a32c3a4f350fa7546942dfaf8c6d0d42781789a8ea8767\"}\n",
+    "status": 200
+  },
+  "peer_aggiunto": {
+    "body": "{\"ok\":true,\"peer_id\":\"e0e77a507412b120f6ede61f62295b1a7b2ff19d\"}\n",
+    "status": 201
+  },
+  "peer_pubkey_malformata": {
+    "body": "{\"error\":\"pubkey non valida (attesa hex, come da /federation/identity)\"}\n",
+    "status": 400
+  },
+  "peer_riacceso": {
+    "body": "{\"enabled\":true,\"ok\":true}\n",
+    "status": 200
+  },
+  "peer_rimosso": {
+    "body": "{\"ok\":true}\n",
+    "status": 200
+  },
+  "peer_senza_campi": {
+    "body": "{\"error\":\"pubkey e endpoint sono obbligatori\"}\n",
+    "status": 400
+  },
+  "peer_spegnito": {
+    "body": "{\"enabled\":false,\"ok\":true}\n",
+    "status": 200
+  },
+  "peers_dopo_aggiunta": {
+    "body": "[{\"added_at\":\"2026-10-06 08:11:33\",\"enabled\":1,\"endpoint\":\"https://peer-di-prova.example\",\"label\":\"sorella-di-prova\",\"last_seen\":null,\"last_status\":\"unknown\",\"peer_id\":\"e0e77a507412b120f6ede61f62295b1a7b2ff19d\",\"pubkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]\n",
+    "status": 200
+  },
+  "peers_dopo_rimozione": {
+    "body": "[]\n",
+    "status": 200
+  },
+  "peers_dopo_spegnimento": {
+    "body": "[{\"added_at\":\"2026-10-06 08:11:33\",\"enabled\":0,\"endpoint\":\"https://peer-di-prova.example\",\"label\":\"sorella-di-prova\",\"last_seen\":null,\"last_status\":\"unknown\",\"peer_id\":\"e0e77a507412b120f6ede61f62295b1a7b2ff19d\",\"pubkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]\n",
+    "status": 200
+  },
+  "peers_vuoti": {
+    "body": "[]\n",
+    "status": 200
+  },
+  "rimuovi_peer_inesistente": {
+    "body": "{\"ok\":true}\n",
+    "status": 200
+  },
+  "toggle_peer_inesistente": {
+    "body": "{\"error\":\"peer non trovato\"}\n",
+    "status": 404
+  },
+  "view_non_firmata": {
+    "body": "{\"error\":\"condivisione della vista disattivata su questo CP\"}\n",
+    "status": 403
+  },
+  "views_dashboard": {
+    "body": "{\"cached\":false,\"generated_at\":\"2026-10-06T08:11:33Z\",\"local\":{\"counts\":{\"active\":1,\"logs\":8,\"models\":0,\"nodes\":1,\"tasks\":0,\"web_nodes\":0},\"cp_id\":\"0579ced7f1a50ee925abda1fd827e5cde8aacf67\",\"federation\":{\"enabled\":true,\"public_url\":\"\"},\"generated_at\":\"2026-10-06T08:11:33Z\",\"logs\":[{\"source\":\"control-plane\",\"status\":\"failed\",\"summary\":\"Federazione rifiutata: peer sconosciuto ?\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"mesh_event\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer rimosso: non-esiste\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer rimosso: e0e77a507412\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer abilitato: e0e77a507412\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer disabilitato: e0e77a507412\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"success\",\"summary\":\"Federated peer aggiunto: sorella-di-prova\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"local-70f7786f98\",\"status\":\"success\",\"summary\":\"Local node boot: local-70f7786f98 tier=root\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:32Z\",\"type\":\"mesh_event\"},{\"source\":\"control-plane\",\"status\":\"warn\",\"summary\":\"memoria: MEMORY_FILE non impostato \\u2014 mirror e coda stanno fuori dal volume e si perdono a ogni ricostruzione del container\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:32Z\",\"type\":\"memory_sync\"}],\"models\":{\"bare\":[],\"per_node\":[]},\"nodes\":[{\"alias\":\"\",\"endpoint\":\"\",\"is_web_node\":false,\"label\":\"\",\"last_seen\":\"2026-10-06T08:11:32Z\",\"node_id\":\"local-70f7786f980b44e6\",\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"vram_gb\":16.0}],\"pubkey\":\"045b71dba77ee6e0d08d8b567fe686a2b9108610eb5b63d4bd19fde77b5027f6235b5b8c2eb695855328a32c3a4f350fa7546942dfaf8c6d0d42781789a8ea8767\",\"tasks\":[],\"version\":\"1.05\",\"warnings\":[]},\"merged\":{\"counts\":{\"models\":0,\"nodes\":1,\"nodes_partial\":0,\"sources\":1},\"models\":[],\"nodes\":[{\"alias\":\"\",\"is_web_node\":false,\"node_id\":\"local-70f7786f980b44e6\",\"seen_by\":[\"locale\"],\"status\":\"active\",\"tier\":\"root\"}],\"sources\":[{\"counts\":{\"active\":1,\"logs\":8,\"models\":0,\"nodes\":1,\"tasks\":0,\"web_nodes\":0},\"cp_id\":\"0579ced7f1a50ee925abda1fd827e5cde8aacf67\",\"kind\":\"local\",\"label\":\"locale\"}]},\"peers\":[],\"ttl_s\":10,\"view_enabled\":false}\n",
+    "status": 200
+  },
+  "views_dashboard_refresh": {
+    "body": "{\"cached\":false,\"generated_at\":\"2026-10-06T08:11:33Z\",\"local\":{\"counts\":{\"active\":1,\"logs\":8,\"models\":0,\"nodes\":1,\"tasks\":0,\"web_nodes\":0},\"cp_id\":\"0579ced7f1a50ee925abda1fd827e5cde8aacf67\",\"federation\":{\"enabled\":true,\"public_url\":\"\"},\"generated_at\":\"2026-10-06T08:11:33Z\",\"logs\":[{\"source\":\"control-plane\",\"status\":\"failed\",\"summary\":\"Federazione rifiutata: peer sconosciuto ?\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"mesh_event\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer rimosso: non-esiste\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer rimosso: e0e77a507412\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer abilitato: e0e77a507412\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"info\",\"summary\":\"Federated peer disabilitato: e0e77a507412\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"control-plane\",\"status\":\"success\",\"summary\":\"Federated peer aggiunto: sorella-di-prova\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:33Z\",\"type\":\"system\"},{\"source\":\"local-70f7786f98\",\"status\":\"success\",\"summary\":\"Local node boot: local-70f7786f98 tier=root\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:32Z\",\"type\":\"mesh_event\"},{\"source\":\"control-plane\",\"status\":\"warn\",\"summary\":\"memoria: MEMORY_FILE non impostato \\u2014 mirror e coda stanno fuori dal volume e si perdono a ogni ricostruzione del container\",\"target\":\"\",\"ts\":\"2026-10-06T08:11:32Z\",\"type\":\"memory_sync\"}],\"models\":{\"bare\":[],\"per_node\":[]},\"nodes\":[{\"alias\":\"\",\"endpoint\":\"\",\"is_web_node\":false,\"label\":\"\",\"last_seen\":\"2026-10-06T08:11:32Z\",\"node_id\":\"local-70f7786f980b44e6\",\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"vram_gb\":16.0}],\"pubkey\":\"045b71dba77ee6e0d08d8b567fe686a2b9108610eb5b63d4bd19fde77b5027f6235b5b8c2eb695855328a32c3a4f350fa7546942dfaf8c6d0d42781789a8ea8767\",\"tasks\":[],\"version\":\"1.05\",\"warnings\":[]},\"merged\":{\"counts\":{\"models\":0,\"nodes\":1,\"nodes_partial\":0,\"sources\":1},\"models\":[],\"nodes\":[{\"alias\":\"\",\"is_web_node\":false,\"node_id\":\"local-70f7786f980b44e6\",\"seen_by\":[\"locale\"],\"status\":\"active\",\"tier\":\"root\"}],\"sources\":[{\"counts\":{\"active\":1,\"logs\":8,\"models\":0,\"nodes\":1,\"tasks\":0,\"web_nodes\":0},\"cp_id\":\"0579ced7f1a50ee925abda1fd827e5cde8aacf67\",\"kind\":\"local\",\"label\":\"locale\"}]},\"peers\":[],\"ttl_s\":10,\"view_enabled\":false}\n",
+    "status": 200
+  }
+}

@@ -33,14 +33,24 @@ def _functions(names):
 
 
 def _snapshot(nodes=None, agg=None, tasks=None, logs=None):
+    # Le quattro cose che `cp/federazione.py` riceve dal boot, con la stessa forma
+    # del contesto reale: l'identita' del CP, il router e la configurazione.
+    # Lo scope isolato deve averle, o il test proverebbe una funzione che in
+    # produzione non può essere chiamata.
+    _contesto = SimpleNamespace(
+        cp_identity={"node_id": "cp-id-mac", "public_key": "04aabb", "_private_key": "priv"},
+        aggregate_mesh_models=lambda: agg or {"bare": [], "per_node": []},
+        advanced_config={"ollama": {"defaultModel": "modello-di-prova"}},
+        select_best_node=lambda *a, **k: None,
+        call_node_execute=lambda *a, **k: None,
+    )
     scope = {
         "datetime": datetime, "timezone": timezone,
-        "CP_ID": "cp-id-mac", "CP_PUBKEY": "04aabb",
+        "_contesto": _contesto,
         "FEDERATION_ENABLED": True, "FEDERATION_PUBLIC_URL": "http://100.81.234.102:8095",
         "_VIEW_SUMMARY_MAX": 160,
         "_node_list": lambda: nodes or [],
         "_best_endpoint": lambda n: n.get("ep", ""),
-        "_aggregate_mesh_models": lambda: agg or {"bare": [], "per_node": []},
         "db": SimpleNamespace(get_all_tasks=lambda: tasks or [],
                               query_logs=lambda **kw: logs or []),
     }
@@ -107,11 +117,15 @@ class SnapshotTests(unittest.TestCase):
     def test_un_db_rotto_non_abbatte_la_vista(self):
         scope = {
             "datetime": datetime, "timezone": timezone,
-            "CP_ID": "cp", "CP_PUBKEY": "04", "FEDERATION_ENABLED": True,
+            "_contesto": SimpleNamespace(
+                cp_identity={"node_id": "cp", "public_key": "04", "_private_key": "p"},
+                aggregate_mesh_models=lambda: (_ for _ in ()).throw(RuntimeError("db giu")),
+                advanced_config={"ollama": {"defaultModel": "modello-di-prova"}},
+            ),
+            "FEDERATION_ENABLED": True,
             "FEDERATION_PUBLIC_URL": "", "_VIEW_SUMMARY_MAX": 160,
             "_node_list": lambda: [],
             "_best_endpoint": lambda n: "",
-            "_aggregate_mesh_models": lambda: (_ for _ in ()).throw(RuntimeError("db giu")),
             "db": SimpleNamespace(get_all_tasks=lambda: (_ for _ in ()).throw(RuntimeError("db giu")),
                                   query_logs=lambda **kw: (_ for _ in ()).throw(RuntimeError("db giu"))),
         }

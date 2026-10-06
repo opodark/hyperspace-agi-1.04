@@ -68,8 +68,17 @@ class NetworkRouteGuardTests(unittest.TestCase):
         """`/federation/views` parla verso i peer ma non si fa chiamare da
         fuori: da pubblica diventerebbe una sonda verso i peer federati per
         chiunque, senza avere le loro chiavi."""
-        self.assertIn("app", {n.id for n in ast.walk(self.functions["federation_views"])
-                              if isinstance(n, ast.Name)})
+        # "e' una rotta dichiarata", non "e' dichiarata con @app.route": la seconda
+        # era un modo fragile di dire la prima, e l'estrazione in cp/federazione.py
+        # l'ha reso falso senza che il percorso cambiasse.
+        percorsi = [
+            n.args[0].value
+            for n in ast.walk(self.functions["federation_views"])
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "route" and n.args and isinstance(n.args[0], ast.Constant)
+        ]
+        self.assertEqual(percorsi, ["/federation/views"],
+                         "la rotta non e' piu' dichiarata dove il test la cerca")
         gateway = ast.parse((Path(__file__).parents[1] / "federation-gateway" / "main.py")
                             .read_text(encoding="utf-8"))
         routes = next(ast.literal_eval(n.value) for n in gateway.body

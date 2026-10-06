@@ -31,6 +31,7 @@ COPPIE = {
     "instagram_baseline.py": "instagram.sh",
     "immagini_baseline.py": "immagini.sh",
     "chat_baseline.py": "chat.sh",
+    "federazione_baseline.py": "federazione.sh",
 }
 
 
