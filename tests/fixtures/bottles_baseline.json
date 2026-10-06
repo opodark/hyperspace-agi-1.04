@@ -1,0 +1,42 @@
+{
+  "announce_corpo_non_oggetto": {
+    "body": "{\"error\":\"il corpo deve essere un oggetto JSON\",\"ok\":false}\n",
+    "status": 400
+  },
+  "announce_endpoint_dal_client": {
+    "body": "{\"error\":\"endpoint e relay_url sono configurazione server-side; usa PUBLIC_ENDPOINT e BOTTLE_RELAY_URL nel .env\",\"ok\":false}\n",
+    "status": 400
+  },
+  "announce_ok": {
+    "body": "{\"bottle\":{\"endpoint\":\"http://127.0.0.1:11434\",\"nonce\":696098,\"pubkey\":\"045b71dba77ee6e0d08d8b567fe686a2b9108610eb5b63d4bd19fde77b5027f6235b5b8c2eb695855328a32c3a4f350fa7546942dfaf8c6d0d42781789a8ea8767\",\"signature\":\"304602210084001cfc1d9f7c6da2d65b8649cb608db646882c17d5f9087a649b58b13528fd022100ef707128ae325f45830c67b86a9db6e8490f335b8ea92a1e31963ea164fa217d\",\"ts\":1791275380},\"ok\":true,\"relay\":\"self\"}\n",
+    "status": 200
+  },
+  "announce_relay_dal_client": {
+    "body": "{\"error\":\"endpoint e relay_url sono configurazione server-side; usa PUBLIC_ENDPOINT e BOTTLE_RELAY_URL nel .env\",\"ok\":false}\n",
+    "status": 400
+  },
+  "announce_senza_token": {
+    "body": "{\"configured\":true,\"error\":\"token amministrativo di rete mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "lista_dopo_annuncio": {
+    "body": "{\"bottles\":[{\"endpoint\":\"http://127.0.0.1:11434\",\"nonce\":696098,\"pubkey\":\"045b71dba77ee6e0d08d8b567fe686a2b9108610eb5b63d4bd19fde77b5027f6235b5b8c2eb695855328a32c3a4f350fa7546942dfaf8c6d0d42781789a8ea8767\",\"signature\":\"304602210084001cfc1d9f7c6da2d65b8649cb608db646882c17d5f9087a649b58b13528fd022100ef707128ae325f45830c67b86a9db6e8490f335b8ea92a1e31963ea164fa217d\",\"ts\":1791275380}],\"count\":1,\"difficulty_bits\":20,\"max_age_s\":3600}\n",
+    "status": 200
+  },
+  "lista_vuota": {
+    "body": "{\"bottles\":[],\"count\":0,\"difficulty_bits\":20,\"max_age_s\":3600}\n",
+    "status": 200
+  },
+  "publish_bottiglia_falsa": {
+    "body": "{\"error\":\"proof-of-work non soddisfatto\",\"ok\":false}\n",
+    "status": 400
+  },
+  "publish_corpo_vuoto": {
+    "body": "{\"error\":\"pubkey mancante o non valida\",\"ok\":false}\n",
+    "status": 400
+  },
+  "publish_troppo_grande": {
+    "body": "{\"error\":\"bottiglia troppo grande\",\"ok\":false}\n",
+    "status": 413
+  }
+}

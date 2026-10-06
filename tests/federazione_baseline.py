@@ -43,7 +43,7 @@ from pathlib import Path
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8085").rstrip("/")
 ADMIN = os.environ.get("NETWORK_ADMIN_TOKEN", "")
 
-SOTTOPESI = {"X-Network-Admin-Token": ADMIN} if ADMIN else {}
+SOTTOPESI = {"X-Hyperspace-Network-Token": ADMIN} if ADMIN else {}
 
 # Una pubkey fittizia in esadecimale, della forma che `/federation/identity`
 # restituisce. L'id del peer ne e' un hash, quindi e' derivato e non va azzerato:

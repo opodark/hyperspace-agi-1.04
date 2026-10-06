@@ -61,12 +61,7 @@ sys.path.insert(0, os.path.join(BASE_DIR, ".."))
 
 import shared.db as db
 from shared.identity import generate_or_load_identity, make_request_headers
-from shared.bottle import (
-    verify_bottle,
-    DEFAULT_DIFFICULTY_BITS as _BOTTLE_DIFFICULTY_BITS,
-    MAX_BOTTLE_BYTES as _MAX_BOTTLE_BYTES,
-)
-from shared.network_security import normalize_http_base, token_authorized, verify_client_ip
+from shared.network_security import token_authorized
 from shared.code_sandbox import HybridCodeSandboxClient, SandboxUnavailable
 from shared.forge_skills import ECC_BUNDLE_DIR, load_ecc_bundle, attach_skills, source_hash
 from shared.development_dream import NightlyDevelopmentDream
@@ -1426,6 +1421,7 @@ from cp.memoria import (_ts_to_iso, _notify_bridge, _load_memory, _save_memory, 
 from cp import inferenza as _inferenza
 from cp.inferenza import (NodeBusyError, _call_ollama, _local_model_post, _audit_persona_reply)
 from cp import metriche
+from cp.bottles import monta as monta_bottiglie
 from cp.federazione import (_extract_federated_text, _federate_to_peer, _sister_peer,
                             _try_federated_execution, invalida_vista,
                             monta as monta_federazione)
@@ -3683,163 +3679,21 @@ def network_action():
 # distinte — oltre il tetto si scarta la più vecchia. In memoria, non su
 # disco: sono annunci di rendez-vous con TTL, non memoria da preservare fra
 # riavvii, un nodo che rivuole essere trovato ripubblica.
-_bottles: dict = {}
-_bottles_lock = threading.Lock()
-_bottle_announce_lock = threading.Lock()
 
 
-def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
-    try:
-        return max(minimum, min(int(os.getenv(name, str(default))), maximum))
-    except (TypeError, ValueError):
-        return default
 
-
-_BOTTLE_MAX_COUNT = _bounded_env_int("BOTTLE_MAX_COUNT", 500, 1, 10_000)
-_BOTTLE_MAX_AGE_S = _bounded_env_int("BOTTLE_MAX_AGE_S", 3600, 60, 86_400)
 
 # Rate limit per IP: il PoW rende costoso spammare, ma non lo impedisce a
 # chi ha CPU da spendere — difesa in profondità, non l'unica barriera.
-_bottle_rate: dict = {}
-_bottle_rate_lock = threading.Lock()
-_BOTTLE_RATE_MAX = _bounded_env_int("BOTTLE_RATE_MAX_PER_HOUR", 20, 1, 10_000)
-_BOTTLE_RATE_MAX_IPS = _bounded_env_int("BOTTLE_RATE_MAX_IPS", 4096, 1, 100_000)
 
 
-def _bottle_rate_check(ip: str) -> bool:
-    now = time.time()
-    with _bottle_rate_lock:
-        # Evita crescita permanente della mappa quando nel tempo cambiano IP.
-        for old_ip in list(_bottle_rate):
-            kept = [t for t in _bottle_rate[old_ip] if now - t < 3600]
-            if kept:
-                _bottle_rate[old_ip] = kept
-            else:
-                _bottle_rate.pop(old_ip, None)
-        recent = [t for t in _bottle_rate.get(ip, []) if now - t < 3600]
-        if ip not in _bottle_rate and len(_bottle_rate) >= _BOTTLE_RATE_MAX_IPS:
-            return False
-        if len(recent) >= _BOTTLE_RATE_MAX:
-            _bottle_rate[ip] = recent
-            return False
-        recent.append(now)
-        _bottle_rate[ip] = recent
-        return True
 
 
-def _bottles_prune_expired() -> None:
-    now = time.time()
-    for pubkey in [k for k, b in _bottles.items() if now - b.get("ts", 0) > _BOTTLE_MAX_AGE_S]:
-        _bottles.pop(pubkey, None)
 
 
-def _bottle_client_ip() -> str:
-    """IP da usare per il rate-limit dei bottle endpoint.
-
-    Quando la richiesta arriva dal federation-gateway (esposizione pubblica,
-    vedi federation-gateway/main.py), request.remote_addr qui sarebbe l'IP
-    Docker interno del gateway per OGNI chiamante — collasserebbe il
-    rate-limit per-IP sotto su un unico contatore condiviso. Se il gateway
-    ha allegato l'attestazione firmata (X-Hs-Client-*, verificata con lo
-    stesso BOTTLE_GATEWAY_SECRET), usa quella; altrimenti (rete privata
-    diretta, o gateway senza secret configurato) usa la connessione TCP
-    reale, corretta in entrambi i casi."""
-    ip = request.headers.get("X-Hs-Client-Ip", "")
-    ts = request.headers.get("X-Hs-Client-Ts", "")
-    sig = request.headers.get("X-Hs-Client-Sig", "")
-    if verify_client_ip(os.getenv("BOTTLE_GATEWAY_SECRET", ""), ip, ts, sig):
-        return ip
-    return request.remote_addr or "?"
 
 
-@app.route('/bottles/publish', methods=['POST'])
-def bottles_publish():
-    ip = _bottle_client_ip()
-    if not _bottle_rate_check(ip):
-        return jsonify({"ok": False, "error": "troppe pubblicazioni da questo IP, riprova più tardi"}), 429
-    if request.content_length is not None and request.content_length > _MAX_BOTTLE_BYTES:
-        return jsonify({"ok": False, "error": "bottiglia troppo grande"}), 413
-    bottle = request.get_json(force=True, silent=True) or {}
-    valid, reason = verify_bottle(bottle, difficulty_bits=_BOTTLE_DIFFICULTY_BITS, max_age_s=_BOTTLE_MAX_AGE_S)
-    if not valid:
-        return jsonify({"ok": False, "error": reason}), 400
-    with _bottles_lock:
-        _bottles_prune_expired()
-        pubkey = bottle["pubkey"]
-        if pubkey not in _bottles and len(_bottles) >= _BOTTLE_MAX_COUNT:
-            oldest = min(_bottles, key=lambda k: _bottles[k].get("ts", 0))
-            _bottles.pop(oldest, None)
-        _bottles[pubkey] = bottle
-    push_log('system', 'Bottle published', f"pubkey={pubkey[:16]}… endpoint={bottle.get('endpoint')}")
-    return jsonify({"ok": True})
 
-
-@app.route('/bottles/list')
-def bottles_list():
-    with _bottles_lock:
-        _bottles_prune_expired()
-        bottles = list(_bottles.values())
-    return jsonify({"count": len(bottles), "difficulty_bits": _BOTTLE_DIFFICULTY_BITS,
-                    "max_age_s": _BOTTLE_MAX_AGE_S, "bottles": bottles})
-
-
-@app.route('/bottles/announce', methods=['POST'])
-def bottles_announce():
-    """Crea e pubblica una bottiglia per QUESTO nodo. La chiave privata vive
-    solo qui lato server (_cp_private_key, mai esposta al browser) — è per
-    questo che l'annuncio è un'azione server-side e non qualcosa che la
-    dashboard potrebbe fare da sola in JS."""
-    auth_error = _network_admin_error()
-    if auth_error:
-        return auth_error
-    data = request.get_json(force=True, silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({"ok": False, "error": "il corpo deve essere un oggetto JSON"}), 400
-    if "endpoint" in data or "relay_url" in data:
-        return jsonify({"ok": False, "error": "endpoint e relay_url sono configurazione server-side; "
-                        "usa PUBLIC_ENDPOINT e BOTTLE_RELAY_URL nel .env"}), 400
-
-    endpoint = os.getenv("PUBLIC_ENDPOINT", "") or _LOCAL_NODE_ENDPOINT
-    if not endpoint:
-        return jsonify({"ok": False, "error": "nessun endpoint da annunciare — imposta PUBLIC_ENDPOINT "
-                        "nel .env"}), 400
-    try:
-        endpoint = normalize_http_base(endpoint)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": f"PUBLIC_ENDPOINT non valido: {error}"}), 400
-
-    relay_config = os.getenv("BOTTLE_RELAY_URL", "").strip()
-    try:
-        relay_url = normalize_http_base(relay_config) if relay_config else None
-    except ValueError as error:
-        return jsonify({"ok": False, "error": f"BOTTLE_RELAY_URL non valido: {error}"}), 400
-
-    from shared.bottle import make_bottle
-    # Una sola operazione di mining per processo: impedisce che doppi click o
-    # richieste concorrenti saturino tutti i core del control-plane.
-    if not _bottle_announce_lock.acquire(blocking=False):
-        return jsonify({"ok": False, "error": "annuncio già in elaborazione"}), 429
-    try:
-        bottle = make_bottle(CP_PUBKEY, endpoint, _cp_private_key,
-                             difficulty_bits=_BOTTLE_DIFFICULTY_BITS)
-    finally:
-        _bottle_announce_lock.release()
-
-    if relay_url is None:
-        # nessun relay esterno configurato: pubblica su se stesso, cosi'
-        # il pulsante funziona anche in locale senza altre macchine.
-        with _bottles_lock:
-            _bottles_prune_expired()
-            _bottles[bottle["pubkey"]] = bottle
-        return jsonify({"ok": True, "relay": "self", "bottle": bottle})
-
-    try:
-        r = requests.post(f"{relay_url}/bottles/publish", json=bottle, timeout=10)
-        result = r.json() if r.content else {}
-        return jsonify({"ok": bool(result.get("ok")), "relay": relay_url, "bottle": bottle,
-                        "relay_response": result}), r.status_code
-    except requests.RequestException as error:
-        return jsonify({"ok": False, "error": f"relay non raggiungibile: {error}", "bottle": bottle}), 502
 
 
 @app.route('/doctor')
@@ -5248,6 +5102,12 @@ monta_webnode(app)
 # insidioso: solo quando la federazione e' l'unica cosa che funziona.
 # `cp_identity` e' l'identita' di questo control-plane — rifatta qui produrrebbe
 # una chiave diversa, e le firme non corrisponderebbero piu'.
+# ── MONTAGGIO DELLE BOTTIGLIE ────────────────────────────────────────────────
+# Una sola iniezione: l'identita' di questo nodo, per firmare la bottiglia che lo
+# annuncia. Non usa il router, non chiama i nodi, non conosce la configurazione
+# avanzata — e' il dominio piu' staccato fra quelli che sono passati qui.
+monta_bottiglie(app, cp_identity=_cp_identity)
+
 monta_federazione(app,
                   cp_identity=_cp_identity,
                   select_best_node=_select_best_node,
