@@ -38,6 +38,7 @@
 
 import json
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -100,6 +101,7 @@ _recent_routing_picks: dict = {}
 # indipendentemente e potevano divergere; con la cache non possono, per costruzione.
 _SCORE_CACHE: dict = {}
 _SCORE_CACHE_AT = 0.0
+_score_cache_lock = threading.Lock()
 
 # Tetto della cache del punteggio: 3/4 dell'intervallo di raccolta metriche, così
 # la cache non può essere più vecchia della metrica che dovrebbe contenere.
@@ -121,23 +123,21 @@ def _serve(*campi):
 
 
 def monta(app, *, advanced_config=None, recent_routing_lock=None,
-          score_cache_lock=None, node_metrics_lock=None, aggregate_mesh_models=None,
+          aggregate_mesh_models=None,
           latest_metrics=None, recent_ts=None, score_terms_breakdown=None,
-          local_node_id=None, models_cache=None, node_metrics_cache=None):
+          local_node_id=None, models_cache=None, rimuovi_campioni=None):
     """Registra le rotte del mesh e tiene i riferimenti al boot."""
     global _contesto, _LOCAL_NODE_ID
     _LOCAL_NODE_ID = local_node_id if local_node_id is not None else ""
     _contesto = SimpleNamespace(
         advanced_config=advanced_config,
         recent_routing_lock=recent_routing_lock,
-        score_cache_lock=score_cache_lock,
-        node_metrics_lock=node_metrics_lock,
         aggregate_mesh_models=aggregate_mesh_models,
         latest_metrics=latest_metrics,
         recent_ts=recent_ts,
         score_terms_breakdown=score_terms_breakdown,
         models_cache=models_cache,
-        node_metrics_cache=node_metrics_cache,
+        rimuovi_campioni=rimuovi_campioni,
     )
     app.register_blueprint(_bp)
     return app
@@ -311,9 +311,9 @@ def _fleet_scores() -> dict:
     invalidata (TTL azzerato) da _record_routing_pick e dal refresh delle
     metriche di un nodo."""
     global _SCORE_CACHE, _SCORE_CACHE_AT
-    _serve("score_cache_lock")
+    _serve("latest_metrics")
     now = time.time()
-    with _contesto.score_cache_lock:
+    with _score_cache_lock:
         if _SCORE_CACHE and now - _SCORE_CACHE_AT < _SCORE_CACHE_TTL:
             return _SCORE_CACHE
         out = {}
@@ -355,7 +355,7 @@ def _invalidate_fleet_scores():
     """Azzera il TTL della cache score: il prossimo accesso a _fleet_scores
     ricalcola con i dati correnti (nuovi pick di routing o metriche fresche)."""
     global _SCORE_CACHE_AT
-    with _contesto.score_cache_lock:
+    with _score_cache_lock:
         _SCORE_CACHE_AT = 0.0
 
 
@@ -467,7 +467,7 @@ def delete_mesh_node(node_id):
     db.delete_node(node_id)
     _node_aliases.pop(node_id, None)
     with _contesto.node_metrics_lock:
-        _contesto.node_metrics_cache.pop(node_id, None)
+        _contesto.rimuovi_campioni(node_id, None)
     push_log('mesh_event', f'Nodo obsoleto rimosso: {node_id[:16]}',
              detail=f'endpoint={endpoint}', status='info')
     return jsonify({"ok": True, "node_id": node_id})

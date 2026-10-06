@@ -44,8 +44,6 @@
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 import os, threading, time, requests, json, uuid, hashlib, re, ast
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import sys
 import faulthandler
@@ -116,7 +114,11 @@ import cp.mesh as mesh
 # quindi l'import e' innocuo. `_node_aliases` invece no: mesh lo riassegna, e
 # per quello si va dal modulo (`mesh._node_aliases`) — un import per nome
 # avrebbe tenuto il dizionario di quando e' stato importato.
-from cp.mesh import (_known_endpoints, _nodes_by_id, _best_endpoint, _invalidate_fleet_scores, _load_aliases_from_db, _load_nodes_from_db, _node_ids_with_model, _node_list, _node_ref_for, _node_score, _node_score_components, _normalize_endpoint, _parse_model_node_ref, _record_routing_pick, _register_local_node, _routing_scores)
+from cp.mesh import (_best_endpoint, _invalidate_fleet_scores, _known_endpoints,
+                     _load_aliases_from_db, _load_nodes_from_db, _node_ids_with_model,
+                     _node_list, _node_ref_for, _node_score, _normalize_endpoint,
+                     _parse_model_node_ref, _record_routing_pick, _register_local_node,
+                     _routing_scores, _nodes_by_id)
 from cp.config import (                        _AUTHORITY_ENABLED,
                         _AUTHORITY_URL,
                         CODE_SERVER_PORT,
@@ -151,7 +153,6 @@ from cp.config import (                        _AUTHORITY_ENABLED,
                         NIGHTLY_DEV_MODEL,
                         NIGHTLY_DEV_START_HOUR,
                         NODE_ENDPOINTS,
-                        NODE_METRICS_SCHEMA_VERSION,
                         OLLAMA_URL,
                         OMNIROUTE_API_KEY,
                         OMNIROUTE_ENABLED,
@@ -762,8 +763,6 @@ from cp.assistant import _assistant_text, _normalize_assistant_message
 # che sta nel mesh. Un oggetto solo, due proprietari, e il mesh lo riceve per
 # contesto: due copie separate farebbero punteggi su cache sempre vuote, che è
 # il modo più economico e più insidioso di mentire sulla flotta.
-_node_metrics_cache: dict = {}
-_node_metrics_lock = threading.Lock()
 _score_cache_lock = threading.Lock()
 _MODELS_CACHE = {"ts": 0.0, "data": None}
 # Nodi appena scelti dal router (node_id -> istante), per il termine `recent_s`.
@@ -777,16 +776,6 @@ _recent_routing_picks: dict = {}
 _SCORE_CACHE_TTL = max(5.0, 0.75 * METRICS_POLL_INTERVAL_S)
 
 # ── SMART TASK ROUTING ────────────────────────────────────────────────────────
-
-def _latest_metrics(nid: str) -> dict:
-    """Ultimo campione /metrics del nodo, senza mutare la cache. None se
-    mai raccolto (nodo non ancora pollato o irraggiungibile)."""
-    with _node_metrics_lock:
-        entry = _node_metrics_cache.get(nid)
-        if not entry:
-            return None
-        samples = entry["samples"]
-        return samples[-1] if samples else None
 
 def _recent_ts(node_id: str):
     with _recent_routing_lock:
@@ -989,7 +978,7 @@ def _aggregate_mesh_models(force: bool = False) -> dict:
 
 # ── SSE HEADERS ───────────────────────────────────────────────────────────────
 # In cp/http.py: gli header dello stream e i guard delle rotte admin.
-from cp.http import _sse_headers
+from cp.http import _is_valid_json_response, _sse_headers
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
 # `push_log` e LOG_TYPES sono in cp/log.py: e' la funzione piu' chiamata del
@@ -1440,6 +1429,7 @@ from cp.memoria import (_ts_to_iso, _notify_bridge, _load_memory, _save_memory, 
 # fra CP e nodi, e chi lo cattura lo importa da qui.
 from cp import inferenza as _inferenza
 from cp.inferenza import (NodeBusyError, _call_ollama, _local_model_post, _audit_persona_reply)
+from cp import metriche
 from cp.webnode import monta as monta_webnode
 from cp.immagini import monta as monta_immagini
 from cp.instagram import avvia as _instagram_avvia
@@ -3413,73 +3403,6 @@ def mesh_announce():
              f'endpoint={ep} accepted={should_update}', source=nid[:12], status='success')
     return jsonify({"ok": True, "registered": ep, "accepted": should_update})
 
-@app.route('/metrics/nodes')
-def get_metrics_nodes():
-    """Metriche backend normalizzate dei nodi (vedi node/backend_metrics.py):
-    ultimo campione + finestra storica in-memory (per mini-grafici) +
-    breakdown dello score di routing (per spiegare il ranking). I nodi senza
-    campioni raccolti (mai pollati o irraggiungibili) restano in lista con
-    metrics/history nulli e status coerente con l'ultimo polling."""
-    with _node_metrics_lock:
-        cache_snapshot = {
-            nid: {
-                "samples":         list(entry["samples"]),
-                "endpoint":        entry["endpoint"],
-                "status":          entry["status"],
-                "last_at":         entry.get("last_at", 0.0),
-                "last_error":      entry.get("last_error"),
-                "schema_mismatch": entry.get("schema_mismatch", False),
-            }
-            for nid, entry in _node_metrics_cache.items()
-        }
-    now = time.time()
-    nodes = []
-    for n in _node_list():
-        nid    = n.get("node_id", "")
-        entry  = cache_snapshot.get(nid)
-        samples = entry["samples"] if entry else []
-        last    = samples[-1] if samples else None
-        sample_age_s = round(max(now - entry["last_at"], 0.0), 1) if entry and entry["last_at"] else None
-        breakdown = None
-        if n.get("status") == "active":
-            # Fonte unica _fleet_scores(): stesso valore di /mesh/nodes
-            # (routing_score). Nessun ricalcolo con contesto degenere.
-            comp = _node_score_components(n)
-            if comp:
-                breakdown = comp
-        nodes.append({
-            "node_id":    nid,
-            "alias":      mesh._node_aliases.get(nid, ""),
-            "endpoint":   entry["endpoint"] if entry else _best_endpoint(n),
-            "status":     entry["status"] if entry else n.get("status", "unknown"),
-            # Freschezza: età dell'ultimo campione raccolto e flag stale
-            # (età > 2x intervallo di poll = un ciclo saltato o nodo giù).
-            "sample_age_s":  sample_age_s,
-            "stale":         sample_age_s is not None and sample_age_s > 2 * METRICS_POLL_INTERVAL_S,
-            "last_collected_at": (
-                datetime.fromtimestamp(entry["last_at"], timezone.utc).isoformat(timespec="seconds")
-                if entry and entry["last_at"] else None),
-            "last_error":      entry["last_error"] if entry else None,
-            "schema_version":  (last or {}).get("schema_version"),
-            "schema_mismatch": entry["schema_mismatch"] if entry else None,
-            "metrics":    last,
-            "history":    [
-                {"sampled_at":  s.get("sampled_at"),
-                 "collected_at": s.get("collected_at"),
-                 "server":     s.get("server", {}),
-                 "load":       s.get("load", {}),
-                 "runtime":    s.get("runtime", {})}
-                for s in samples[-METRICS_WINDOW:]
-            ],
-            "score_breakdown": breakdown,
-        })
-    return jsonify({
-        "sampled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "interval_s": METRICS_POLL_INTERVAL_S,
-        "window":     METRICS_WINDOW,
-        "schema_version": NODE_METRICS_SCHEMA_VERSION,
-        "nodes":      nodes,
-    })
 
 @app.route('/nodes/active')
 def get_nodes_active():
@@ -4287,9 +4210,9 @@ def _apply_env_runtime(meta: dict, cv) -> None:
         METRICS_POLL_TIMEOUT_S = max(1, int(cv))
     elif key == "METRICS_WINDOW":
         METRICS_WINDOW = max(2, int(cv))
-        with _node_metrics_lock:
-            for entry in _node_metrics_cache.values():
-                entry["samples"] = deque(entry["samples"], maxlen=METRICS_WINDOW)
+        # La cache dei campioni e' di `cp/metriche.py`: e' li' che la finestra si
+        # applica, perche' ricostruire le deque e' un suo mestiere.
+        metriche.ridimensiona_finestra(METRICS_WINDOW)
     elif key == "METRICS_MAX_WORKERS":
         METRICS_MAX_WORKERS = max(1, int(cv))
     elif key == "METRICS_BACKOFF_BASE_S":
@@ -5446,21 +5369,6 @@ def _sync_memory_across_nodes():
                                         "entries": pushed_total, "label": f"sync {pushed_total}"})
 
 # ── HEARTBEAT ─────────────────────────────────────────────────────────────────
-def _is_valid_json_response(r) -> bool:
-    """True solo se la risposta è 200 E JSON parsabile. Prima controllava
-    solo il Content-Type: un 404/500 con corpo JSON (es. il 404 di default
-    di FastAPI, {"detail":"Not Found"}) veniva classificato come risposta
-    valida, mascherando un endpoint mancante o rotto come "ping OK"."""
-    if r.status_code != 200:
-        return False
-    ct = r.headers.get("Content-Type", "")
-    if "text/html" in ct or "text/plain" in ct:
-        return False
-    try:
-        r.json()
-        return True
-    except Exception:
-        return False
 
 def _poll_mesh_nodes():
     for ep in list(_known_endpoints):
@@ -5532,106 +5440,6 @@ def _poll_mesh_nodes():
 # mini-grafici e ai futuri termini di scoring basati su telemetria osservata.
 # Thread separato da heartbeat_loop (stato operativo) così la cadenza della
 # telemetria non dipende dal ciclo di routing.
-
-def _collect_node_metrics():
-    now = time.time()
-    # Nodi candidati: attivi, con id ed endpoint eseguibile, non locali, e
-    # FUORI dal backoff — un nodo irraggiungibile non va martellato a ogni
-    # ciclo (vedi METRICS_BACKOFF_BASE_S / METRICS_MAX_BACKOFF_S).
-    candidates = []
-    for n in _node_list():
-        if n.get("status") != "active":
-            continue
-        nid = n.get("node_id", "")
-        if not nid:
-            continue
-        if _LOCAL_NODE_ENABLED and nid == _LOCAL_NODE_ID:
-            continue
-        ep = _best_endpoint(n)
-        if not ep:
-            continue
-        with _node_metrics_lock:
-            existing = _node_metrics_cache.get(nid)
-            if existing and now < existing.get("next_try_at", 0.0):
-                continue
-        candidates.append((nid, ep))
-
-    def _fetch(nid, ep):
-        try:
-            r = requests.get(f"{ep}/metrics", timeout=METRICS_POLL_TIMEOUT_S)
-            if r.status_code != 200 or not _is_valid_json_response(r):
-                raise ValueError(f"HTTP {r.status_code}")
-            payload = r.json()
-            # Timbro l'istante di raccolta lato CP: il sampled_at del nodo può
-            # restare identico tra poll (cache TTL lato nodo), quindi senza un
-            # collected_at locale lo storico apparirebbe con campioni duplicati.
-            # Microsecondi: a cadenza breve secondi non basterebbero a rendere
-            # distinti due campioni ravvicinati.
-            payload["collected_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-            return nid, ep, payload, None
-        except Exception as e:
-            return nid, ep, None, str(e)[:120]
-
-    # Fetch in PARALLELO: con N nodi e timeout l'uno, la versione seriale
-    # sforerebbe l'intervallo di poll (requests è thread-safe; l'aggiornamento
-    # della cache avviene sotto lock subito dopo).
-    results = []
-    if candidates:
-        with ThreadPoolExecutor(max_workers=METRICS_MAX_WORKERS) as ex:
-            results = list(ex.map(lambda c: _fetch(*c), candidates))
-
-    new_sample = False
-    for nid, ep, payload, err in results:
-        with _node_metrics_lock:
-            entry = _node_metrics_cache.setdefault(nid, {
-                "samples": deque(maxlen=METRICS_WINDOW),
-                "endpoint": "", "status": "unknown", "last_at": 0.0,
-                "last_error": None, "error_ts": None,
-                "fail_streak": 0, "next_try_at": 0.0, "schema_mismatch": False,
-            })
-            if err is not None:
-                entry["status"]     = "unreachable"
-                entry["last_error"] = err
-                entry["error_ts"]   = now
-                entry["fail_streak"] = entry.get("fail_streak", 0) + 1
-                entry["next_try_at"] = now + min(
-                    METRICS_BACKOFF_BASE_S * (2 ** max(entry["fail_streak"] - 1, 0)),
-                    METRICS_MAX_BACKOFF_S,
-                )
-            else:
-                entry["samples"].append(payload)
-                entry["endpoint"]      = ep
-                entry["status"]        = "active"
-                entry["last_at"]       = now
-                entry["last_error"]    = None
-                entry["error_ts"]      = None
-                entry["fail_streak"]   = 0
-                entry["next_try_at"]   = 0.0
-                # Deployment eterogeneo: uno schema diverso resta esposto ma
-                # marcato, così il consumatore non lo interpreta alla cieca.
-                entry["schema_mismatch"] = payload.get("schema_version") != NODE_METRICS_SCHEMA_VERSION
-                new_sample = True
-    # Campioni freschi -> lo score (fonte unica _fleet_scores) riflette subito
-    # carico/saturazione/degradazione, senza aspettare la scadenza del TTL.
-    # Chiamata FUORI da _node_metrics_lock: _fleet_scores prende prima
-    # _score_cache_lock e poi _node_metrics_lock, l'ordine inverso deadloccerebbe.
-    if new_sample:
-        _invalidate_fleet_scores()
-    # Prune SOLO dei nodi scomparsi dalla mesh. Un nodo temporaneamente giù
-    # (in backoff, nessun campione fresco) MANTIENE cache e storico: sono
-    # proprio i dati da tenere per capire cosa è successo.
-    with _node_metrics_lock:
-        live_ids = {n.get("node_id") for n in _node_list() if n.get("node_id")}
-        for nid in [k for k in _node_metrics_cache if k not in live_ids]:
-            _node_metrics_cache.pop(nid, None)
-
-def metrics_loop():
-    time.sleep(5)
-    while True:
-        cycle_start = time.time()
-        _collect_node_metrics()
-        elapsed = time.time() - cycle_start
-        time.sleep(max(METRICS_POLL_INTERVAL_S - elapsed, 1))
 
 def _run_development_dream_once(objective=""):
     if _development_dream is None or not _development_dream_lock.acquire(blocking=False):
@@ -5887,16 +5695,15 @@ monta_immagini(app, image_queue=image_queue, image_memory_gate=image_memory_gate
 # Ora e' fatto: `cp/inferenza.py` ha reso iniettabile quella dipendenza, e le due
 # rotte sono entrate insieme a tutti i loro helper.
 # ── MONTAGGIO DEL MESH ────────────────────────────────────────────────────────
-# Il registro e il punteggio stanno in cp/mesh.py. Le cache delle metriche e i
-# loro lock restano qui (`_node_metrics_cache`, `_score_cache_lock`,
-# `_recent_routing_lock`): a scriverli e' il thread di raccolta metriche e la
-# funzione di ricaricamento dei parametri, entrambi qui. Il modulo li riceve per
-# contesto — due copie separate farebbero punteggi su cache sempre vuote.
+# Il registro e il punteggio stanno in cp/mesh.py, i campioni delle metriche in
+# cp/metriche.py. Il confine e' una sola funzione: `ultima_metrica`. Prima il
+# mesh riceveva la cache intera per contesto, e due pezzi di stato attraversavano
+# il confine in due direzioni — regge finche' nessuno tocca niente, poi si rompe.
 #
-# `_node_list` e `_latest_metrics` restano qui perche' non sono indirizzamento:
-# sono ingegneria del nodo, e le usa anche la telemetria e il tool di ricerca.
-# `_node_aliases` NON viene passato: e' stato del modulo, e i due punti qui che
-# lo leggono vanno da `mesh._node_aliases` perche' mesh lo riassegna.
+# `_node_list` e `_score_terms_breakdown` restano qui perche' non sono
+# indirizzamento: sono ingegneria del nodo, e le usa anche la telemetria e il tool
+# di ricerca. `_node_aliases` NON viene passato: e' stato del modulo, e i due
+# punti qui che lo leggono vanno da `mesh._node_aliases` perche' mesh lo riassegna.
 # ── MONTAGGIO DEI WEB NODES ────────────────────────────────────────────────────
 # Cinque route /web/* e il registro che le serve. Il registro e' costruito dentro
 # il modulo, perche' e' l'ultimo pezzo di stato dei web node e non dipende dal
@@ -5904,18 +5711,17 @@ monta_immagini(app, image_queue=image_queue, image_memory_gate=image_memory_gate
 #(all'incirca 'errore silenzioso' numero tre della prima estrazione).
 monta_webnode(app)
 
+metriche.monta(app, local_node_id=_LOCAL_NODE_ID)
+
 mesh.monta(app,
            advanced_config=advanced_config,
            recent_routing_lock=_recent_routing_lock,
-           score_cache_lock=_score_cache_lock,
-           node_metrics_lock=_node_metrics_lock,
            aggregate_mesh_models=_aggregate_mesh_models,
-           latest_metrics=_latest_metrics,
+           latest_metrics=metriche.ultima_metrica,
            recent_ts=_recent_ts,
            score_terms_breakdown=_score_terms_breakdown,
            local_node_id=_LOCAL_NODE_ID,
-           models_cache=_MODELS_CACHE,
-           node_metrics_cache=_node_metrics_cache)
+           models_cache=_MODELS_CACHE)
 
 monta_canali(app, image_queue=image_queue,
              context_messages=_channel_context_messages,
@@ -5934,7 +5740,7 @@ if __name__ == '__main__':
     _initialize_development_dream()
     _safe_initialize_persona_dream()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
-    threading.Thread(target=metrics_loop, daemon=True).start()
+    threading.Thread(target=metriche.metrics_loop, daemon=True).start()
     threading.Thread(target=development_dream_loop, daemon=True).start()
     threading.Thread(target=persona_dream_loop, daemon=True).start()
     threading.Thread(target=post_loop, daemon=True).start()

@@ -62,3 +62,23 @@ def _network_admin_error():
     return None
 
 
+def _is_valid_json_response(r) -> bool:
+    """True solo se la risposta è 200 E JSON parsabile. Prima controllava
+    solo il Content-Type: un 404/500 con corpo JSON (es. il 404 di default
+    di FastAPI, {"detail":"Not Found"}) veniva classificato come risposta
+    valida, mascherando un endpoint mancante o rotto come "ping OK".
+
+    Vive qui e non in `main.py` perche' e' un predicato su una risposta HTTP, non
+    un pezzo di dominio: lo usano il ping dei nodi, il poll delle metriche e il
+    battito, e i tre non hanno niente in comune tranne la risposta che guardano.
+    """
+    if r.status_code != 200:
+        return False
+    ct = r.headers.get("Content-Type", "")
+    if "text/html" in ct or "text/plain" in ct:
+        return False
+    try:
+        r.json()
+        return True
+    except Exception:
+        return False

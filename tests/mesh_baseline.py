@@ -34,7 +34,7 @@ BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8085").rstrip("/")
 ADMIN = os.environ.get("NETWORK_ADMIN_TOKEN", "")
 
 VOLATILI = ("ts", "at", "last_seen", "ultimo", "ultima", "created_at", "updated_at",
-            "uptime", "duration_ms", "elapsed_ms", "_ts")
+            "uptime", "duration_ms", "elapsed_ms", "_ts", "sampled_at")
 
 SOTTOPESI = {"X-Hyperspace-Network-Token": ADMIN}
 
@@ -85,6 +85,9 @@ def raccogli() -> dict:
         "nodes_active": _get("/nodes/active"),
         "nodes_aliases": _get("/nodes/aliases"),
         "routing_weights": _get("/config/routing-weights"),
+        # le metriche raccolte dai nodi: stessa fonte del punteggio, e quindi
+        # il posto dove si vede se il punteggio e' stato calcolato sui dati giusti
+        "metrics_nodes": _get("/metrics/nodes"),
         "topology": _get("/mesh/topology"),
 
         # percorsi che non esistono: il driver e il CLI li chiamano comunque

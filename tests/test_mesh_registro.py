@@ -56,15 +56,13 @@ def _monta(modello=None, metriche=None, alias=None, modello_cache=None):
         app,
         advanced_config={},
         recent_routing_lock=threading.Lock(),
-        score_cache_lock=threading.Lock(),
-        node_metrics_lock=threading.Lock(),
         aggregate_mesh_models=lambda **kw: modello,
         latest_metrics=lambda nid: metriche.get(nid),
         recent_ts=lambda nid: None,
         score_terms_breakdown=lambda breakdown: 0.0,
         local_node_id="local-di-prova",
         models_cache=modello_cache,
-        node_metrics_cache=metriche,
+        rimuovi_campioni=lambda nid: metriche.pop(nid, None),
     )
     return app
 
@@ -160,26 +158,52 @@ class GliAliasTests(unittest.TestCase):
 
 
 class LeCacheCondiviseTests(unittest.TestCase):
-    def test_il_modello_riceve_gli_stessi_oggetti_e_non_delle_copie(self):
-        metriche = {}
+    def test_il_modello_riceve_lo_stesso_oggetto_e_non_una_copia(self):
+        """Il catalogo dei modelli resta del main (lo scrive il suo aggregatore),
+        e il mesh lo riceve per riferimento: due copie farebbero ricalcolare i
+        modelli ogni volta, e uno dei due risponderebbe sempre vuoto."""
         modello = {}
-        _monta(metriche=metriche, modello_cache=modello)
-        contesto = cp_mesh._contesto
-        self.assertIs(contesto.node_metrics_cache, metriche)
-        self.assertIs(contesto.models_cache, modello)
+        _monta(modello_cache=modello)
+        self.assertIs(cp_mesh._contesto.models_cache, modello)
+        modello["data"] = ["qwen3:8b"]
+        self.assertEqual(cp_mesh._contesto.models_cache["data"], ["qwen3:8b"])
 
-    def test_una_cache_separata_farebbe_punteggi_sempre_vuoti(self):
-        """Il difetto che il riferimento evita, detto come deve suonare: due
-        dizionari distinti restano uno vuoto per sempre, e ogni nodo prende lo
-        stesso score."""
-        metriche = {}
-        _monta(metriche=metriche)
-        metriche["nodo-a"] = {"vram_free_mb": 1000}
-        self.assertIn("nodo-a", cp_mesh._contesto.node_metrics_cache)
-        # una copia, invece, non vedrebbe niente
-        copia = dict(metriche)
-        copia.clear()
-        self.assertEqual(copia, {})
+    def test_i_campioni_hanno_un_proprietario_solo(self):
+        """I campioni delle metriche stanno in `cp/metriche.py` e il mesh non li
+        riceve piu': li chiede con una funzione. Il perche' e' nella stessa riga —
+        una cache passata per contesto viene duplicata appena qualcuno la tocca
+        dal modulo, e da li' in poi i due pezzi non coincidono piu' senza che
+        nessuno se ne accorga."""
+        _monta()
+        contesto = cp_mesh._contesto
+        for nome in ("node_metrics_cache", "node_metrics_lock"):
+            self.assertFalse(hasattr(contesto, nome),
+                             f"il mesh non deve piu' avere {nome}: la cache dei "
+                             f"campioni ha un solo proprietario")
+        sorgente = (ROOT / "control-plane/cp/metriche.py").read_text(encoding="utf-8")
+        self.assertIn("_node_metrics_cache", sorgente)
+        self.assertIn("def ultima_metrica", sorgente)
+        # e il main non ne tiene una copia
+        main = (ROOT / "control-plane/main.py").read_text(encoding="utf-8")
+        self.assertNotIn("_node_metrics_cache: dict", main)
+        self.assertNotIn("node_metrics_cache=_node_metrics_cache", main)
+
+    def test_il_mesh_chiede_il_campione_e_non_tocca_la_cache(self):
+        """La promessa che il mesh fa al modulo delle metriche: leggere un
+        campione. Nient'altro. Se un domani il punteggio volesse scriverci dentro,
+        deve fallire — ed e' quello che deve succedere."""
+        from cp import metriche as cp_metriche
+
+        cp_metriche._node_metrics_cache.clear()
+        cp_metriche._node_metrics_cache["nodo-a"] = {"samples": [{"vram": 1}],
+                                                      "last_collected_at": 1}
+        try:
+            self.assertEqual(cp_metriche.ultima_metrica("nodo-a"), {"vram": 1})
+            self.assertIsNone(cp_metriche.ultima_metrica("nodo-assente"))
+            _monta()
+            cp_mesh._contesto.latest_metrics("nodo-a")
+        finally:
+            cp_metriche._node_metrics_cache.clear()
 
     def test_il_tetto_della_cache_si_riallinea(self):
         """Cambiando l'intervallo di raccolta il tetto va ricalcolato: se no, la
