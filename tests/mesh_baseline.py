@@ -115,6 +115,39 @@ def raccogli() -> dict:
 
         # l'annuncio: e' la via che un nodo si presenta
         "announce_corpo_vuoto": _post("/mesh/announce", {}),
+
+        # l'annuncio, percorso felice. Va in coda perche' cambia il registro, e
+        # quindi anche le risposte di `/mesh/nodes` e `/mesh/topology` di prima:
+        # se stesse prima, la baseline non saprebbe piu' dire quale dei due
+        # comportamenti e' quello che sta provando.
+        #
+        # Il caso che conta e' il secondo annuncio: endpoint invariato, e la
+        # risposta dice `accepted: false`. E' il battito di un nodo che si
+        # ripresenta, e senza la parte che rinfresca `status` e `last_seen`
+        # un nodo sopravvissuto a un reboot del control-plane resterebbe
+        # "unreachable" per sempre — invisibile, senza mai diventare un errore.
+        "announce_nodo_nuovo": _post("/mesh/announce",
+                                     {"node_id": "nodo-di-prova",
+                                      "endpoint": "http://nodo-di-prova:11434"}),
+        "announce_battito": _post("/mesh/announce",
+                                  {"node_id": "nodo-di-prova",
+                                   "endpoint": "http://nodo-di-prova:11434"}),
+        # un nodo web non ha endpoint: se non lo manda, gliene viene dato uno
+        # sintetico, e il registro deve saperlo dire da un'annuncio come da un altro
+        "announce_web_node": _post("/mesh/announce",
+                                   {"node_id": "web-di-prova",
+                                    "capabilities": ["browser"]}),
+        # declassamento https -> http: l'endpoint peggiore non deve sostituire
+        # quello buono, altrimenti un nodo con la configurazione sbagliata
+        # Continua a vincere e non si capisce piu' perche'
+        "announce_https_prima": _post("/mesh/announce",
+                                      {"node_id": "nodo-declassato",
+                                       "endpoint": "https://nodo-declassato:8443"}),
+        "announce_declassato": _post("/mesh/announce",
+                                     {"node_id": "nodo-declassato",
+                                      "endpoint": "http://nodo-declassato:8443"}),
+        # e il nodo annunciato deve comparire dove l'operatore guarda
+        "nodi_dopo_annuncio": _get("/mesh/nodes"),
     }
 
 

@@ -74,9 +74,14 @@ _bp = Blueprint("mesh", __name__)
 _contesto = None
 
 # ── lo stato ──────────────────────────────────────────────────────────────────
-# Vive qui e viene letto da dodici funzioni che restano in main.py. Non è un
-# dettaglio: è il registro della rete, e finché è in due posti la prima
-# divergenza è questione di tempo.
+# Vive qui e viene letto da ventiquattro funzioni che restano in main.py. Non è
+# un dettaglio: è il registro della rete, e finché è in due posti la prima
+# divergenza è questione di tempo. Il numero è alto perche' metà del
+# control-plane chiede "chi c'è" — la selezione dei nodi, i dream, la memoria
+# sincronizzata, il doctor, il tool di stato.
+#
+# L'id del nodo locale NON si calcola qui: lo produce il boot (identita' o
+# `LOCAL_NODE_ID` dall'ambiente) e arriva con `monta(local_node_id=...)`.
 _LOCAL_NODE_ID = ""
 _nodes_by_id: dict = {}
 _node_aliases: dict = {}   # node_id -> alias, cache in RAM sincronizzata con SQLite
@@ -158,8 +163,8 @@ def smonta():
     global _contesto
     _contesto = None
 
-
-# ── il registro: chi c'è, e come si indirizza ─────────────────────────────────_LOCAL_NODE_ID       = os.getenv("LOCAL_NODE_ID", "") or _stable_local_id()
+# L'id del nodo locale NON e' qui: lo calcola il boot (identita' o
+# `LOCAL_NODE_ID` dall'ambiente) e arriva con `monta(local_node_id=...)`.
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def _normalize_endpoint(ep: str) -> str:
@@ -435,7 +440,71 @@ def _best_endpoint(node_info):
     public = _normalize_endpoint(public)
     if public and public.startswith("https://"): return public
     return ep
-# ── le rotte che l'operatore e il driver leggono ──────────────────────────────
+
+
+# ── l'annuncio: la via in cui un nodo si presenta ──────────────────────────────
+# Va prima delle altre perche' e' l'unica che AGGIUNGE al registro: le rotte
+# sotto leggono e scrivono un registro che qualcuno deve aver riempito prima, e
+# se non c'e' nessuno che lo faccia rispondono tutti "vuoto".
+#
+# Un nodo si annuncia piu' volte, e non ogni annuncio e' la stessa cosa. Sono tre
+# casi distinti, ed è qui che si sbagliava piu' volentieri:
+#
+# 1. Endpoint nuovo o diverso: si aggiorna tutto. E' la registrazione.
+# 2. Endpoint identico: NON si aggiorna, ma si rinfresca `status` e `last_seen`.
+#    E' il battito, e senza il rinfresco un nodo che ha sopravvissuto a un reboot
+#    del control-plane resterebbe "unreachable" per sempre — sparirebbe da
+#    /v1/models senza mai diventare un errore.
+# 3. Endpoint peggiore (https che scende a http): si rifiuta. Altrimenti un nodo
+#    con la configurazione sbagliata continuerebbe a vincere, e non si saprebbe
+#    piu' dire perche'.
+#
+# Un nodo web non ha endpoint in ingresso: se non lo manda, gliene viene dato uno
+# sintetico `browser://`, e da li' in poi il registro lo tratta come gli altri.
+@_bp.route('/mesh/announce', methods=['POST'])
+def mesh_announce():
+    data = request.get_json(force=True, silent=True) or {}
+    ep   = _normalize_endpoint(data.get("endpoint", ""))
+    nid  = data.get("node_id", "")
+
+    if not nid:
+        return jsonify({"ok": False, "error": "missing node_id"}), 400
+
+    # Accetta endpoint browser:// per web-nodes (synthetic)
+    if not ep:
+        ep = f"browser://{nid}"
+
+    existing      = _nodes_by_id.get(nid)
+    should_update = True
+    if existing:
+        existing_ep = _normalize_endpoint(existing.get("endpoint", ""))
+        if existing_ep == ep:
+            should_update = False
+        elif existing_ep.startswith("https://") and not ep.startswith("https://") and not ep.startswith("browser://"):
+            should_update = False
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if should_update:
+        info = {**data, "endpoint": ep, "status": "active", "last_seen": now,
+                "is_web_node": ep.startswith("browser://")}
+        _nodes_by_id[nid] = info
+        _known_endpoints.add(ep)
+        db.upsert_node(info)
+    else:
+        # Endpoint invariato, ma il nodo sta annunciando (heartbeat): rinfresca
+        # comunque last_seen e riporta lo stato ad "active". Senza questo, dopo
+        # un reboot del CP (_load_nodes_from_db marca tutti i nodi "unreachable"),
+        # un nodo che ri-annuncia lo STESSO endpoint resterebbe "unreachable"
+        # per sempre e sparirebbe da /v1/models.
+        existing["status"] = "active"
+        existing["last_seen"] = now
+        _nodes_by_id[nid] = existing
+        db.upsert_node(existing)
+    push_log('mesh_event', f'Node announced: {nid[:12]}',
+             f'endpoint={ep} accepted={should_update}', source=nid[:12], status='success')
+    return jsonify({"ok": True, "registered": ep, "accepted": should_update})
+
+
+# ── le rotte che l'operatore e il driver leggono ──
 @_bp.route('/mesh/nodes')
 def get_mesh_nodes():
     nodes = _node_list()

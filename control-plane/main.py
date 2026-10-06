@@ -3360,48 +3360,6 @@ def metrics_summary():
     })
 
 
-# ── MESH ──────────────────────────────────────────────────────────────────────
-@app.route('/mesh/announce', methods=['POST'])
-def mesh_announce():
-    data = request.get_json(force=True, silent=True) or {}
-    ep   = _normalize_endpoint(data.get("endpoint", ""))
-    nid  = data.get("node_id", "")
-
-    if not nid:
-        return jsonify({"ok": False, "error": "missing node_id"}), 400
-
-    # Accetta endpoint browser:// per web-nodes (synthetic)
-    if not ep:
-        ep = f"browser://{nid}"
-
-    existing      = _nodes_by_id.get(nid)
-    should_update = True
-    if existing:
-        existing_ep = _normalize_endpoint(existing.get("endpoint", ""))
-        if existing_ep == ep:
-            should_update = False
-        elif existing_ep.startswith("https://") and not ep.startswith("https://") and not ep.startswith("browser://"):
-            should_update = False
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if should_update:
-        info = {**data, "endpoint": ep, "status": "active", "last_seen": now,
-                "is_web_node": ep.startswith("browser://")}
-        _nodes_by_id[nid] = info
-        _known_endpoints.add(ep)
-        db.upsert_node(info)
-    else:
-        # Endpoint invariato, ma il nodo sta annunciando (heartbeat): rinfresca
-        # comunque last_seen e riporta lo stato ad "active". Senza questo, dopo
-        # un reboot del CP (_load_nodes_from_db marca tutti i nodi "unreachable"),
-        # un nodo che ri-annuncia lo STESSO endpoint resterebbe "unreachable"
-        # per sempre e sparirebbe da /v1/models.
-        existing["status"] = "active"
-        existing["last_seen"] = now
-        _nodes_by_id[nid] = existing
-        db.upsert_node(existing)
-    push_log('mesh_event', f'Node announced: {nid[:12]}',
-             f'endpoint={ep} accepted={should_update}', source=nid[:12], status='success')
-    return jsonify({"ok": True, "registered": ep, "accepted": should_update})
 
 
 @app.route('/nodes/active')

@@ -42,6 +42,7 @@ avvia_server() {
       IDENTITY_FILE="$BASE/id.json" \
       INSTAGRAM_INBOX_POLL_ENABLED=false \
       CHANNEL_CLIENTS="$CANALE_CLIENTI" \
+      DB_PATH="$BASE/db.sqlite3" \
       "$@" \
       "$PY" control-plane/main.py > "$BASE/server.log" 2>&1 & )
   aspetta_server

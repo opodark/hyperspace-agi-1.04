@@ -7,28 +7,52 @@
     "body": "{\"error\":\"nodo non trovato\"}\n",
     "status": 404
   },
+  "announce_battito": {
+    "body": "{\"accepted\":false,\"ok\":true,\"registered\":\"http://nodo-di-prova:11434\"}\n",
+    "status": 200
+  },
   "announce_corpo_vuoto": {
     "body": "{\"error\":\"missing node_id\",\"ok\":false}\n",
     "status": 400
+  },
+  "announce_declassato": {
+    "body": "{\"accepted\":false,\"ok\":true,\"registered\":\"http://nodo-declassato:8443\"}\n",
+    "status": 200
+  },
+  "announce_https_prima": {
+    "body": "{\"accepted\":true,\"ok\":true,\"registered\":\"https://nodo-declassato:8443\"}\n",
+    "status": 200
+  },
+  "announce_nodo_nuovo": {
+    "body": "{\"accepted\":true,\"ok\":true,\"registered\":\"http://nodo-di-prova:11434\"}\n",
+    "status": 200
+  },
+  "announce_web_node": {
+    "body": "{\"accepted\":true,\"ok\":true,\"registered\":\"browser://web-di-prova\"}\n",
+    "status": 200
   },
   "elimina_nodo_inesistente": {
     "body": "{\"error\":\"nodo non trovato\",\"ok\":false}\n",
     "status": 404
   },
   "mesh_nodes": {
-    "body": "[{\"active_requests\":0,\"alias\":\"\",\"backend_type\":\"model_manager\",\"capabilities\":[\"ollama\",\"control-plane\"],\"capacity\":1,\"degraded\":false,\"endpoint\":\"\",\"is_local\":true,\"last_seen\":\"2026-10-06T06:57:16Z\",\"node_id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"queued_requests\":0,\"saturation\":0.0,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\",\"vram_gb\":16.0}]\n",
+    "body": "[{\"active_requests\":0,\"alias\":\"\",\"backend_type\":\"model_manager\",\"capabilities\":[\"ollama\",\"control-plane\"],\"capacity\":1,\"degraded\":false,\"endpoint\":\"\",\"is_local\":true,\"last_seen\":\"2026-10-06T07:51:48Z\",\"node_id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"queued_requests\":0,\"saturation\":0.0,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\",\"vram_gb\":16.0}]\n",
     "status": 200
   },
   "metrics_nodes": {
-    "body": "{\"interval_s\":20,\"nodes\":[{\"alias\":\"\",\"endpoint\":\"\",\"history\":[],\"last_collected_at\":null,\"last_error\":null,\"metrics\":null,\"node_id\":\"local-70f7786f980b44e6\",\"sample_age_s\":null,\"schema_mismatch\":null,\"schema_version\":null,\"score_breakdown\":null,\"stale\":false,\"status\":\"active\"}],\"sampled_at\":\"2026-10-06T06:57:17Z\",\"schema_version\":3,\"window\":20}\n",
+    "body": "{\"interval_s\":20,\"nodes\":[{\"alias\":\"\",\"endpoint\":\"\",\"history\":[],\"last_collected_at\":null,\"last_error\":null,\"metrics\":null,\"node_id\":\"local-70f7786f980b44e6\",\"sample_age_s\":null,\"schema_mismatch\":null,\"schema_version\":null,\"score_breakdown\":null,\"stale\":false,\"status\":\"active\"}],\"sampled_at\":\"2026-10-06T07:51:49Z\",\"schema_version\":3,\"window\":20}\n",
     "status": 200
   },
   "nodes_active": {
-    "body": "[{\"active_requests\":0,\"alias\":\"\",\"backend_type\":\"model_manager\",\"capabilities\":[\"ollama\",\"control-plane\"],\"capacity\":1,\"degraded\":false,\"endpoint\":\"\",\"is_local\":true,\"last_seen\":\"2026-10-06T06:57:16Z\",\"node_id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"queued_requests\":0,\"saturation\":0.0,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\",\"vram_gb\":16.0}]\n",
+    "body": "[{\"active_requests\":0,\"alias\":\"\",\"backend_type\":\"model_manager\",\"capabilities\":[\"ollama\",\"control-plane\"],\"capacity\":1,\"degraded\":false,\"endpoint\":\"\",\"is_local\":true,\"last_seen\":\"2026-10-06T07:51:48Z\",\"node_id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"queued_requests\":0,\"saturation\":0.0,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\",\"vram_gb\":16.0}]\n",
     "status": 200
   },
   "nodes_aliases": {
     "body": "{}\n",
+    "status": 200
+  },
+  "nodi_dopo_annuncio": {
+    "body": "[{\"active_requests\":0,\"alias\":\"\",\"backend_type\":\"model_manager\",\"capabilities\":[\"ollama\",\"control-plane\"],\"capacity\":1,\"degraded\":false,\"endpoint\":\"\",\"is_local\":true,\"last_seen\":\"2026-10-06T07:51:48Z\",\"node_id\":\"local-70f7786f980b44e6\",\"peers_active\":0,\"queued_requests\":0,\"saturation\":0.0,\"status\":\"active\",\"tier\":\"root\",\"uptime_s\":0,\"version\":\"1.05.0\",\"vram_gb\":16.0},{\"alias\":\"\",\"endpoint\":\"http://nodo-di-prova:11434\",\"is_web_node\":false,\"last_seen\":\"2026-10-06T07:51:49Z\",\"node_id\":\"nodo-di-prova\",\"routing_score\":0.3304,\"status\":\"active\"},{\"alias\":\"\",\"capabilities\":[\"browser\"],\"endpoint\":\"browser://web-di-prova\",\"is_web_node\":true,\"last_seen\":\"2026-10-06T07:51:49Z\",\"node_id\":\"web-di-prova\",\"status\":\"active\"},{\"alias\":\"\",\"endpoint\":\"https://nodo-declassato:8443\",\"is_web_node\":false,\"last_seen\":\"2026-10-06T07:51:49Z\",\"node_id\":\"nodo-declassato\",\"routing_score\":0.3304,\"status\":\"active\"}]\n",
     "status": 200
   },
   "peers_nodo_inesistente": {
