@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
 import ast
+from types import SimpleNamespace
 import json
 import os
 import re
@@ -343,11 +344,14 @@ class RunnerTests(unittest.TestCase):
 
 class ControlPlanePresetTests(unittest.TestCase):
     def test_handler_forwards_preset_parameters(self):
-        tree = ast.parse((ROOT / "control-plane/main.py").read_text(encoding="utf-8"))
+        tree = ast.parse((ROOT / "control-plane/cp/tool.py").read_text(encoding="utf-8"))
         function = next(node for node in tree.body
                         if isinstance(node, ast.FunctionDef) and node.name == "_tool_code_sandbox")
         backend = FakeBackend("docker", True)
-        namespace = {"code_sandbox": backend, "json": json,
+        # `code_sandbox` arriva per contesto: lo scope isolato ne ha bisogno con
+        # la stessa forma, o il test eserciterebbe un percorso che in produzione
+        # non esiste.
+        namespace = {"_contesto": SimpleNamespace(code_sandbox=backend), "json": json,
                      "push_log": lambda *args, **kwargs: None, "SandboxUnavailable": SandboxUnavailable}
         exec(compile(ast.Module(body=[function], type_ignores=[]), "handler", "exec"), namespace)
         namespace["_tool_code_sandbox"]({"action": "check", "tool_id": "bandit",
@@ -356,11 +360,14 @@ class ControlPlanePresetTests(unittest.TestCase):
                                                         "workspace_id": "docker:12345678"}))
 
     def test_handler_forwards_verify_plan(self):
-        tree = ast.parse((ROOT / "control-plane/main.py").read_text(encoding="utf-8"))
+        tree = ast.parse((ROOT / "control-plane/cp/tool.py").read_text(encoding="utf-8"))
         function = next(node for node in tree.body
                         if isinstance(node, ast.FunctionDef) and node.name == "_tool_code_sandbox")
         backend = FakeBackend("docker", True)
-        namespace = {"code_sandbox": backend, "json": json,
+        # `code_sandbox` arriva per contesto: lo scope isolato ne ha bisogno con
+        # la stessa forma, o il test eserciterebbe un percorso che in produzione
+        # non esiste.
+        namespace = {"_contesto": SimpleNamespace(code_sandbox=backend), "json": json,
                      "push_log": lambda *args, **kwargs: None, "SandboxUnavailable": SandboxUnavailable}
         exec(compile(ast.Module(body=[function], type_ignores=[]), "handler", "exec"), namespace)
         plan = [{"tool_id": "ruff", "path": "shared"}, {"tool_id": "bandit", "path": "shared"}]

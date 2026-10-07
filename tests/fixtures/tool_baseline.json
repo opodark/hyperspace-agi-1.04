@@ -1,0 +1,34 @@
+{
+  "execute_corpo_vuoto": {
+    "body": "{\"error\":\"missing tool_name\"}\n",
+    "status": 400
+  },
+  "execute_get_mesh_status": {
+    "body": "{\"result\":\"Nodi attivi: 1\\nModelli disponibili: \\nBackend inferenza: ollama\\nHeartbeat ciclo: 0\\nUltimo tick: None\\n  - local-70f7786f98 | tier=root vram=16.0GB load=0/1\"}\n",
+    "status": 200
+  },
+  "execute_non_oggetto": {
+    "body": "{\"error\":\"il corpo deve essere un oggetto JSON\"}\n",
+    "status": 400
+  },
+  "execute_senza_token": {
+    "body": "{\"configured\":true,\"error\":\"token amministrativo di rete mancante o non valido\",\"ok\":false}\n",
+    "status": 401
+  },
+  "execute_tool_inesistente": {
+    "body": "{\"result\":\"Tool 'nessun_tool_questo' non gestito da nessun connector attivo.\"}\n",
+    "status": 200
+  },
+  "mcp_anonimo": {
+    "body": "{\"error\":{\"code\":-32001,\"message\":\"MCP non configurato: serve un token di almeno 32 caratteri in MCP_CLIENTS o MCP_TOKEN\"},\"id\":1,\"jsonrpc\":\"2.0\"}\n",
+    "status": 503
+  },
+  "mcp_metodo_ignoto": {
+    "body": "{\"error\":{\"code\":-32001,\"message\":\"MCP non configurato: serve un token di almeno 32 caratteri in MCP_CLIENTS o MCP_TOKEN\"},\"id\":2,\"jsonrpc\":\"2.0\"}\n",
+    "status": 503
+  },
+  "mcp_status": {
+    "body": "{\"allow_loopback\":false,\"clients\":[],\"configured\":false,\"enabled\":true,\"problems\":[],\"protocol_version\":\"2025-06-18\",\"published_tools\":[\"web_search\",\"omega_query\",\"omega_store\",\"get_mesh_status\",\"code_sandbox\",\"persona_get\",\"persona_note\",\"ask_aurora\"]}\n",
+    "status": 200
+  }
+}

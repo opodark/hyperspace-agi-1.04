@@ -18,6 +18,7 @@ da Flask, nessuna rete, nessun modello vero. `_execute_tool_call` è quello vero
 from __future__ import annotations
 
 import ast
+from types import SimpleNamespace
 
 from tests import cp_source
 import json
@@ -132,7 +133,12 @@ def carica(risposte, client_tools=True):
         "NodeBusyError": NodeBusyError,
         "BUILTIN_TOOLS": CATALOGO_FINTO,
         "identity_tools_hidden": identity_tools_hidden,
-        "connector_manager": registrato["connettore"],
+        # `cp/tool.py` riceve i suoi oggetti di boot per contesto, quindi lo scope
+        # isolato riceve un `_contesto` con la stessa forma. Senza, il test
+        # passerebbe senza esercitare il passaggio per cui esiste.
+        "_contesto": SimpleNamespace(connector_manager=registrato["connettore"],
+                                     code_sandbox=None, mcp_policy=None,
+                                     fetch_models=lambda: {"models": []}),
         "push_log": lambda *a, **k: registrato["log"].append((a, k)),
         "_call_ollama": _call_ollama,
         "_model_supports_tools": lambda modello: True,

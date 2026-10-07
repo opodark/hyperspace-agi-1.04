@@ -82,6 +82,28 @@ _ROUTING_WEIGHTS = {
 _LOCAL_NODE_ENABLED = os.getenv("LOCAL_NODE_ENABLED", "true").lower() not in ("0", "false", "no")
 _LOCAL_NODE_ENDPOINT = os.getenv("LOCAL_NODE_ENDPOINT", "")  # es. http://192.168.1.10:11434
 
+# Revisioni del protocollo che conosciamo. Se il client ne chiede una piu'
+# recente gliela confermiamo comunque: la superficie che usiamo (tools/list +
+# tools/call) non e' cambiata fra le revisioni, e rifiutare romperebbe client
+# nuovi senza motivo.
+MCP_PROTOCOL_VERSION = "2025-06-18"
+
+# Un comando reale (git, npm, python, i propri script) senza una shell: la
+# policy vive nell'host-agent (argv, allowlist per nome, cwd, cap di output e
+# tempo), qui c'e' il percorso governato — token, log di audit, e un tool che
+# compare nel catalogo (tool loop chat, MCP, /tools/execute) SOLO se l'operatore
+# lo accende E un host-agent e' configurato. Un tool presente e non funzionante
+# e' peggio di un tool assente: per questo si auto-abilita, come i connettori.
+SHELL_RUN_ENABLED = os.getenv("SHELL_RUN_ENABLED", "false").strip().lower() == "true"
+
+# Il confine NON è la rete (Kali gira con network_mode: host + socket raw per
+# nmap -sS/ARP/sniffing): è KALI_TARGET_ALLOWLIST, verificata in hostctl prima
+# di ogni esecuzione. Il tool compare nel catalogo solo se l'operatore accende
+# KALI_ENABLED, dichiara almeno un target E l'host-agent è configurato.
+KALI_ENABLED = os.getenv("KALI_ENABLED", "false").strip().lower() == "true"
+
+KALI_TARGET_ALLOWLIST = os.getenv("KALI_TARGET_ALLOWLIST", "").strip()
+
 DIARIO_IMMAGINI_DIR = os.getenv("DIARIO_IMMAGINI_DIR", "").strip() or os.path.join(
     BASE_DIR, "..", "data", "diario-immagini")
 DIARIO_FILE         = os.getenv("FEED_DIARIO_FILE", "").strip() or os.path.join(
