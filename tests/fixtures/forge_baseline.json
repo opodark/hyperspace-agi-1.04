@@ -1,0 +1,62 @@
+{
+  "aggiorna": {
+    "body": "{\"created_at\":\"2026-10-07T08:09:07Z\",\"description\":\"\",\"generator\":\"human\",\"id\":\"baseline-prova-303ede\",\"name\":\"baseline-prova\",\"permissions\":[],\"source\":\"# seconda\\n\",\"status\":\"draft\",\"type\":\"skill\",\"updated_at\":\"2026-10-07T08:09:07Z\",\"validation\":{\"issues\":[],\"valid\":true,\"warnings\":[\"skill instructions are unusually short\"]},\"version\":2}\n",
+    "status": 200
+  },
+  "aggiorna_inesistente": {
+    "body": "{\"error\":\"artifact not found\"}\n",
+    "status": 404
+  },
+  "config": {
+    "body": "{\"ide_artifacts_dir\":\"/home/coder/forge\",\"ide_url\":\"http://127.0.0.1:8443\"}\n",
+    "status": 200
+  },
+  "create": {
+    "body": "{\"created_at\":\"2026-10-07T08:09:07Z\",\"description\":\"\",\"generator\":\"human\",\"id\":\"baseline-prova-303ede\",\"name\":\"baseline-prova\",\"permissions\":[],\"source\":\"# prima\\n\",\"status\":\"draft\",\"type\":\"skill\",\"updated_at\":\"2026-10-07T08:09:07Z\",\"validation\":{\"issues\":[],\"valid\":true,\"warnings\":[\"skill instructions are unusually short\"]},\"version\":1}\n",
+    "status": 201
+  },
+  "create_nome_vuoto": {
+    "body": "{\"error\":\"name is required\"}\n",
+    "status": 400
+  },
+  "create_tipo_sbagliato": {
+    "body": "{\"error\":\"type must be tool, skill, or patch\"}\n",
+    "status": 400
+  },
+  "genera_senza_descrizione": {
+    "body": "{\"error\":\"generation supports tool or skill and requires a description\"}\n",
+    "status": 400
+  },
+  "genera_tipo_sbagliato": {
+    "body": "{\"error\":\"generation supports tool or skill and requires a description\"}\n",
+    "status": 400
+  },
+  "import_senza_token": {
+    "body": "{\"error\":\"ECC import requires FORGE_ADMIN_TOKEN\"}\n",
+    "status": 403
+  },
+  "leggi_con_get": {
+    "body": "<!doctype html>\n<html lang=en>\n<title>405 Method Not Allowed</title>\n<h1>Method Not Allowed</h1>\n<p>The method is not allowed for the requested URL.</p>\n",
+    "status": 405
+  },
+  "lista": {
+    "body": "{\"approval_configured\":true,\"artifacts\":[]}\n",
+    "status": 200
+  },
+  "lista_dopo": {
+    "body": "{\"approval_configured\":true,\"artifacts\":[{\"created_at\":\"2026-10-07T08:09:07Z\",\"description\":\"\",\"generator\":\"human\",\"id\":\"baseline-prova-303ede\",\"name\":\"baseline-prova\",\"permissions\":[],\"source\":\"# seconda\\n\",\"status\":\"review\",\"type\":\"skill\",\"updated_at\":\"2026-10-07T08:09:07Z\",\"validation\":{\"issues\":[],\"valid\":true,\"warnings\":[\"skill instructions are unusually short\"]},\"version\":2}]}\n",
+    "status": 200
+  },
+  "stato": {
+    "body": "{\"created_at\":\"2026-10-07T08:09:07Z\",\"description\":\"\",\"generator\":\"human\",\"id\":\"baseline-prova-303ede\",\"name\":\"baseline-prova\",\"permissions\":[],\"source\":\"# seconda\\n\",\"status\":\"review\",\"type\":\"skill\",\"updated_at\":\"2026-10-07T08:09:07Z\",\"validation\":{\"issues\":[],\"valid\":true,\"warnings\":[\"skill instructions are unusually short\"]},\"version\":2}\n",
+    "status": 200
+  },
+  "status_senza_token": {
+    "body": "{\"error\":\"approval requires FORGE_ADMIN_TOKEN\"}\n",
+    "status": 403
+  },
+  "status_valore_sbagliato": {
+    "body": "{\"error\":\"invalid status\"}\n",
+    "status": 400
+  }
+}

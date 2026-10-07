@@ -34,6 +34,8 @@ COPPIE = {
     "federazione_baseline.py": "federazione.sh",
     "bottles_baseline.py": "bottles.sh",
     "tool_baseline.py": "tool.sh",
+    "sogni_baseline.py": "sogni.sh",
+    "forge_baseline.py": "forge.sh",
 }
 
 

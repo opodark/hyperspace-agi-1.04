@@ -11,7 +11,10 @@ ROOT = Path(__file__).parents[1]
 class ForgeContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.main_source = (ROOT / "control-plane" / "main.py").read_text(encoding="utf-8")
+        # Il forge e' in `cp/forge.py`, non piu' in main.py: il contratto si cerca
+        # dove il codice sta. Leggere main.py qui darebbe un KeyError che sembra
+        # un difetto del forge, ed e' solo che il forge si e' spostato.
+        cls.main_source = (ROOT / "control-plane" / "cp" / "forge.py").read_text(encoding="utf-8")
         cls.main_tree = ast.parse(cls.main_source)
         cls.dashboard = (ROOT / "control-plane" / "dashboard.html").read_text(encoding="utf-8")
         cls.compose = (ROOT / "docker-compose.windows.yml").read_text(encoding="utf-8")
@@ -22,7 +25,9 @@ class ForgeContractTests(unittest.TestCase):
             if not isinstance(node, ast.FunctionDef):
                 continue
             for decorator in node.decorator_list:
-                if isinstance(decorator, ast.Call) and ast.unparse(decorator.func) == "app.route":
+                # la rotta puo' essere dichiarata sull'app o su un blueprint:
+                # il forge ora e' in cp/forge.py e registra le sue
+                if isinstance(decorator, ast.Call) and ast.unparse(decorator.func).endswith(".route"):
                     routes[ast.literal_eval(decorator.args[0])] = ast.unparse(decorator)
         self.assertIn("methods=['PUT']", routes["/forge/artifacts/<artifact_id>"])
         self.assertIn("/forge/config", routes)

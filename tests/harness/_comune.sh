@@ -29,9 +29,16 @@ BASE=""
 # rifiuta e ogni route protetta risponde 401 — verde su tutto, e non si prova niente.
 #
 # Uso:  avvia_server <nome-base> [VAR=valore ...]
+#
+# Nelle variabili si puo' scrivere `@BASE@` al posto della directory temporanea:
+# la espande qui, perche' il chiamante la valuta PRIMA che `BASE` esista, e un
+# `$BASE` scritto fuori diventerebbe `/forge` — che in un container e' la root in
+# sola lettura, e il sintomo e' un 500 che non ha niente a che fare con il forge.
 avvia_server() {
   local nome="$1"; shift
   BASE="$(mktemp -d "${TMPDIR:-/tmp}/hyperspace-$nome-XXXXXX")"
+  local impostate=() v
+  for v in "$@"; do impostate+=("${v//@BASE@/$BASE}"); done
   ( cd "$RADICE" && env PYTHONPATH=.:control-plane \
       NETWORK_ADMIN_TOKEN="$ADMIN_TOKEN" \
       INSTAGRAM_REPLY_OUTBOX_FILE="$BASE/replies.json" \
@@ -43,7 +50,7 @@ avvia_server() {
       INSTAGRAM_INBOX_POLL_ENABLED=false \
       CHANNEL_CLIENTS="$CANALE_CLIENTI" \
       DB_PATH="$BASE/db.sqlite3" \
-      "$@" \
+      "${impostate[@]}" \
       "$PY" control-plane/main.py > "$BASE/server.log" 2>&1 & )
   aspetta_server
 }
@@ -58,6 +65,7 @@ aspetta_server() {
     [ "$codice" = "200" ] && return 0
     sleep 1
   done
+  echo "  server.log lasciato in $BASE per la diagnosi: $BASE" 
   echo "  il server non si e' alzato (HTTP $codice). Ultime righe:"
   tail -20 "$BASE/server.log" 2>/dev/null | sed 's/^/    /'
   return 1

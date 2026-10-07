@@ -126,7 +126,7 @@ class ForgeRoutesTests(unittest.TestCase):
         # e su Windows la codifica di default del sistema non e' UTF-8.
         radice = Path(__file__).parents[1]
         nomi_per_file = {
-            radice / "control-plane/main.py": {
+            radice / "control-plane/cp/forge.py": {
                 "_forge_path", "_forge_write", "_forge_authorized", "_forge_validate",
                 "_forge_read_skill", "forge_import_ecc", "forge_update", "forge_status"},
             radice / "control-plane/cp/chat.py": {"v1_chat_completions"},
