@@ -19,7 +19,9 @@
 # repository si ripete piu' volte di quanto sarebbe ragionevole, il che vuol dire
 # che e' una trappola vera e non una paranoia.
 
-from shared.persona import PersonaStore
+import os
+
+from shared.persona import PersonaStore, identity_expected
 
 _persona_store: PersonaStore | None = None
 
@@ -66,3 +68,19 @@ def ricarica() -> PersonaStore:
 def smonta() -> None:
     global _persona_store
     _persona_store = None
+
+# ── l'interruttore: e' il caso di mostrarla? ────────────────────────────
+
+def _persona_enabled(surface: str | None = None) -> bool:
+    """Letto a ogni richiesta: la spunta della tab Setup ha effetto immediato.
+
+    Una copia in una globale renderebbe il toggle 'salvato ma inerte fino al
+    riavvio', che è il difetto che stiamo evitando per i connettori.
+
+    Dal 2026-09-23 c'è anche la superficie: `workbench` (la console usata come
+    banco di lavoro) dichiara di non volere l'identità. Chi decide è
+    `shared/persona.py` — qui si legge e basta, o la regola vivrebbe in due posti.
+    """
+    if str(os.getenv("PERSONA_ENABLED", "true")).strip().lower() == "false":
+        return False
+    return identity_expected(surface)

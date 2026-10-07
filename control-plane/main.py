@@ -68,7 +68,7 @@ from shared.development_dream import NightlyDevelopmentDream
 from shared.hermes_memory import HermesMemoryError
 from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
 from shared.mcp_auth import McpAuthPolicy
-from shared.persona import PersonaStore, identity_expected, should_disclose
+from shared.persona import PersonaStore, should_disclose
 from shared.persona_dream import MAX_NEW_PER_RUN as PERSONA_DREAM_MAX_PROPOSALS
 from shared.persona_dream import PersonaDream
 from shared.image_jobs import (FAMIGLIE_CHECKPOINT, ImmagineQueue)
@@ -101,16 +101,27 @@ import cp.config as _config
 # in alto e non nel blocco di cablaggio perche' `persona.monta(...)` gira al
 # boot, e un import piu' in basso arriverebbe troppo tardi.
 from cp import persona
+from cp.persona import _persona_enabled
 import cp.mesh as mesh
 import cp.mesh as mesh
 # Le funzioni del registro, per nome. Le loro `global` sono quelle di cp.mesh,
 # quindi l'import e' innocuo. `_node_aliases` invece no: mesh lo riassegna, e
 # per quello si va dal modulo (`mesh._node_aliases`) — un import per nome
 # avrebbe tenuto il dizionario di quando e' stato importato.
-from cp.mesh import (_best_endpoint, _invalidate_fleet_scores, _known_endpoints,
-                     _load_aliases_from_db, _load_nodes_from_db, _node_ids_with_model,
-                     _node_list, _node_ref_for, _node_score, _normalize_endpoint,
-                     _parse_model_node_ref, _record_routing_pick, _register_local_node,
+from cp.mesh import (                     _best_endpoint,
+                     _invalidate_fleet_scores,
+                     _known_endpoints,
+                     _load_aliases_from_db,
+                     _load_nodes_from_db,
+                     _node_ids_with_model,
+                     _node_list,
+                     _node_ref_for,
+                     _node_score,
+                     _normalize_endpoint,
+                     _parse_model_node_ref,
+                     _rank_candidate_nodes,
+                     _record_routing_pick,
+                     _register_local_node,
                      _routing_scores)
 from cp.config import (                        _AUTHORITY_ENABLED,
                         _AUTHORITY_URL,
@@ -266,20 +277,6 @@ connector_manager = ConnectorManager(on_event=_connector_event)
 # persona diversa dal control-plane. E' il bug che quel modulo e' nato per chiudere.
 persona.monta(PersonaStore.load())
 
-
-def _persona_enabled(surface: str | None = None) -> bool:
-    """Letto a ogni richiesta: la spunta della tab Setup ha effetto immediato.
-
-    Una copia in una globale renderebbe il toggle 'salvato ma inerte fino al
-    riavvio', che è il difetto che stiamo evitando per i connettori.
-
-    Dal 2026-09-23 c'è anche la superficie: `workbench` (la console usata come
-    banco di lavoro) dichiara di non volere l'identità. Chi decide è
-    `shared/persona.py` — qui si legge e basta, o la regola vivrebbe in due posti.
-    """
-    if str(os.getenv("PERSONA_ENABLED", "true")).strip().lower() == "false":
-        return False
-    return identity_expected(surface)
 
 
 def _reload_persona() -> None:
@@ -787,28 +784,6 @@ def _select_best_node(active_nodes: list, model: str = "") -> dict:
     _record_routing_pick(best.get("node_id", ""))
     return best
 
-def _rank_candidate_nodes(active_nodes: list, pinned_node_id: str = None, max_candidates: int = None, model: str = "") -> list:
-    """Nodi eseguibili ordinati per score decrescente, col nodo pinnato (se
-    presente e disponibile) in testa. Se 'model' e' specificato, filtra prima
-    ai soli nodi che lo hanno (vedi _node_ids_with_model). Usato per il retry
-    quando il nodo scelto risponde 'occupato' (503 node_busy_timeout) o non
-    ha il modello: invece di fallire subito o aspettare, il CP prova in
-    sequenza fino a max_candidates nodi migliori."""
-    max_candidates = max_candidates or ROUTING_MAX_CANDIDATES
-    candidates = active_nodes
-    if model:
-        ids = _node_ids_with_model(model)
-        candidates = [n for n in active_nodes if n.get("node_id") in ids]
-    executable = [n for n in candidates if _best_endpoint(n)]
-    if not executable:
-        return []
-    ranked = [n for n, _s, _b in _routing_scores(executable, model=model)]
-    if pinned_node_id:
-        pinned = next((n for n in ranked if n.get("node_id") == pinned_node_id), None)
-        if pinned:
-            ranked = [pinned] + [n for n in ranked if n is not pinned]
-    return ranked[:max_candidates]
-
 def _select_node_for_request(active: list, pinned_node_id: str = None, model: str = ""):
     if pinned_node_id:
         pinned = next((n for n in active if n.get("node_id") == pinned_node_id), None)
@@ -1006,7 +981,7 @@ from cp.canali import monta as monta_canali
 # `imposta_handlers` registra dove stanno i tool nativi. `cp/chat.py` non puo'
 # importarli da qui — creerebbe un ciclo, perche' questo file lo importa —
 # quindi il puntatore glielo passiamo una volta sola, dopo la definizione.
-from cp.chat import (_catalogo_nativi, _chunk_finale, _compress_prompt_via_omniroute, _deadline_exceeded, _decide_thinking, _finalize_task, _inference_urls, _last_user_text, _native_direct_enabled, _risposta_solo_tool_del_client, _stream_direct, _tool_del_client, _try_omniroute_fallback, _with_persona, imposta_handlers)
+from cp.chat import (_catalogo_nativi, _chunk_finale, _compress_prompt_via_omniroute, _deadline_exceeded, _decide_thinking, _finalize_task, _inference_urls, _last_user_text, _native_direct_enabled, _stream_direct, _try_omniroute_fallback, _with_persona, imposta_handlers, _run_tool_loop)
 # La memoria e le sue voci stanno in cp/memoria.py: il file, il tetto, l'ordine e
 # il bridge. `memory_sync` e' di li' e si ricarica da li', quindi la funzione che
 # lo ricarica non ha piu' un `global` da dichiarare.
@@ -1037,7 +1012,7 @@ from cp.battito import hb_state
 # nome e' innocuo, e non e' il caso delle variabili riassegnate.
 from cp.bottles import monta as monta_bottiglie
 from cp.tool import monta as monta_tool
-from cp.tool import _execute_tool_call, _handlers_nativi
+from cp.tool import _handlers_nativi
 from cp.federazione import (_sister_peer,
                             _try_federated_execution, invalida_vista,
                             monta as monta_federazione)
@@ -1659,97 +1634,6 @@ def sandbox_status():
 
 
 
-
-def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: bool = False,
-                   node_id: str = "", builtin_tools=None) -> dict:
-    messages       = list(data.get("messages", []))
-    model          = data.get("model", DEFAULT_MODEL)
-    tools_disabled = bool(data.get("_hyperspace_tools_off"))
-    backend_data   = {k: v for k, v in data.items()
-                      if k not in ("_hyperspace_tools_off", "_hyperspace_surface")}
-    supports_tools = _model_supports_tools(model) and not tools_disabled
-    push_log('system', f'tool_loop: model={model} tools={supports_tools} signed={sign}', status='info')
-
-    if not supports_tools:
-        payload = {**backend_data, "messages": messages, "stream": False}
-        payload.pop("tools", None)
-        try:
-            return _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
-        except NodeBusyError:
-            raise
-        except Exception as e:
-            return {"error": {"message": str(e), "type": "server_error"}}
-
-    client_tools = data.get("tools", [])
-    client_names = {t["function"]["name"] for t in client_tools if t.get("function", {}).get("name")}
-    offered_builtins = (_catalogo_nativi(str(data.get("_hyperspace_surface", "") or ""))
-                        if builtin_tools is None else builtin_tools)
-    all_tools    = client_tools + [t for t in offered_builtins if t["function"]["name"] not in client_names]
-    last_resp    = None
-
-    def _retry_without_tools(reason):
-        push_log('system', f'tool_loop fallback no-tools: {str(reason)[:120]}', status='warn')
-        plain = {**backend_data, "messages": messages, "stream": False}
-        plain.pop("tools", None)
-        try:
-            return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
-        except NodeBusyError:
-            raise
-        except Exception as e2:
-            return {"error": {"message": str(e2), "type": "server_error"}}
-
-    for iteration in range(max_iterations):
-        payload = {**backend_data, "messages": messages, "tools": all_tools, "stream": False}
-        try:
-            resp = _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
-        except NodeBusyError:
-            raise
-        except ValueError as e:
-            if iteration == 0:
-                return _retry_without_tools(e)
-            return last_resp or {"error": {"message": str(e), "type": "server_error"}}
-        except Exception as e:
-            return {"error": {"message": str(e), "type": "server_error"}}
-
-        # Un modello non tool-capable non sempre fa fallire la richiesta HTTP
-        # (niente ValueError sopra): spesso Ollama risponde 200 con un body
-        # JSON {"error": ...} valido, es. "<modello> does not support tools".
-        # Stesso fallback del ramo ValueError: ritenta UNA volta senza tools.
-        if resp.get("error"):
-            if iteration == 0:
-                return _retry_without_tools(resp["error"])
-            return last_resp or resp
-
-        last_resp = resp
-        choice    = resp.get("choices", [{}])[0]
-        message   = choice.get("message", {})
-        finish    = choice.get("finish_reason", "stop")
-
-        if finish != "tool_calls" or not message.get("tool_calls"):
-            return resp
-
-        messages.append(message)
-        # Un tool offerto dal client e non nostro lo esegue il client: qui si
-        # raccoglie e si torna. Vedi `_tool_del_client` per il perché.
-        da_tornare = []
-        for tc in message["tool_calls"]:
-            tool_id   = tc.get("id", str(uuid.uuid4())[:8])
-            tool_name = tc.get("function", {}).get("name", "")
-            tool_args = tc.get("function", {}).get("arguments", {})
-            if _tool_del_client(tool_name, client_names):
-                da_tornare.append(tc)
-                continue
-            push_log('system', f'tool_call: {tool_name}', detail=f'args={str(tool_args)[:120]}', status='info')
-            result = _execute_tool_call(tool_name, tool_args)
-            push_log('system', f'tool_result: {tool_name}', detail=f'{result[:120]}', status='success')
-            messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})
-        if da_tornare:
-            nomi = ", ".join(str((tc.get("function") or {}).get("name", "?")) for tc in da_tornare)
-            push_log('system', f'tool del client: {nomi}',
-                     detail='passthrough: li esegue chi li ha offerti', status='info')
-            return _risposta_solo_tool_del_client(resp, da_tornare)
-
-    return last_resp
 
 
 def _run_nightly_development_agent(prompt: str) -> str:

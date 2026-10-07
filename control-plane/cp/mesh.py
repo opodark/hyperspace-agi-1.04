@@ -672,3 +672,28 @@ def get_routing_weights():
         "backend_scores": _all_backend_scores(),
         "max_candidates": ROUTING_MAX_CANDIDATES,
     })
+
+# ── i candidati, in ordine di punteggio ─────────────────────────────────
+
+def _rank_candidate_nodes(active_nodes: list, pinned_node_id: str = None, max_candidates: int = None, model: str = "") -> list:
+    """Nodi eseguibili ordinati per score decrescente, col nodo pinnato (se
+    presente e disponibile) in testa. Se 'model' e' specificato, filtra prima
+    ai soli nodi che lo hanno (vedi _node_ids_with_model). Usato per il retry
+    quando il nodo scelto risponde 'occupato' (503 node_busy_timeout) o non
+    ha il modello: invece di fallire subito o aspettare, il CP prova in
+    sequenza fino a max_candidates nodi migliori."""
+    max_candidates = max_candidates or ROUTING_MAX_CANDIDATES
+    candidates = active_nodes
+    if model:
+        ids = _node_ids_with_model(model)
+        candidates = [n for n in active_nodes if n.get("node_id") in ids]
+    executable = [n for n in candidates if _best_endpoint(n)]
+    if not executable:
+        return []
+    ranked = [n for n, _s, _b in _routing_scores(executable, model=model)]
+    if pinned_node_id:
+        pinned = next((n for n in ranked if n.get("node_id") == pinned_node_id), None)
+        if pinned:
+            ranked = [pinned] + [n for n in ranked if n is not pinned]
+    return ranked[:max_candidates]
+

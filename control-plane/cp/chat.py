@@ -59,6 +59,7 @@
 
 import json
 import os
+import uuid
 import time
 from datetime import datetime, timezone
 
@@ -73,9 +74,11 @@ from cp.log import push_log
 from cp.config import (INFERENCE_BACKEND, OLLAMA_URL, OMNIROUTE_API_KEY,
                        OMNIROUTE_ENABLED, OMNIROUTE_MODEL, OMNIROUTE_URL,
                        PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MIN_CHARS,
-                       PROMPT_COMPRESSION_MODE)
+                       PROMPT_COMPRESSION_MODE, DEFAULT_MODEL)
 from cp.memoria import _memory_append, _notify_bridge
-from cp.model_caps import _use_native_chat_fallback
+from cp.inferenza import NodeBusyError, _call_ollama
+from cp.model_caps import _model_supports_tools, _use_native_chat_fallback
+from cp.tool import _execute_tool_call
 from cp.tools_defs import BUILTIN_TOOLS
 from shared.persona import identity_tools_hidden
 
@@ -479,3 +482,96 @@ def _native_direct_enabled(model):
     return (INFERENCE_BACKEND.strip().lower() == "ollama"
             and len(_inference_urls()) == 1
             and _use_native_chat_fallback(model))
+
+# ── il ciclo dei tool: il modello chiede, noi eseguiamo ─────────────────
+
+def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: bool = False,
+                   node_id: str = "", builtin_tools=None) -> dict:
+    messages       = list(data.get("messages", []))
+    model          = data.get("model", DEFAULT_MODEL)
+    tools_disabled = bool(data.get("_hyperspace_tools_off"))
+    backend_data   = {k: v for k, v in data.items()
+                      if k not in ("_hyperspace_tools_off", "_hyperspace_surface")}
+    supports_tools = _model_supports_tools(model) and not tools_disabled
+    push_log('system', f'tool_loop: model={model} tools={supports_tools} signed={sign}', status='info')
+
+    if not supports_tools:
+        payload = {**backend_data, "messages": messages, "stream": False}
+        payload.pop("tools", None)
+        try:
+            return _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
+        except NodeBusyError:
+            raise
+        except Exception as e:
+            return {"error": {"message": str(e), "type": "server_error"}}
+
+    client_tools = data.get("tools", [])
+    client_names = {t["function"]["name"] for t in client_tools if t.get("function", {}).get("name")}
+    offered_builtins = (_catalogo_nativi(str(data.get("_hyperspace_surface", "") or ""))
+                        if builtin_tools is None else builtin_tools)
+    all_tools    = client_tools + [t for t in offered_builtins if t["function"]["name"] not in client_names]
+    last_resp    = None
+
+    def _retry_without_tools(reason):
+        push_log('system', f'tool_loop fallback no-tools: {str(reason)[:120]}', status='warn')
+        plain = {**backend_data, "messages": messages, "stream": False}
+        plain.pop("tools", None)
+        try:
+            return _call_ollama(ollama_base, plain, sign=sign, node_id=node_id)
+        except NodeBusyError:
+            raise
+        except Exception as e2:
+            return {"error": {"message": str(e2), "type": "server_error"}}
+
+    for iteration in range(max_iterations):
+        payload = {**backend_data, "messages": messages, "tools": all_tools, "stream": False}
+        try:
+            resp = _call_ollama(ollama_base, payload, sign=sign, node_id=node_id)
+        except NodeBusyError:
+            raise
+        except ValueError as e:
+            if iteration == 0:
+                return _retry_without_tools(e)
+            return last_resp or {"error": {"message": str(e), "type": "server_error"}}
+        except Exception as e:
+            return {"error": {"message": str(e), "type": "server_error"}}
+
+        # Un modello non tool-capable non sempre fa fallire la richiesta HTTP
+        # (niente ValueError sopra): spesso Ollama risponde 200 con un body
+        # JSON {"error": ...} valido, es. "<modello> does not support tools".
+        # Stesso fallback del ramo ValueError: ritenta UNA volta senza tools.
+        if resp.get("error"):
+            if iteration == 0:
+                return _retry_without_tools(resp["error"])
+            return last_resp or resp
+
+        last_resp = resp
+        choice    = resp.get("choices", [{}])[0]
+        message   = choice.get("message", {})
+        finish    = choice.get("finish_reason", "stop")
+
+        if finish != "tool_calls" or not message.get("tool_calls"):
+            return resp
+
+        messages.append(message)
+        # Un tool offerto dal client e non nostro lo esegue il client: qui si
+        # raccoglie e si torna. Vedi `_tool_del_client` per il perché.
+        da_tornare = []
+        for tc in message["tool_calls"]:
+            tool_id   = tc.get("id", str(uuid.uuid4())[:8])
+            tool_name = tc.get("function", {}).get("name", "")
+            tool_args = tc.get("function", {}).get("arguments", {})
+            if _tool_del_client(tool_name, client_names):
+                da_tornare.append(tc)
+                continue
+            push_log('system', f'tool_call: {tool_name}', detail=f'args={str(tool_args)[:120]}', status='info')
+            result = _execute_tool_call(tool_name, tool_args)
+            push_log('system', f'tool_result: {tool_name}', detail=f'{result[:120]}', status='success')
+            messages.append({"role": "tool", "tool_call_id": tool_id, "content": result})
+        if da_tornare:
+            nomi = ", ".join(str((tc.get("function") or {}).get("name", "?")) for tc in da_tornare)
+            push_log('system', f'tool del client: {nomi}',
+                     detail='passthrough: li esegue chi li ha offerti', status='info')
+            return _risposta_solo_tool_del_client(resp, da_tornare)
+
+    return last_resp
