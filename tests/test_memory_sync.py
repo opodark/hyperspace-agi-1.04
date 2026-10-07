@@ -18,13 +18,17 @@ import tempfile
 import time
 import unittest
 
-from cp import memoria  # noqa: E402
-from tests import cp_source  # noqa: E402
 import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# il path PRIMA degli import che lo usano: `cp` sta in control-plane, e senza
+# questo il file si raccoglie solo se qualche altro test e' passato prima.
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "control-plane"))
+
+from cp import memoria  # noqa: E402
+from tests import cp_source  # noqa: E402
 
 from shared.hermes_memory import HermesMemoryError  # noqa: E402
 from shared.memory_schema import entry_id, normalize_entry  # noqa: E402
@@ -482,18 +486,26 @@ class OggettoUnicoTests(unittest.TestCase):
                          "ricarica() ha restituito lo stesso oggetto: il "
                          "salvataggio dalla tab Setup non cambierebbe nulla")
 
-    def test_main_py_si_rilega_alla_ricarica_del_modulo(self):
-        """La forma della riassegnazione, letta dal sorgente.
+    def test_la_ricarica_avviene_dentro_il_modulo_proprietario(self):
+        """Dove sta il `global`, e perche' la forma e' cambiata.
 
-        Il `global` qui e' obbligatorio e sembra il contrario di cio' che si fa
-        altrove nel refactor: li' la dichiarazione creava una seconda copia, qui
-        senza dichiarazione la riassegnazione crea una variabile LOCALE che
-        sparisce all'uscita della funzione. Due errori opposti, e la differenza
-        e' che `main.py` tiene un binding (e va dichiarato) mentre nei canali
-        l'oggetto e' posseduto dal modulo e il chiamante non ne tiene uno.
+        Il pericolo e' sempre lo stesso e ha due facce opposte: con il `global` la
+        riassegnazione riguarda il modulo, senza diventa una variabile locale che
+        sparisce all'uscita. Il `global` serve, e qui come altrove.
+
+        Cosa e' cambiato rispetto a prima e' l'indirezione. Quando la funzione stava
+        in main.py doveva scrivere `_memoria.ricarica()`, perche' il binding era di
+        un altro modulo. Ora che sta in `cp/memoria.py` — il modulo che possiede
+        `memory_sync` — chiama `ricarica()` diretto, e la riassegnazione aggiorna il
+        proprio nome. Un riferimento incrociato a se stesso sarebbe stato solo un
+        modo per ricordarsi di esistere.
         """
-        corpo = cp_source.SORGENTE()
-        blocco = corpo[corpo.index("def _reload_memory_sync"):
-                       corpo.index("def _reload_channel_config")]
-        self.assertIn("global memory_sync", blocco)
-        self.assertIn("_memoria.ricarica()", blocco)
+        # `cp_source` legge i moduli come li ha trovati, senza importarli: qui il
+        # modulo e' gia' importato altrove nel file, e passare l'oggetto funzione
+        # ad `ast.unparse` non funziona — vuole l'albero, non la funzione.
+        corpo = ast.unparse(cp_source.funzioni()["_reload_memory_sync"])
+        self.assertIn("global memory_sync", corpo)
+        self.assertIn("memory_sync = ricarica()", corpo)
+        self.assertNotIn("_memoria.ricarica()", corpo,
+                         "la funzione ora sta nel modulo proprietario: "
+                         "l'indirezione attraverso se stessa non serve")

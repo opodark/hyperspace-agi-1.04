@@ -36,6 +36,7 @@ COPPIE = {
     "tool_baseline.py": "tool.sh",
     "sogni_baseline.py": "sogni.sh",
     "forge_baseline.py": "forge.sh",
+    "memoria_baseline.py": "memoria.sh",
 }
 
 

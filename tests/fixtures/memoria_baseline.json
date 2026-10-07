@@ -1,0 +1,54 @@
+{
+  "cerca_dopo_push": {
+    "body": "{\"count\":0,\"degraded\":false,\"entries\":[],\"ok\":true,\"source\":\"legacy\"}\n",
+    "status": 200
+  },
+  "cerca_parola": {
+    "body": "{\"count\":0,\"degraded\":false,\"entries\":[],\"ok\":true,\"source\":\"legacy\"}\n",
+    "status": 200
+  },
+  "cerca_vuota": {
+    "body": "{\"count\":0,\"degraded\":false,\"entries\":[],\"ok\":true,\"source\":\"legacy\"}\n",
+    "status": 200
+  },
+  "leggi": {
+    "body": "{\"entries\":[],\"total\":0}\n",
+    "status": 200
+  },
+  "leggi_con_limite": {
+    "body": "{\"entries\":[],\"total\":0}\n",
+    "status": 200
+  },
+  "leggi_dopo_push": {
+    "body": "{\"entries\":[{\"text\":\"voce di baseline\",\"who\":\"baseline\"}],\"total\":1}\n",
+    "status": 200
+  },
+  "lifecycle": {
+    "body": "{\"error\":\"lifecycle disponibile con Hermes\",\"ok\":false}\n",
+    "status": 409
+  },
+  "push": {
+    "body": "{\"ok\":true}\n",
+    "status": 200
+  },
+  "push_non_oggetto": {
+    "body": "{\"error\":\"missing entry\",\"ok\":false}\n",
+    "status": 400
+  },
+  "push_vuoto": {
+    "body": "{\"error\":\"missing entry\",\"ok\":false}\n",
+    "status": 400
+  },
+  "statistiche": {
+    "body": "{\"backend\":\"legacy\",\"degraded\":false,\"entries\":0,\"file\":\"/var/folders/jn/9tz6gzzn7715zm9cww5jth4w0000gn/T//hyperspace-memoria-69y62X/memoria.json\",\"file_size_bytes\":0,\"file_size_kb\":0.0,\"max_entries\":200,\"source\":\"legacy\",\"ttl_days\":7}\n",
+    "status": 200
+  },
+  "statistiche_dopo_push": {
+    "body": "{\"backend\":\"legacy\",\"degraded\":false,\"entries\":1,\"file\":\"/var/folders/jn/9tz6gzzn7715zm9cww5jth4w0000gn/T//hyperspace-memoria-69y62X/memoria.json\",\"file_size_bytes\":79,\"file_size_kb\":0.08,\"max_entries\":200,\"source\":\"legacy\",\"ttl_days\":7}\n",
+    "status": 200
+  },
+  "sync": {
+    "body": "{\"backend\":\"legacy\",\"error\":\"la riconsegna della coda vale con il backend hermes\",\"ok\":false}\n",
+    "status": 409
+  }
+}

@@ -64,7 +64,6 @@ from shared.identity import generate_or_load_identity, make_request_headers
 from shared.network_security import token_authorized
 from shared.code_sandbox import HybridCodeSandboxClient
 from shared.development_dream import NightlyDevelopmentDream
-from shared.hermes_memory import HermesMemoryError
 from shared.memory_sync import MemorySync, from_env  # noqa: F401 (MemorySync: test/typing)
 from shared.mcp_auth import McpAuthPolicy
 from shared.persona import PersonaStore
@@ -129,14 +128,12 @@ from cp.config import (                        _AUTHORITY_ENABLED,
                         FEDERATION_PUBLIC_URL,
                         FEDERATION_VIEW_ENABLED,
                         FEDERATION_VIEW_TTL_S,
-                        _hermes_memory,
                         INFERENCE_BACKEND,
                         KALI_ENABLED,
                         KALI_TARGET_ALLOWLIST,
                         _LOCAL_NODE_ENABLED,
                         _LOCAL_NODE_ENDPOINT,
                         MEMORY_BACKEND,
-                        MEMORY_FILE_GZ,
                         MEMORY_MAX_ENTRIES,
                         MEMORY_TTL_DAYS,
                         MESH_MODEL_ICON,
@@ -532,29 +529,6 @@ def _channel_num_ctx() -> int:
     """
     return max(1024, min(_channel_int("CHANNEL_NUM_CTX", 8192), 65536))
 
-
-def _reload_memory_sync() -> None:
-    """Ricostruisce mirror e coda dopo un salvataggio in Setup.
-
-    Non è pignoleria: i percorsi e gli interruttori vivono *dentro* MemorySync, non
-    in costanti globali, quindi un valore nuovo senza ricostruzione resterebbe
-    "salvato ma inerte" — il difetto che la tab Setup esiste per non avere.
-
-    Qui il `global` serve e non è un errore: il binding di `memory_sync` vive in
-    questo modulo, non in `cp/memoria.py`. Senza, la riassegnazione creerebbe una
-    variabile locale — cioè una che sparisce all'uscita — e le quattro funzioni
-    che lo leggono continuerebbero a usare l'oggetto vecchio: "salvato ma
-    inerte", che è il difetto che questa funzione esiste per evitare. La prova
-    che la confusione è facile è che a scriverlo così sembrava la soluzione
-    elegante, e il controllo dopo il salvataggio dalla tab Setup mostrava che
-    l'oggetto non era cambiato.
-
-    `cp/memoria.py` ricarica il suo e restituisce il nuovo; questo modulo si
-    rilega il proprio. Due aggiornamenti, e non uno, perché due moduli tengono un
-    riferimento: è il prezzo di non aver creato l'oggetto qui dentro.
-    """
-    global memory_sync
-    memory_sync = _memoria.ricarica()
 
 
 def _reload_channel_config() -> None:
@@ -984,7 +958,8 @@ from cp import memoria as _memoria
 # `_reload_memory_sync`, non un `global` — un `global` riassegnerebbe il nome in
 # questo namespace e lascerebbe il modulo con l'oggetto vecchio.
 memory_sync = _memoria.memory_sync
-from cp.memoria import _load_memory, _memory_append, _notify_bridge
+from cp.memoria import (_load_memory, _memory_effective_backend,
+                        _notify_bridge, _reload_memory_sync)
 # Le chiamate all'inferenza stanno in cp/inferenza.py: il tentativo sui candidati,
 # la chiamata firmata verso i nodi, e il post locale che tiene conto delle
 # chiamate dei loop. `NodeBusyError` sta li' perche' e' un segnale del protocollo
@@ -1004,6 +979,7 @@ from cp.battito import hb_state
 # nome e' innocuo, e non e' il caso delle variabili riassegnate.
 from cp.bottles import monta as monta_bottiglie
 from cp.forge import _forge_read_skill
+from cp.memoria import monta as monta_memoria
 from cp.forge import monta as monta_forge
 from cp.tool import monta as monta_tool
 from cp.tool import _handlers_nativi
@@ -2937,169 +2913,8 @@ def get_tasks():
     merged.update(tasks)
     return jsonify(merged)
 
-# ── MEMORY ENDPOINTS ──────────────────────────────────────────────────────────
-def _memory_effective_backend() -> str:
-    """Backend effettivo: `legacy` quando il backend autorevole Hermes è giù.
-
-    Il failsafe è "sticky": dopo un errore di trasporto Hermes resta marcato
-    irraggiungibile per HERMES_MEMORY_COOLDOWN_S, e in quel periodo le letture
-    leggono il mirror locale (lo stesso file gzip di `MEMORY_BACKEND=legacy`)
-    senza pagare il timeout a ogni richiesta. Allo scadere si ritenta Hermes.
-    """
-    if MEMORY_BACKEND != "hermes":
-        return MEMORY_BACKEND
-    if _hermes_memory.unavailable():
-        return "legacy"
-    return "hermes"
 
 
-def _memory_search_local(data: dict, *, reason: str = "", entries=None,
-                         source: str = "mirror", degraded: bool = True):
-    """Browse testuale per mirror degradato e backend legacy.
-
-    Hermes offre una ricerca più ricca, ma la dashboard deve poter leggere la
-    memoria anche quando resta soltanto il file locale. I filtri comuni restano
-    disponibili; ciò che non esiste localmente non viene inventato.
-    """
-    query = str(data.get("query", "")).strip().lower()
-    limite = max(1, int(data.get("limit", 50)))
-    status = str(data.get("status", "")).strip()
-    node_id = str(data.get("node_id", "")).strip()
-    model = str(data.get("model", "")).strip()
-    date_from = str(data.get("date_from", "")).strip()
-    date_to = str(data.get("date_to", "")).strip()
-    voci = list(entries if entries is not None else memory_sync.read_local(MEMORY_MAX_ENTRIES))
-
-    def matches(voce):
-        haystack = " ".join(str(voce.get(key, "")) for key in (
-            "content", "prompt", "response", "summary", "detail", "metadata"))
-        timestamp = str(voce.get("ts") or voce.get("timestamp") or "")
-        entry_node = str(voce.get("node_id") or voce.get("sourceNode") or voce.get("source") or "")
-        if query and query not in haystack.lower():
-            return False
-        if status and str(voce.get("status") or "active") != status:
-            return False
-        if node_id and node_id.lower() not in entry_node.lower():
-            return False
-        if model and model.lower() not in str(voce.get("model") or "").lower():
-            return False
-        if date_from and timestamp[:10] < date_from:
-            return False
-        if date_to and timestamp[:10] > date_to:
-            return False
-        return True
-
-    trovate = [voce for voce in voci if isinstance(voce, dict) and matches(voce)][:limite]
-    risposta = {"ok": True, "degraded": degraded, "source": source,
-                "entries": trovate, "count": len(trovate)}
-    if reason:
-        risposta["reason"] = reason
-    return jsonify(risposta)
-
-
-@app.route('/memory')
-def get_memory():
-    limit   = int(request.args.get("limit", MEMORY_MAX_ENTRIES))
-    if _memory_effective_backend() == "hermes":
-        try:
-            esito = memory_sync.read(limit)
-        except HermesMemoryError as exc:
-            return jsonify({"error": str(exc), "backend": "hermes"}), 503
-        risposta = {"entries": esito["entries"][:limit], "total": len(esito["entries"]),
-                    "backend": "hermes", "source": esito["source"],
-                    "degraded": esito["degraded"]}
-        if esito.get("reason"):
-            risposta["reason"] = esito["reason"]
-        return jsonify(risposta)
-    entries = _load_memory()
-    return jsonify({"entries": entries[:limit], "total": len(entries)})
-
-@app.route('/memory/push', methods=['POST'])
-def push_memory():
-    data  = request.get_json(force=True, silent=True) or {}
-    entry = data.get("entry")
-    if not entry or not isinstance(entry, dict):
-        return jsonify({"ok": False, "error": "missing entry"}), 400
-    try:
-        esito = _memory_append(entry)
-    except HermesMemoryError as exc:
-        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
-    if isinstance(esito, dict) and esito.get("ok") is False:
-        # Qui non si è salvato niente da nessuna parte: questo sì è un guasto, e il
-        # chiamante deve saperlo (una voce in coda invece è al sicuro su disco).
-        return jsonify(esito), 503
-    return jsonify(esito if isinstance(esito, dict) else {"ok": True})
-
-@app.route('/memory/stats')
-def memory_stats():
-    if _memory_effective_backend() == "hermes":
-        # Anche con Hermes giù: la risposta degradata dice cosa c'è in locale e
-        # quanto è in coda, che è l'unica cosa da guardare in quel momento. Un 503
-        # nasconderebbe proprio quello.
-        return jsonify(memory_sync.stats())
-    entries    = _load_memory()
-    size_bytes = os.path.getsize(MEMORY_FILE_GZ) if os.path.exists(MEMORY_FILE_GZ) else 0
-    return jsonify({
-        "backend": "legacy", "degraded": False, "source": "legacy",
-        "entries": len(entries), "max_entries": MEMORY_MAX_ENTRIES,
-        "ttl_days": MEMORY_TTL_DAYS,
-        "file_size_bytes": size_bytes,
-        "file_size_kb": round(size_bytes/1024, 2),
-        "file": MEMORY_FILE_GZ,
-    })
-
-@app.route('/memory/sync', methods=['POST'])
-def sync_memory():
-    """Riconsegna a mano la coda a Hermes: "riprova adesso", per il debug."""
-    if MEMORY_BACKEND != "hermes":
-        return jsonify({"ok": False, "backend": MEMORY_BACKEND,
-                        "error": "la riconsegna della coda vale con il backend hermes"}), 409
-    esito = memory_sync.flush(force=True)
-    esito["pending"] = memory_sync.pending()
-    esito["outbox_file"] = str(memory_sync.outbox.path) if memory_sync.outbox else ""
-    return jsonify(esito), (200 if esito.get("ok") else 503)
-
-@app.route('/memory/search', methods=['POST'])
-def search_memory():
-    data = request.get_json(force=True, silent=True) or {}
-    if MEMORY_BACKEND == "legacy":
-        return _memory_search_local(data, entries=_load_memory(), source="legacy", degraded=False)
-    if MEMORY_BACKEND != "hermes":
-        return jsonify({"ok": False, "error": f"backend memoria non supportato: {MEMORY_BACKEND}"}), 409
-    if _hermes_memory.unavailable():
-        # Failsafe: Hermes è giù, si serve il mirror senza pagare il timeout.
-        return _memory_search_local(data, reason=_hermes_memory.last_error())
-    try:
-        entries = _hermes_memory.query(
-            str(data.get("query", "")), int(data.get("limit", 50)),
-            str(data.get("event_type", "")), str(data.get("mode", "browse")),
-            node_id=str(data.get("node_id", "")), source=str(data.get("source", "")),
-            model=str(data.get("model", "")), status=str(data.get("status", "active")),
-            date_from=str(data.get("date_from", "")), date_to=str(data.get("date_to", "")),
-            offset=max(0, int(data.get("offset", 0))),
-        )
-        return jsonify({"ok": True, "backend": "hermes", "source": "hermes",
-                        "degraded": False, "entries": entries, "count": len(entries)})
-    except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
-    except HermesMemoryError as exc:
-        return _memory_search_local(data, reason=str(exc))
-
-@app.route('/memory/lifecycle', methods=['POST'])
-def memory_lifecycle():
-    data = request.get_json(force=True, silent=True) or {}
-    ids = data.get("ids")
-    if MEMORY_BACKEND != "hermes":
-        return jsonify({"ok": False, "error": "lifecycle disponibile con Hermes"}), 409
-    if not isinstance(ids, list):
-        return jsonify({"ok": False, "error": "ids deve essere una lista"}), 400
-    try:
-        result = _hermes_memory.lifecycle(ids, str(data.get("action", "")), str(data.get("reason", "")))
-        push_log('memory_sync', f'Memory lifecycle: {result.get("action")} ({len(result.get("changed", []))})',
-                 detail=str(data.get("reason", "")), status='success')
-        return jsonify(result), (200 if result.get("ok") else 207)
-    except (HermesMemoryError, ValueError) as exc:
-        return jsonify({"ok": False, "error": str(exc), "backend": "hermes"}), 503
 
 # ── FEDERAZIONE — IDENTITÀ E ALLOWLIST ─────────────────────────────────────────
 # Queste rotte, tranne /federation/identity e /federate/execute, NON devono
@@ -3407,6 +3222,11 @@ monta_chat(app, advanced_config=advanced_config, tasks=tasks,
 # Nessuna iniezione: il forge non chiama il modello, non tocca la rete e non ha
 # bisogno di nessuno stato del boot.
 monta_forge(app)
+
+# ── MONTAGGIO DELLA MEMORIA ───────────────────────────────────────────────────
+# Nessuna iniezione: il negozio e' costruito dentro `cp/memoria.py`, che e' anche
+# il modulo che lo possiede. Le sei rotte /memory* sono le sue.
+monta_memoria(app)
 
 monta_tool(app, code_sandbox=code_sandbox, mcp_policy=_mcp_policy,
            connector_manager=connector_manager, fetch_models=_fetch_models)
