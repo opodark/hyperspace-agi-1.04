@@ -6,13 +6,14 @@ import re
 import shutil
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import os
 
-from flask import Flask, jsonify, request
+from flask import Blueprint, Flask, jsonify, request
 from shared.forge_skills import ECC_BUNDLE_DIR, attach_skills, load_ecc_bundle, source_hash
 
 
@@ -114,16 +115,39 @@ class ForgeRoutesTests(unittest.TestCase):
         self.ns = dict(globals(), app=app, FORGE_DIR=self.tmp.name, FORGE_ADMIN_TOKEN="test-token",
                        _forge_lock=threading.Lock(), _FORGE_TYPES={"tool", "skill"},
                        _FORGE_STATES={"draft", "review", "approved", "disabled"},
-                       push_log=lambda *args, **kwargs: None)
-        source = Path(__file__).parents[1] / "control-plane/main.py"
-        names = {"_forge_path", "_forge_write", "_forge_authorized", "_forge_validate",
-                 "_forge_read_skill", "forge_import_ecc", "forge_update", "forge_status",
-                 "v1_chat_completions"}
-        # encoding esplicito: il file ha caratteri non-ASCII (i banner di sezione)
+                       push_log=lambda *args, **kwargs: None,
+                       # la rotta di chat registra le sue rotte su un blueprint: nello
+                       # scope isolato un blueprint finto basta, il test esercita
+                       # l'accostamento fra forge e skill, non il montaggio
+                       _bp=Blueprint("chat-test", __name__))
+        # Il forge sta in main.py, la rotta che legge gli skill sta in cp/chat.py:
+        # il test le prende entrambe, perche' e' il loro accostamento che prova.
+        # encoding esplicito: i file hanno caratteri non-ASCII (i banner di sezione)
         # e su Windows la codifica di default del sistema non e' UTF-8.
-        nodes = [node for node in ast.parse(source.read_text(encoding="utf-8")).body
-                 if isinstance(node, ast.FunctionDef) and node.name in names]
+        radice = Path(__file__).parents[1]
+        nomi_per_file = {
+            radice / "control-plane/main.py": {
+                "_forge_path", "_forge_write", "_forge_authorized", "_forge_validate",
+                "_forge_read_skill", "forge_import_ecc", "forge_update", "forge_status"},
+            radice / "control-plane/cp/chat.py": {"v1_chat_completions"},
+        }
+        nodes = []
+        for percorso, nomi in nomi_per_file.items():
+            nodes += [node for node in ast.parse(percorso.read_text(encoding="utf-8")).body
+                      if isinstance(node, ast.FunctionDef) and node.name in nomi]
+        # La rotta riceve i suoi oggetti per contesto: lo scope isolato ne ha
+        # bisogno con la stessa forma, o il test eserciterebbe un percorso che in
+        # produzione non esiste.
+        self.ns["_contesto"] = SimpleNamespace(
+            advanced_config={"ollama": {"url": "http://ollama", "defaultModel": "modello"}},
+            tasks={}, cp_identity={},
+            forge_read_skill=self.ns.get("_forge_read_skill"))
+        source = radice / "control-plane/main.py"
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), self.ns)
+        # il blueprint raccoglie le rotte ma non le registra finche' qualcuno non
+        # lo monta: senza questo il client non trova /v1/chat/completions e
+        # risponde 404 su tutto
+        app.register_blueprint(self.ns["_bp"])
         self.client = app.test_client()
         self.headers = {"X-Hyperspace-Forge-Token": "test-token"}
 

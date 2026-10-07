@@ -60,32 +60,77 @@
 import json
 import os
 import uuid
+from types import SimpleNamespace
 import time
 from datetime import datetime, timezone
 
 import requests
-from flask import jsonify
+from flask import (Blueprint, Response, jsonify, request,
+                   stream_with_context)
 
 import shared.db as db
 from cp import persona as _persona_modulo
 from cp.assistant import _assistant_text, _normalize_assistant_message
-from cp.budget import _inference_timeout, _is_error_payload
+from cp.budget import RequestDeadline, _respond_result
+from cp.config import MESH_MODEL_ICON, OMNIROUTE_MODEL_ID
+from cp.federazione import _try_federated_execution
+from cp.http import _sse_headers
+from cp.inferenza import NodeBusyError, _call_ollama, _local_model_post
+from cp.mesh import (_best_endpoint, _node_list, _parse_model_node_ref,
+                     _rank_candidate_nodes, _record_routing_pick)
+from cp.model_caps import (_model_supports_tools, _tools_requested_off,
+                           _use_native_chat_fallback, _warn_tools_stripped)
+from cp.persona import _persona_enabled
+from shared.forge_skills import attach_skills
+from shared.identity import make_request_headers
+from shared.persona import should_disclose
 from cp.log import push_log
 from cp.config import (INFERENCE_BACKEND, OLLAMA_URL, OMNIROUTE_API_KEY,
                        OMNIROUTE_ENABLED, OMNIROUTE_MODEL, OMNIROUTE_URL,
                        PROMPT_COMPRESSION_ENABLED, PROMPT_COMPRESSION_MIN_CHARS,
                        PROMPT_COMPRESSION_MODE, DEFAULT_MODEL)
 from cp.memoria import _memory_append, _notify_bridge
-from cp.inferenza import NodeBusyError, _call_ollama
-from cp.model_caps import _model_supports_tools, _use_native_chat_fallback
-from cp.tool import _execute_tool_call
 from cp.tools_defs import BUILTIN_TOOLS
+from cp.budget import _inference_timeout, _is_error_payload
+from cp.tool import _execute_tool_call
 from shared.persona import identity_tools_hidden
 
 # I tool nativi disponibili: il modello li vede nel catalogo, e un tool che non ha
 # un handler non deve essere proposto. Resta in main.py perche' gli handler
 # chiamano `connector_manager`, che è un oggetto di boot.
 _handlers_nativi = None
+
+
+_bp = Blueprint("chat", __name__)
+
+# Il contesto: quattro cose di main.py che non sono il protocollo della chat.
+#
+# `advanced_config` e' la configurazione viva e la tab Setup la modifica in posto —
+# iniettarla per riferimento e' quello che la rende viva anche qui; un binding per
+# valore, o un import per nome, mostrerebbero a questa rotta la configurazione di
+# avvio. `tasks` e' la coda condivisa, e vale lo stesso: la rotta ci scrive un task
+# e il battito lo legge, quindi devono vedere lo stesso dizionario. `cp_identity` e'
+# la chiave con cui si firma verso i nodi, e non si ricostruisce: rifatta
+# produrrebbe una firma diversa. `forge_read_skill` legge un artefatto del forge, e
+# resta un callback perche' il forge e' un altro dominio.
+_contesto = None
+
+
+def monta(app, *, advanced_config=None, tasks=None, cp_identity=None,
+          forge_read_skill=None):
+    """Registra `/v1/chat/completions`, la rotta che il modello usa per parlare."""
+    global _contesto
+    _contesto = SimpleNamespace(advanced_config=advanced_config or {},
+                                tasks=tasks if tasks is not None else {},
+                                cp_identity=cp_identity or {},
+                                forge_read_skill=forge_read_skill)
+    app.register_blueprint(_bp)
+    return app
+
+
+def smonta():
+    global _contesto
+    _contesto = None
 
 
 def imposta_handlers(fn) -> None:
@@ -575,3 +620,423 @@ def _run_tool_loop(data: dict, ollama_base: str, max_iterations: int = 5, sign: 
             return _risposta_solo_tool_del_client(resp, da_tornare)
 
     return last_resp
+
+
+# ── la rotta ──────────────────────────────────────────────────────────────────
+# ── /v1/chat/completions ──────────────────────────────────────────────────────
+@_bp.route('/v1/chat/completions', methods=['POST', 'OPTIONS'])
+def v1_chat_completions():
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data      = request.get_json(force=True, silent=True) or {}
+    try:
+        data = attach_skills(data, _contesto.forge_read_skill)
+    except (ValueError, OSError, TypeError) as error:
+        return jsonify({"error": {"message": str(error), "type": "invalid_request_error"}}), 400
+    messages  = data.get("messages", [])
+    raw_model = data.get("model", _contesto.advanced_config["ollama"]["defaultModel"])
+
+    # Toglie i prefissi cosmetici aggiunti in /v1/models prima di usare il
+    # nome per il routing vero — vedi commento su MESH_MODEL_ICON sopra.
+    omniroute_direct = (raw_model == OMNIROUTE_MODEL_ID)
+    if omniroute_direct:
+        model, pinned_node_id = OMNIROUTE_MODEL, None
+    else:
+        clean_model = raw_model[len(MESH_MODEL_ICON):] if raw_model.startswith(MESH_MODEL_ICON) else raw_model
+        model, pinned_node_id = _parse_model_node_ref(clean_model)
+    data      = {**data, "model": model}   # a valle il nodo riceve solo il nome modello "pulito"
+
+    # ── IDENTITÀ: un punto solo, prima di tool e thinking ────────────────────
+    # Il blocco di identità entra qui e da qui lo ereditano tutti i percorsi
+    # (tool loop e streaming, che parte da dict(data)). Il vincolo di disclosure
+    # viene deciso sul testo dell'utente e LOGGATO: una decisione che non lascia
+    # traccia non è verificabile.
+    #
+    # La superficie si legge PRIMA della spunta: c'è una superficie che dichiara
+    # di non volere l'identità (`workbench`, la console usata come banco di
+    # lavoro) e il perché sta in `shared/persona.py`, non qui.
+    user_text = _last_user_text(messages)
+    superficie = str(data.get("surface", "") or "").strip() \
+        or request.headers.get("X-Hyperspace-Surface", "").strip() \
+        or "openwebui"
+    # La superficie viaggia con la richiesta: la usano l'identità e il catalogo
+    # dei tool (i tool dell'identità non si offrono su `workbench`).
+    data["_hyperspace_surface"] = superficie
+    if _persona_enabled(superficie):
+        decisione = should_disclose(user_text)
+        messages = _with_persona(messages, user_text, surface=superficie)
+        data = {**data, "messages": messages}
+        if decisione.required:
+            push_log('system', 'Persona: disclosure richiesta',
+                     detail=f'regola={decisione.rule} match="{decisione.matched[:60]}"',
+                     status='info')
+
+    # ── DECISIONE DEL CONTROL-PLANE: tool e reasoning ────────────────────────
+    # Il CP è l'unico a decidere se questa richiesta può chiamare tool e se il
+    # modello deve ragionare. Il backend (nodo/Ollama) non deve mai prendere
+    # questa decisione da solo: senza un `think` esplicito, Qwen3 attiva il
+    # reasoning di default e — con reasoning attivo — NON emette tool_calls,
+    # rispondendo a memoria. È il bug per cui "cerca su internet X" non
+    # attivava mai web_search.
+    #
+    # 1. Tool: se il modello è tool-capable, il CP inietta i BUILTIN_TOOLS
+    #    (web_search, omega_*, get_mesh_status + connettori) accanto a quelli
+    #    eventualmente già passati dal client, senza duplicarli — a meno che il
+    #    client abbia chiesto esplicitamente di no (`X-Hyperspace-Tools: off`).
+    # 2. Reasoning: deciso da _decide_thinking() — OFF quando ci sono tool
+    #    (reasoning e tool-calling sono mutuamente esclusivi), altrimenti
+    #    rispetta la richiesta esplicita del client, altrimenti OFF.
+    tools_available = []
+    client_had_tools = bool(data.get("tools"))
+    tools_off = _tools_requested_off(request.headers.get("X-Hyperspace-Tools", ""))
+    data["_hyperspace_tools_off"] = tools_off
+    if _model_supports_tools(model):
+        client_tools = data.get("tools") or []
+        client_names = {t.get("function", {}).get("name") for t in client_tools}
+        aggiunti = [] if tools_off else [
+            tool for tool in _catalogo_nativi(superficie)
+            if tool["function"]["name"] not in client_names
+        ]
+        tools_available = client_tools + aggiunti
+        data["tools"] = tools_available
+    else:
+        data.pop("tools", None)
+        # Il client aveva chiesto dei tool e li stiamo togliendo: senza questo
+        # avviso un modello nuovo non tool-capable fallirebbe in silenzio. Se a
+        # toglierli e' stato il client stesso, invece, non c'e' niente da dire.
+        if client_had_tools and not tools_off:
+            _warn_tools_stripped(model)
+
+    data["think"] = _decide_thinking(model, data, messages, tools_available)
+    push_log('system',
+             f'CP decision: model={model} tools={len(tools_available)} think={data["think"]}',
+             status='info')
+
+    stream    = data.get("stream", False)
+
+    task_id   = str(uuid.uuid4())[:8]
+
+    prompt = ""
+    last_user_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            c = messages[i].get("content", "")
+            prompt = c if isinstance(c, str) else str(c)
+            last_user_idx = i
+            break
+    if not prompt:
+        prompt = json.dumps(messages)[:200]
+
+    # Comprime il prompt (Caveman via OmniRoute) solo per la mesh locale —
+    # la selezione esplicita di 🌐 OmniRoute riceve compressione via header
+    # sulla stessa chiamata, non serve un giro doppio. Salta i contenuti
+    # multimodali (liste, es. testo+immagine): comprimerli come stringa
+    # romperebbe la struttura del messaggio.
+    if not omniroute_direct and last_user_idx is not None:
+        raw_content = messages[last_user_idx].get("content")
+        if isinstance(raw_content, str):
+            compressed = _compress_prompt_via_omniroute(raw_content)
+            if compressed != raw_content:
+                messages = list(messages)
+                messages[last_user_idx] = {**messages[last_user_idx], "content": compressed}
+                data = {**data, "messages": messages}
+
+    task = {
+        "id": task_id, "status": "created", "node": None,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "payload": {"prompt": prompt, "model": model, "source": "webui"},
+    }
+    _contesto.tasks[task_id] = task
+    db.insert_task(task)
+    push_log('system', f'WebUI task: {task_id}', detail=f'model={model} stream={stream} prompt={prompt[:80]}')
+
+    active      = [n for n in _node_list() if n.get("status") == "active"]
+    ollama_base = _contesto.advanced_config["ollama"]["url"].rstrip("/")
+
+    # ── STREAM ────────────────────────────────────────────────────────────────
+
+    # NOTA: lo streaming oggi resta locale (nodo o ollama-direct). La
+    # federazione verso un altro CP entra in gioco solo nel percorso
+    # non-stream — proxare uno stream SSE cross-CP e' un passo successivo.
+    #
+    # Prova in sequenza i migliori nodi candidati (per score): se un nodo
+    # risponde 503 node_busy_timeout PRIMA di iniziare a inviare byte, il
+    # generatore passa al successivo. Una volta che il primo chunk reale è
+    # stato inoltrato al client non si cambia più nodo (l'header 200 è già
+    # partito), quindi eventuali errori a metà stream vengono solo segnalati
+    # inline, non ritentati su un altro nodo.
+    if stream:
+        candidates = [] if omniroute_direct else _rank_candidate_nodes(active, pinned_node_id, model=model)
+        stream_data = dict(data)
+        if _model_supports_tools(model):
+            ct = stream_data.get("tools", [])
+            cn = {t["function"]["name"] for t in ct if t.get("function", {}).get("name")}
+            stream_data["tools"] = ct + [t for t in _catalogo_nativi(superficie)
+                                         if t["function"]["name"] not in cn]
+        else:
+            stream_data.pop("tools", None)
+
+        def _stream_gen():
+            if omniroute_direct:
+                task["node"] = "omniroute"
+                db.update_task(task_id, "assigned", node_id="omniroute", endpoint=OMNIROUTE_URL)
+                omni_headers = {"Authorization": f"Bearer {OMNIROUTE_API_KEY}"} if OMNIROUTE_API_KEY else {}
+                if PROMPT_COMPRESSION_ENABLED:
+                    omni_headers["x-omniroute-compression"] = PROMPT_COMPRESSION_MODE
+                try:
+                    req = requests.post(f"{OMNIROUTE_URL}/v1/chat/completions",
+                                         json=stream_data, headers=omni_headers, stream=True,
+                                         timeout=_inference_timeout(stream_data.get("model", "")))
+                    with req as resp:
+                        for chunk in resp.iter_content(chunk_size=None):
+                            if chunk:
+                                yield chunk
+                    task["status"]       = "done"
+                    task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    db.update_task(task_id, "done")
+                    push_log('inter_node_message', f'stream {task_id} done',
+                             source='omniroute', target='webui', status='success')
+                except Exception as e:
+                    yield ('data: ' + json.dumps({'error': str(e)}, ensure_ascii=False) + '\n\n').encode()
+                    task["status"] = "failed"
+                    db.update_task(task_id, "failed", error=str(e))
+                return
+
+            # Il backend Ollama puo' emettere tool_calls nello stream, ma il
+            # dispatcher non puo' eseguire il tool dopo aver gia' inoltrato i
+            # chunk al client. Per i modelli tool-capable usa quindi il loop
+            # non-streaming interno e riconfeziona solo il risultato finale
+            # come SSE: web_search viene realmente eseguito anche da WebUI.
+            # La scelta e' pattern-driven (_model_supports_tools), non legata a
+            # un singolo modello: i distillati in arrivo (qwen3.8, deepseek4.1,
+            # ...) si coprono aggiornando _TOOL_CAPABLE_PATTERNS o la env
+            # TOOL_CAPABLE_MODELS, senza toccare questo ramo.
+            if _model_supports_tools(model):
+                for candidate in candidates:
+                    node_id_c = candidate.get("node_id", "cp")
+                    endpoint_c = _best_endpoint(candidate)
+                    _record_routing_pick(node_id_c)
+                    try:
+                        result_json = _run_tool_loop(
+                            stream_data, endpoint_c, sign=True, node_id=node_id_c
+                        )
+                    except NodeBusyError:
+                        continue
+                    except Exception:
+                        continue
+                    if isinstance(result_json, dict) and result_json.get("error"):
+                        continue
+                    # Il chunk finale lo costruisce `_chunk_finale`: se la risposta
+                    # porta un tool del client (passthrough) viaggia con lei, o un
+                    # client in streaming non lo vedrebbe mai.
+                    chunk = _chunk_finale(result_json, stream_data.get("model", model), task_id)
+                    task["node"] = node_id_c
+                    db.update_task(task_id, "assigned", node_id=node_id_c, endpoint=endpoint_c)
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
+                    yield b"data: [DONE]\n\n"
+                    task["status"] = "done"
+                    task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    db.update_task(task_id, "done")
+                    return
+
+            served = False
+            for candidate in candidates:
+                node_id_c  = candidate.get("node_id", "cp")
+                endpoint_c = _best_endpoint(candidate)
+                _record_routing_pick(node_id_c)
+                try:
+                    body = json.dumps(stream_data, sort_keys=True).encode()
+                    headers = make_request_headers(_contesto.cp_identity.get('node_id', ''),
+                                        _contesto.cp_identity.get('public_key', ''),
+                                        _contesto.cp_identity.get('_private_key'), body)
+                    headers["Content-Type"] = "application/json"
+                    req = requests.post(f"{endpoint_c}/v1/chat/completions",
+                                        data=body, headers=headers, stream=True,
+                                        timeout=_inference_timeout(stream_data.get("model", "")))
+                except Exception:
+                    continue  # nodo irraggiungibile, prova il prossimo candidato
+
+                if req.status_code == 503:
+                    try:
+                        if req.json().get("error", {}).get("type") == "node_busy_timeout":
+                            push_log('inter_node_message',
+                                     f'stream {task_id}: {node_id_c[:12]} occupato, provo il prossimo',
+                                     status='warn')
+                            continue
+                    except Exception:
+                        pass
+
+                # Da qui in poi ci impegniamo con questo nodo: nessun altro retry.
+                task["node"] = node_id_c
+                db.update_task(task_id, "assigned", node_id=node_id_c, endpoint=endpoint_c)
+                try:
+                    with req as resp:
+                        for chunk in resp.iter_content(chunk_size=None):
+                            if chunk:
+                                yield chunk
+                    task["status"]       = "done"
+                    task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    db.update_task(task_id, "done")
+                    push_log('inter_node_message', f'stream {task_id} done',
+                             source=node_id_c[:12], target='webui', status='success')
+                except Exception as e:
+                    yield ('data: ' + json.dumps({'error': str(e)}, ensure_ascii=False) + '\n\n').encode()
+                    task["status"] = "failed"
+                    db.update_task(task_id, "failed", error=str(e))
+                served = True
+                break
+
+            if served:
+                return
+
+            # Nessun nodo locale utilizzabile (assente o tutti occupati/irraggiungibili).
+            task["node"] = "ollama-direct"
+            db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
+            try:
+                if _native_direct_enabled(model):
+                    # Fallback nativo (/api/chat) per i modelli reasoning
+                    # (elenco in _NATIVE_CHAT_FALLBACK_PATTERNS, estendibile via
+                    # env), usato SOLO quando non c'e' nessun nodo mesh
+                    # disponibile. Anche il body nativo accetta i tool nello
+                    # stesso formato funzione
+                    # dell'API OpenAI, quindi li inoltriamo: senza di essi il
+                    # modello non potrebbe mai chiamare web_search in questo
+                    # percorso (il vecchio ramo li ometteva del tutto).
+                    native = {"model": model, "messages": stream_data.get("messages", []),
+                              "stream": False, "think": bool(stream_data.get("think", False))}
+                    if stream_data.get("tools"):
+                        native["tools"] = stream_data["tools"]
+                    native_resp = _local_model_post(f"{_inference_urls()[0]}/api/chat", json=native,
+                                                timeout=_inference_timeout(model))
+                    native_resp.raise_for_status()
+                    native_message = (native_resp.json().get("message") or {})
+                    if native_message.get("tool_calls"):
+                        # Il modello vuole chiamare un tool. Il percorso nativo
+                        # accetta i tool in INGRESSO (stesso formato OpenAI), ma
+                        # NON regge il formato OpenAI del secondo giro: il tool
+                        # loop rimanda `function.arguments` come STRINGA JSON e
+                        # /api/chat risponde 400 ("Value looks like object, but
+                        # can't find closing '}' symbol"). Era la causa del bug
+                        # "risposta vuota dopo web_search". Per ESEGUIRE davvero
+                        # i tool riusiamo quindi il loop del CP, che qui parla
+                        # con Ollama diretto (sign=False: nessun nodo da
+                        # autenticare). Cosi' anche questo fallback non
+                        # restituisce mai un content vuoto dopo una tool call.
+                        # Verificato su Ollama 0.34.2.
+                        result_json = _run_tool_loop(stream_data, ollama_base)
+                        # Anche questo chunk può portare un tool del client: se il
+                        # loop l'ha passato indietro, il client deve vederlo.
+                        direct_chunk = _chunk_finale(result_json, model, task_id)
+                    else:
+                        direct_chunk = {
+                            "id": f"chatcmpl-{task_id}", "object": "chat.completion.chunk",
+                            "created": int(time.time()), "model": model,
+                            "choices": [{"index": 0, "delta": {
+                                "role": "assistant",
+                                "content": native_message.get("content", "")},
+                                "finish_reason": "stop"}],
+                        }
+                    yield f"data: {json.dumps(direct_chunk, ensure_ascii=False)}\n\n".encode()
+                    yield b"data: [DONE]\n\n"
+                else:
+                    req = _stream_direct(_inference_urls(), stream_data, model)
+                    with req as resp:
+                        resp.raise_for_status()
+                        for chunk in resp.iter_content(chunk_size=None):
+                            if chunk:
+                                yield chunk
+                task["status"]       = "done"
+                task["completed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                db.update_task(task_id, "done")
+                push_log('inter_node_message', f'stream {task_id} done',
+                         source='ollama-direct', target='webui', status='success')
+            except Exception as e:
+                yield ('data: ' + json.dumps({'error': str(e)}, ensure_ascii=False) + '\n\n').encode()
+                task["status"] = "failed"
+                db.update_task(task_id, "failed", error=str(e))
+
+        return Response(stream_with_context(_stream_gen()), headers=_sse_headers())
+
+    # ── NON-STREAM ────────────────────────────────────────────────────────────
+    # Budget TOTALE della richiesta, condiviso da tutta la catena di fallback.
+    # Prima ogni stadio aveva il suo timeout e la catena li SOMMAVA: nodo 180s +
+    # OmniRoute + ollama-direct 180s = oltre tre minuti prima di ammettere il
+    # fallimento. Ora si smette appena il tempo residuo non basta piu' per un
+    # tentativo sensato, e lo si dice esplicitamente.
+    deadline = RequestDeadline()
+    # Scelta esplicita di 🌐 OmniRoute dal menu: salta mesh e federazione,
+    # l'utente ha gia' deciso di voler uscire dalla mesh locale.
+    if omniroute_direct:
+        omni_result = _try_omniroute_fallback(data)
+        if omni_result:
+            _finalize_task(task, task_id, "omniroute", model, prompt, omni_result)
+            push_log('inter_node_message', f'task {task_id} -> omniroute (selezione esplicita)', status='success')
+            return _respond_result(omni_result)
+        task["status"] = "failed"
+        task["error"]  = "OmniRoute non raggiungibile o nessun provider disponibile"
+        db.update_task(task_id, "failed", error=task["error"])
+        return jsonify({"error": {"message": task["error"], "type": "server_error"}}), 502
+
+    candidates = _rank_candidate_nodes(active, pinned_node_id, model=model)
+    for candidate in candidates:
+        node_id  = candidate.get("node_id", "cp")
+        endpoint = _best_endpoint(candidate)
+        _record_routing_pick(node_id)
+        task["node"] = node_id
+        db.update_task(task_id, "assigned", node_id=node_id, endpoint=endpoint)
+        push_log('inter_node_message', f'task {task_id} -> {node_id[:12]}',
+                 f'model={model}', source='webui', target=node_id[:12], status='pending')
+        try:
+            result_json = _run_tool_loop(data, endpoint, sign=True, node_id=node_id)
+        except NodeBusyError:
+            push_log('inter_node_message', f'task {task_id}: {node_id[:12]} occupato, provo il prossimo',
+                     status='warn', target=node_id[:12])
+            continue
+        except Exception as e:
+            push_log('inter_node_message', f'task {task_id} fallback ollama', str(e), status='warn')
+            break
+        if isinstance(result_json, dict) and result_json.get("error"):
+            push_log('inter_node_message', f'task {task_id} nodo {node_id[:12]} errore',
+                     str(result_json.get("error"))[:160], status='warn')
+            continue
+        _finalize_task(task, task_id, node_id, model, prompt, result_json)
+        return _respond_result(result_json)
+
+    # Local-first even while workers are still registering after startup.
+    # A remote fallback must not delay an available local model by a minute.
+    if not deadline.allows():
+        return _deadline_exceeded(task, task_id, deadline)
+    task["node"] = "ollama-direct"
+    db.update_task(task_id, "assigned", node_id="ollama-direct", endpoint=ollama_base)
+    try:
+        direct_result = _run_tool_loop(data, _inference_urls(), sign=False)
+    except Exception as e:
+        direct_result = {"error": {"message": str(e), "type": "server_error"}}
+    if not _is_error_payload(direct_result):
+        _finalize_task(task, task_id, "ollama-direct", model, prompt, direct_result)
+        return _respond_result(direct_result)
+
+    # Local inference failed: federation may still serve the request.
+    if not deadline.allows():
+        return _deadline_exceeded(task, task_id, deadline)
+    fed_result, fed_peer = _try_federated_execution(prompt, model)
+    if fed_result:
+        node_label = f"federated:{fed_peer['peer_id'][:12]}"
+        inner_result = fed_result.get("result", fed_result)
+        _finalize_task(task, task_id, node_label, model, prompt, inner_result)
+        push_log('inter_node_message', f'task {task_id} federato -> {fed_peer.get("label") or node_label}',
+                 status='success')
+        return _respond_result(inner_result)
+
+    # Mesh, direct inference and federation failed: try the external provider.
+    if not deadline.allows():
+        return _deadline_exceeded(task, task_id, deadline)
+    omni_result = _try_omniroute_fallback(data)
+    if omni_result:
+        _finalize_task(task, task_id, "omniroute", model, prompt, omni_result)
+        push_log('inter_node_message', f'task {task_id} -> omniroute (fallback esterno)', status='success')
+        return _respond_result(omni_result)
+
+    _finalize_task(task, task_id, "ollama-direct", model, prompt, direct_result)
+    return _respond_result(direct_result)
