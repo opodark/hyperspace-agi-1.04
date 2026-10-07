@@ -37,7 +37,14 @@ COPPIE = {
     "sogni_baseline.py": "sogni.sh",
     "forge_baseline.py": "forge.sh",
     "memoria_baseline.py": "memoria.sh",
+    # Il sogno generato NON sta fra le baseline che girano da sole: accende i
+    # sogni e ci mette un modello finto, quindi costa un avvio del server e un
+    # processo in piu'. Va tenuta, ma fuori dal giro automatico.
+    "sogni_genera.py": "sogni_genera.sh",
 }
+
+# Queste non girano da sole: il resto le usa solo perche' esistono su disco.
+NON_NEL_GIRO = {"sogni_genera.sh"}
 
 
 def _rotte_dichiarate() -> set:
@@ -169,6 +176,35 @@ class GliHarnessTests(unittest.TestCase):
         self.assertIsNotNone(genera, "il token di amministrazione non e' generato")
         self.assertGreaterEqual(int(genera.group(1)), 32,
                                 "token troppo corto: ogni route protetta risponderebbe 401")
+
+    def test_ogni_harness_isola_i_dati(self):
+        """Nessun harness puo' scrivere dove vive la persona di sviluppo.
+
+        Il caso pratico: il journal dei sogni sta nella directory del FILE PERSONA,
+        che non e' il diario. Un harness che lo ignora legge e scrive i sogni
+        pendenti della macchina, il dominio si rifiuta di sognare ("gia in
+        attesa di revisione") e la baseline si mette a segnalare un difetto del
+        percorso di generazione che non esiste. Piu' grave: il test rovina dati
+        veri. `_comune.sh` ci mette gia' DB, memoria, diario e inbox; qui si
+        controlla che nessuno si rimetta a usare un percorso fisso.
+        """
+        comuni = (HARNESS / "_comune.sh").read_text(encoding="utf-8")
+        for nome in sorted(COPPIE.values()):
+            testo = (HARNESS / nome).read_text(encoding="utf-8")
+            with self.subTest(harness=nome):
+                for variabile in ("PERSONA_FILE", "FEED_DIARIO_FILE", "MEMORY_FILE"):
+                    se_usata = f"{variabile}=" in testo or f"{variabile}=" in comuni
+                    if not se_usata:
+                        continue
+                    # o la imposta l'harness, o arriva gia' isolata dal comune
+                    if f"{variabile}=" not in testo:
+                        continue
+                    riga = next((r for r in testo.splitlines()
+                                 if f"{variabile}=" in r and not r.strip().startswith("#")),
+                                "")
+                    isolata = "@BASE@" in riga or '"$BASE"' in riga or "$BASE/" in riga
+                    self.assertTrue(isolata, f"{nome}: {variabile} punta fuori "
+                                              f"dalla directory della run: {riga.strip()!r}")
 
 
 class LeRotteCiteTests(unittest.TestCase):

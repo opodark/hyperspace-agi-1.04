@@ -16,6 +16,9 @@ HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RADICE="$(cd "$HARNESS_DIR/../.." && pwd)"
 PY="$RADICE/.venv/bin/python3"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8085}"
+# Dove mettere i log e i file che un harness produce a mano. Non e' 'BASE', che
+# cambia a ogni esecuzione: qui la stessa directory serve a piu' harness.
+T="${TMPDIR:-/tmp}"
 ADMIN_TOKEN="$(printf 'a%.0s' {1..40})"
 CANALE_CLIENTI="${CANALE_CLIENTI:-com4=token-di-prova-lungo-000000000000}"
 BASE=""
@@ -30,27 +33,44 @@ BASE=""
 #
 # Uso:  avvia_server <nome-base> [VAR=valore ...]
 #
-# Nelle variabili si puo' scrivere `@BASE@` al posto della directory temporanea:
-# la espande qui, perche' il chiamante la valuta PRIMA che `BASE` esista, e un
-# `$BASE` scritto fuori diventerebbe `/forge` — che in un container e' la root in
+# Nelle variabili si puo' scrivere '@BASE@' al posto della directory temporanea:
+# la espande qui, perche' il chiamante la valuta PRIMA che 'BASE' esista, e un
+# '$BASE' scritto fuori diventerebbe '/forge' — che in un container e' la root in
 # sola lettura, e il sintomo e' un 500 che non ha niente a che fare con il forge.
 avvia_server() {
   local nome="$1"; shift
   BASE="$(mktemp -d "${TMPDIR:-/tmp}/hyperspace-$nome-XXXXXX")"
   local impostate=() v
   for v in "$@"; do impostate+=("${v//@BASE@/$BASE}"); done
-  ( cd "$RADICE" && env PYTHONPATH=.:control-plane \
+  # NOTA: nessun commento DENTRO il blocco `env ... \`. Il backslash unisce la
+  # riga alla successiva, quindi un commento li' dentro tronca il comando da quel
+  # punto in poi: le variabili seguenti semplicemente non arrivano al server, che
+  # ripiega sui suoi default e non lo dice. Successe tre volte in una giornata.
+  #
+  # `CONVERSATION_FILE` serve perche' il suo default e' `data/conversations.json`
+  # di sviluppo: senza questo ogni harness riscrive la cronologia reale, e la
+  # baseline del chat dipende da cosa hai scritto tu l'ultima volta.
+  #
+  # I default vanno PRIMA di `"${impostate[@]}"`: con `env`, una variabile
+  # ripetuta prende il PRIMO valore, quindi metterli dopo renderebbe impossibile
+  # a un harness sovrascriverli — e il dominio sembrerebbe ignorare le sue
+  # impostazioni senza dire perchè.
+  # Su richiesta: quale ambiente arriva davvero al server. Serve quando un
+  # dominio "ignora le sue impostazioni" — di solito è una variabile rimasta
+  # indietro, e questa stampa lo dice in un colpo.
+  [ -n "${HARNESS_VERBOSE:-}" ] && printf '  env: %s\n' "${impostate[*]}" >&2
+  ( cd "$RADICE" && env "${impostate[@]}" PYTHONPATH=.:control-plane \
       NETWORK_ADMIN_TOKEN="$ADMIN_TOKEN" \
       INSTAGRAM_REPLY_OUTBOX_FILE="$BASE/replies.json" \
       INSTAGRAM_VIP_FILE="$BASE/vips.json" \
       INSTAGRAM_MEMORY_FILE="$BASE/mem.json" \
+      CONVERSATION_FILE="$BASE/conversations.json" \
       FEED_DIARIO_FILE="$BASE/diario.json" \
       IMAGE_QUEUE_FILE="$BASE/queue.json" \
       IDENTITY_FILE="$BASE/id.json" \
       INSTAGRAM_INBOX_POLL_ENABLED=false \
       CHANNEL_CLIENTS="$CANALE_CLIENTI" \
       DB_PATH="$BASE/db.sqlite3" \
-      "${impostate[@]}" \
       "$PY" control-plane/main.py > "$BASE/server.log" 2>&1 & )
   aspetta_server
 }

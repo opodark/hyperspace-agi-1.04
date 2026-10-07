@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # tests/harness/memoria.sh — la memoria: archivio locale o Hermes.
 #
-# Gira con il backend `legacy` (il default), perché è quello che non ha bisogno
+# Gira con il backend 'legacy' (il default), perché è quello che non ha bisogno
 # di un archivio esterno. Il ramo Hermes prende strade diverse nelle stesse
 # rotte, e i messaggi che tornano dicono quale ha risposto.
 

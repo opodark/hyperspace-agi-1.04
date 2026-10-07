@@ -43,6 +43,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPLY = os.environ.get("MOCK_REPLY", "risposta dal modello finto")
@@ -53,6 +54,15 @@ TOOL = os.environ.get("MOCK_TOOL", "").strip()
 # catalogo del CP sarebbero indistinguibili.
 TOOL_DA_CLIENTE = os.environ.get("MOCK_TOOL_CLIENTE", "tool_di_prova_client")
 MODEL = os.environ.get("MOCK_MODEL", "modello-finto")
+
+
+def _ora_nativa() -> str:
+    """L'orario nella forma di Ollama nativo: RFC3339, non epoch.
+
+    `to_openai_chat` non lo guarda, ma un finto che risponde con il
+    numero invece della stringa e' un finto che mente sulla forma.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _pezzo(delta: dict, finish=None) -> bytes:
@@ -135,6 +145,21 @@ class Handler(BaseHTTPRequestHandler):
         messaggio = {"role": "assistant", "content": REPLY}
         if thinking:
             messaggio["reasoning"] = "ragionamento del modello finto"
+        if self.path.rstrip("/") == "/api/chat":
+            # La forma NATIVA di Ollama, che e' diversa dalla OpenAI: `message` in
+            # cima, non dentro `choices`. Il control-plane la chiama quando il
+            # payload chiede `think: false`, e poi la riporta a forma OpenAI con
+            # `ollama_native.to_openai_chat`, che legge `message` in cima.
+            #
+            # Rispondere qui con la forma OpenAI era un difetto di questo finto, non
+            # del control-plane: la conversione leggeva un campo assente, tornava
+            # una risposta vuota, e il chiamante — il riflessione notturno, che da un
+            # sogno vuol dire una scena — si accorgeva solo di un `last_status` a
+            # vuoto e nessun errore. Trovato solo svegliando un sogno davvero.
+            self._json({"model": MODEL, "created_at": _ora_nativa(),
+                        "message": messaggio, "done": True,
+                        "done_reason": "stop"})
+            return
         self._json({"id": "chatcmpl-finto", "object": "chat.completion",
                     "created": int(time.time()), "model": MODEL,
                     "choices": [{"index": 0, "message": messaggio,

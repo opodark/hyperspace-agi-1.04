@@ -1,0 +1,18 @@
+{
+  "dopo": {
+    "body": "{\"dream\":{\"enabled\":true,\"error\":\"\",\"idle_seconds\":86400,\"last_date\":\"2026-10-07\",\"last_run\":\"2026-10-07T11:02:03.133774+02:00\",\"last_status\":\"candidate\",\"nome\":\"HyperSpace\",\"pending_review\":1,\"running\":false,\"window\":[4,7]},\"dreams\":[{\"created_at\":\"2026-10-07T11:02:03.133774+02:00\",\"discarded\":[],\"id\":\"personadream-0a0d208e57ef256e4770\",\"material\":{\"memoria\":0,\"osservazioni\":0},\"proposals\":[{\"id\":\"prop-7d10a29f1d4e\",\"kind\":\"self_observation\",\"text\":\"scena: sono in una stanza alta con una finestra socchiusa, e noto che preferisco cosi disegno: una figura vista di spalle\"}],\"raw_excerpt\":\"scena: sono in una stanza alta con una finestra socchiusa, e noto che preferisco cosi disegno: una figura vista di spalle\",\"reviews\":[],\"schema_version\":1,\"status\":\"candidate\",\"type\":\"persona_dream\"}],\"max_proposals_per_dream\":3,\"ok\":true}\n",
+    "status": 200
+  },
+  "prima": {
+    "body": "{\"dream\":{\"enabled\":true,\"error\":\"\",\"idle_seconds\":86400,\"last_date\":\"\",\"last_run\":null,\"last_status\":\"never\",\"nome\":\"HyperSpace\",\"pending_review\":0,\"running\":false,\"window\":[4,7]},\"dreams\":[],\"max_proposals_per_dream\":3,\"ok\":true}\n",
+    "status": 200
+  },
+  "run": {
+    "body": "{\"dream\":{\"enabled\":true,\"error\":\"\",\"idle_seconds\":86400,\"last_date\":\"2026-10-07\",\"last_run\":\"2026-10-07T11:02:03.133774+02:00\",\"last_status\":\"candidate\",\"nome\":\"HyperSpace\",\"pending_review\":1,\"running\":false,\"window\":[4,7]},\"ok\":true,\"report\":{\"created_at\":\"2026-10-07T11:02:03.133774+02:00\",\"discarded\":[],\"id\":\"personadream-0a0d208e57ef256e4770\",\"material\":{\"memoria\":0,\"osservazioni\":0},\"proposals\":[{\"id\":\"prop-7d10a29f1d4e\",\"kind\":\"self_observation\",\"text\":\"scena: sono in una stanza alta con una finestra socchiusa, e noto che preferisco cosi disegno: una figura vista di spalle\"}],\"raw_excerpt\":\"scena: sono in una stanza alta con una finestra socchiusa, e noto che preferisco cosi disegno: una figura vista di spalle\",\"reviews\":[],\"schema_version\":1,\"status\":\"candidate\",\"type\":\"persona_dream\"}}\n",
+    "status": 200
+  },
+  "run_senza_token": {
+    "body": "{\"error\":\"Token revisione sogni non valido\"}\n",
+    "status": 401
+  }
+}
